@@ -19,12 +19,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Verify GitLab token is present
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          if [ -z "$GITLAB_TOKEN" ]; then
+            echo "GITLAB_TOKEN secret is not set or empty" >&2
+            exit 1
+          fi
+          if [ "${GITLAB_TOKEN#glpat-}" = "$GITLAB_TOKEN" ]; then
+            echo "GITLAB_TOKEN does not look like a GitLab personal access token (should start with glpat-)" >&2
+            exit 1
+          fi
+          echo "GITLAB_TOKEN is set"
       - name: Clone sibling repositories
         env:
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
         run: |
           mkdir -p ../resources
-          git clone "https://oauth2:${GITLAB_TOKEN}@gitlab.fbk.eu/aleph/i-voting/evoting-rs.git" ../resources/evoting-rs
+          # Trim accidental surrounding quotes/spaces
+          TOKEN="$(echo "$GITLAB_TOKEN" | sed 's/^["'"'"']*//;s/["'"'"']*$//')"
+          # Use .netrc for authentication to avoid URL escaping issues
+          mkdir -p "$HOME"
+          cat > "$HOME/.netrc" <<EOF
+          machine gitlab.fbk.eu
+          login oauth2
+          password ${TOKEN}
+          EOF
+          chmod 600 "$HOME/.netrc"
+          git clone https://gitlab.fbk.eu/aleph/i-voting/evoting-rs.git ../resources/evoting-rs
           git clone https://github.com/elenabortolameotti/sunlight_test.git ../resources/sunlight_test
           cd ../resources/sunlight_test
           git checkout referendum-poc-wbb
@@ -55,12 +78,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Verify GitLab token is present
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          if [ -z "$GITLAB_TOKEN" ]; then
+            echo "GITLAB_TOKEN secret is not set or empty" >&2
+            exit 1
+          fi
+          if [ "${GITLAB_TOKEN#glpat-}" = "$GITLAB_TOKEN" ]; then
+            echo "GITLAB_TOKEN does not look like a GitLab personal access token (should start with glpat-)" >&2
+            exit 1
+          fi
+          echo "GITLAB_TOKEN is set"
       - name: Clone sibling repositories
         env:
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
         run: |
           mkdir -p ../resources
-          git clone "https://oauth2:${GITLAB_TOKEN}@gitlab.fbk.eu/aleph/i-voting/evoting-rs.git" ../resources/evoting-rs
+          TOKEN="$(echo "$GITLAB_TOKEN" | sed 's/^["'"'"']*//;s/["'"'"']*$//')"
+          cat > "$HOME/.netrc" <<EOF
+          machine gitlab.fbk.eu
+          login oauth2
+          password ${TOKEN}
+          EOF
+          chmod 600 "$HOME/.netrc"
+          git clone https://gitlab.fbk.eu/aleph/i-voting/evoting-rs.git ../resources/evoting-rs
           git clone https://github.com/elenabortolameotti/sunlight_test.git ../resources/sunlight_test
           cd ../resources/sunlight_test
           git checkout referendum-poc-wbb
