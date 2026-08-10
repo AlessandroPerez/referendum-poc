@@ -1,0 +1,71 @@
+name: CI
+
+on: [push, pull_request]
+
+env:
+  CARGO_TERM_COLOR: always
+
+# This repository is the Rust crate. It path-depends on sibling repositories
+# in ../resources/ (evoting-rs and sunlight_test), which are cloned before
+# building and testing.
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clone sibling repositories
+        run: |
+          mkdir -p ../resources
+          git clone https://gitlab.fbk.eu/aleph/i-voting/evoting-rs.git ../resources/evoting-rs
+          git clone https://github.com/elenabortolameotti/sunlight_test.git ../resources/sunlight_test
+          cd ../resources/sunlight_test
+          git checkout referendum-poc-wbb
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install sqlite3 (WBB checkpoints DB)
+        run: sudo apt-get update && sudo apt-get install -y sqlite3
+      - name: cargo test
+        run: cargo test --all-targets
+
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clone sibling repositories
+        run: |
+          mkdir -p ../resources
+          git clone https://gitlab.fbk.eu/aleph/i-voting/evoting-rs.git ../resources/evoting-rs
+          git clone https://github.com/elenabortolameotti/sunlight_test.git ../resources/sunlight_test
+          cd ../resources/sunlight_test
+          git checkout referendum-poc-wbb
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - run: cargo audit

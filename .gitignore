@@ -1,0 +1,17 @@
+# Build artifacts
+/target/
+
+# Local environment overrides may contain secrets (style guide §07)
+configuration/local.yaml
+configuration/production.yaml
+
+# Generated TLS material (D16: produced by setup-ceremony)
+certs/
+
+# Local WBB runtime state
+*.db
+*.db-shm
+*.db-wal
+
+# Validation reports are kept outside the published code repository
+docs/validation/

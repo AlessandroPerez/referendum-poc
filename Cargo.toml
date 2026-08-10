@@ -1,0 +1,105 @@
+[package]
+name = "referendum-poc"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+description = "Referendum proof-of-concept of the Vote App protocol (PhD thesis ch. 3 + §3.11) on evoting-rs"
+
+# Style guide §01: slim binaries, fat library. All logic lives in the lib;
+# every binary below is a thin entrypoint delegating to `referendum_poc`.
+[lib]
+name = "referendum_poc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "er-server"
+path = "src/bin/er_server.rs"
+
+[[bin]]
+name = "rt-server"
+path = "src/bin/rt_server.rs"
+
+[[bin]]
+name = "tt-server"
+path = "src/bin/tt_server.rs"
+
+[[bin]]
+name = "bb-server"
+path = "src/bin/bb_server.rs"
+
+[[bin]]
+name = "dip-server"
+path = "src/bin/dip_server.rs"
+
+[[bin]]
+name = "ns-server"
+path = "src/bin/ns_server.rs"
+
+[[bin]]
+name = "voter-server"
+path = "src/bin/voter_server.rs"
+
+[[bin]]
+name = "wbb-ui"
+path = "src/bin/wbb_ui.rs"
+
+[[bin]]
+name = "setup-ceremony"
+path = "src/bin/setup_ceremony.rs"
+
+[[bin]]
+name = "election-admin"
+path = "src/bin/election_admin.rs"
+
+[[bin]]
+name = "referendum-auditor"
+path = "src/bin/referendum_auditor.rs"
+
+[dependencies]
+# evoting cryptographic stack (vendored path dependencies)
+evoting = { path = "../resources/evoting-rs" }
+dlog-group = { path = "../resources/evoting-rs/pet-crypto-primitives-rs/crates/dlog-group" }
+dlog-sigma-primitives = { path = "../resources/evoting-rs/pet-crypto-primitives-rs/crates/dlog-sigma-primitives" }
+
+# Web framework + async runtime (style guide §06)
+axum = { version = "0.7", features = ["macros"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
+tower-http = { version = "0.5", features = ["trace", "fs"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_cbor = "0.10"
+serde-aux = "4"
+
+# Error handling (style guide §03)
+thiserror = "1"
+anyhow = "1"
+
+# Telemetry (style guide §04)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["registry", "env-filter"] }
+tracing-bunyan-formatter = "0.3"
+tracing-log = "0.2"
+
+# Configuration & secrets (style guide §07/§09)
+config = "0.14"
+secrecy = { version = "0.8", features = ["serde"] }
+
+# Cryptographic helpers (WBB signing, CAT, TLS material)
+rand = "0.8"
+rand_chacha = "0.3.1"
+sha2 = "0.10"
+sha3 = "0.10"
+ed25519-dalek = "2.2"
+base64 = "0.22"
+rcgen = "0.13"
+p256 = { version = "0.13", features = ["arithmetic", "pkcs8", "pem"] }
+
+[dev-dependencies]
+claims = "0.8"
+tempfile = "3"
+pretty_assertions = "1"
