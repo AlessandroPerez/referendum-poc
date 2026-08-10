@@ -8,6 +8,10 @@ env:
 # This repository is the Rust crate. It path-depends on sibling repositories
 # in ../resources/ (evoting-rs and sunlight_test), which are cloned before
 # building and testing.
+#
+# evoting-rs is hosted on a private GitLab instance, so CI needs a GitLab
+# personal/group access token stored in the GITLAB_TOKEN secret. Configure it
+# at: Settings -> Secrets and variables -> Actions -> New repository secret.
 
 jobs:
   test:
@@ -16,9 +20,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Clone sibling repositories
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
         run: |
           mkdir -p ../resources
-          git clone https://gitlab.fbk.eu/aleph/i-voting/evoting-rs.git ../resources/evoting-rs
+          git clone "https://oauth2:${GITLAB_TOKEN}@gitlab.fbk.eu/aleph/i-voting/evoting-rs.git" ../resources/evoting-rs
           git clone https://github.com/elenabortolameotti/sunlight_test.git ../resources/sunlight_test
           cd ../resources/sunlight_test
           git checkout referendum-poc-wbb
@@ -27,6 +33,8 @@ jobs:
           go-version: "1.24"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
       - name: Install sqlite3 (WBB checkpoints DB)
         run: sudo apt-get update && sudo apt-get install -y sqlite3
       - name: cargo test
@@ -48,9 +56,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Clone sibling repositories
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
         run: |
           mkdir -p ../resources
-          git clone https://gitlab.fbk.eu/aleph/i-voting/evoting-rs.git ../resources/evoting-rs
+          git clone "https://oauth2:${GITLAB_TOKEN}@gitlab.fbk.eu/aleph/i-voting/evoting-rs.git" ../resources/evoting-rs
           git clone https://github.com/elenabortolameotti/sunlight_test.git ../resources/sunlight_test
           cd ../resources/sunlight_test
           git checkout referendum-poc-wbb
@@ -58,6 +68,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
       - run: cargo clippy --all-targets -- -D warnings
 
   audit:

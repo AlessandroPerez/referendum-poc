@@ -94,7 +94,7 @@ The repository includes a GitHub Actions workflow (`.github/workflows/ci.yml`) t
 - `cargo test --all-targets`
 - `cargo audit`
 
-The CI job clones the sibling repositories into `../resources/` before building.
+The CI job clones the sibling repositories into `../resources/` before building. Because `evoting-rs` is hosted on a private GitLab instance, the workflow expects a `GITLAB_TOKEN` secret (Settings -> Secrets and variables -> Actions -> New repository secret) with read access to the repository.
 
 ## Architecture overview
 
