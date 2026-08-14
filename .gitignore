@@ -1,7 +1,7 @@
 # Build artifacts
 /target/
 
-# Local environment overrides may contain secrets (style guide §07)
+# Local environment overrides may contain secrets
 configuration/local.yaml
 configuration/production.yaml
 
@@ -13,5 +13,5 @@ certs/
 *.db-shm
 *.db-wal
 
-# Validation reports are kept outside the published code repository
+# Validation
 docs/validation/
