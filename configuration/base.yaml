@@ -23,6 +23,25 @@ wbb:
 
 peers: []
 
+dip:
+  voters:
+    - id: VOTER-001
+      name: Alice Anderson
+    - id: VOTER-002
+      name: Bob Brown
+    - id: VOTER-003
+      name: Carol Clark
+    - id: VOTER-004
+      name: David Davis
+    - id: VOTER-005
+      name: Eve Evans
+    - id: VOTER-006
+      name: Frank Foster
+    - id: VOTER-007
+      name: Grace Green
+    - id: VOTER-008
+      name: Henry Harris
+
 election:
   n_rt: 3
   t_rt: 2

@@ -2,6 +2,8 @@
 //! `tests/` subdirectory, helpers in a sibling module).
 
 mod helpers;
+mod m2_smoke;
+mod m3_integration;
 
 #[test]
 fn harness_loads() {

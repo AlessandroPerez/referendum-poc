@@ -4,8 +4,13 @@
 
 use anyhow::Context;
 
-/// Placeholder entrypoint used by the binary targets until the corresponding
-/// milestone lands. Initializes telemetry and exits successfully.
+pub mod common;
+pub mod dip;
+pub mod er;
+pub mod ns;
+
+/// Placeholder entrypoint used by binary targets whose milestone has not landed
+/// yet. Initializes telemetry and exits successfully.
 pub async fn run_stub(service_name: &'static str) -> anyhow::Result<()> {
     crate::telemetry::init_subscriber(crate::telemetry::get_subscriber(
         service_name.into(),

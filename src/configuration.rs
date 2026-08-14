@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use secrecy::Secret;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_aux::field_attributes::deserialize_number_from_string;
 
 /// Root settings, shared shape for every service (per-service extras are
@@ -23,6 +23,19 @@ pub struct Settings {
     #[serde(default)]
     pub peers: Vec<PeerSettings>,
     pub election: ElectionSettings,
+    pub dip: DipSettings,
+    #[serde(default)]
+    pub _ceremony: CeremonyPaths,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CeremonyPaths {
+    #[serde(default)]
+    pub seed_bin: String,
+    #[serde(default)]
+    pub sunlight_yaml: String,
+    #[serde(default)]
+    pub election_context: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -51,7 +64,7 @@ pub struct SeedSettings {
 
 /// Deterministic logical clock (D4/§9). Timestamps in artifacts are
 /// `base_ms + tick * tick_ms`; never wall-clock.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClockSettings {
     #[serde(deserialize_with = "deserialize_number_from_string")]
     pub base_ms: u64,
@@ -73,7 +86,18 @@ pub struct PeerSettings {
     pub base_url: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DipSettings {
+    pub voters: Vec<DipVoter>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DipVoter {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElectionSettings {
     #[serde(deserialize_with = "deserialize_number_from_string")]
     pub n_rt: usize,
