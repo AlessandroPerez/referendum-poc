@@ -60,6 +60,8 @@ jobs:
           workspaces: "."
       - name: Install sqlite3 (WBB checkpoints DB)
         run: sudo apt-get update && sudo apt-get install -y sqlite3
+      - name: Clean cached path-dependency artifacts
+        run: cargo clean -p evoting -p dlog-sigma-primitives -p dlog-group
       - name: cargo test
         run: cargo test --all-targets
 
@@ -113,6 +115,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "."
+      - name: Clean cached path-dependency artifacts
+        run: cargo clean -p evoting -p dlog-sigma-primitives -p dlog-group
       - run: cargo clippy --all-targets -- -D warnings
 
   audit:
