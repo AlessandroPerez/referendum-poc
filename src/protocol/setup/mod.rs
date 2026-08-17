@@ -122,6 +122,7 @@ mod tests {
             n_bb: 2,
             n_voters: 8,
             n_acc: 10,
+            t_prime: 2,
             max_casts_per_voter: 10,
         }
     }

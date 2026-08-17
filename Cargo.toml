@@ -99,6 +99,7 @@ rand_chacha = "0.3.1"
 rand_core = "0.6"
 sha2 = "0.10"
 sha3 = "0.10"
+constant_time_eq = "0.3"
 ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 base64 = "0.22"
 hex = "0.4"

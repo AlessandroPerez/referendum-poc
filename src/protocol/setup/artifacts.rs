@@ -12,6 +12,7 @@ use std::process::Command;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use curve25519_dalek::scalar::Scalar;
 use secrecy::ExposeSecret;
+use serde::de::Error as DeError;
 
 use crate::actors::common::actor_signing_key;
 use crate::configuration::{DipSettings, ElectionSettings, Settings};
@@ -26,6 +27,8 @@ pub struct ArtifactPaths {
     pub ca_pem: PathBuf,
     pub seed_bin: PathBuf,
     pub election_context_json: PathBuf,
+    pub rt_public_key_json: PathBuf,
+    pub tt_public_key_json: PathBuf,
     pub sunlight_yaml: PathBuf,
     pub checkpoints_db: PathBuf,
     pub service_configs: HashMap<String, PathBuf>,
@@ -65,11 +68,21 @@ pub fn write_artifacts(
     let seed_bin = output_dir.join("seed.bin");
     master_seed.expose(|seed| fs::write(&seed_bin, seed.as_slice()))?;
 
-    // 2. Election context JSON.
+    // 2. Election context JSON + public keys needed by services.
     let election_context_json = output_dir.join("election_context.json");
     fs::write(
         &election_context_json,
         serde_json::to_string_pretty(&ceremony.election_context)?,
+    )?;
+    let rt_public_key_json = output_dir.join("rt_public_key.json");
+    fs::write(
+        &rt_public_key_json,
+        serde_json::to_string_pretty(&ceremony.rt_pk)?,
+    )?;
+    let tt_public_key_json = output_dir.join("tt_public_key.json");
+    fs::write(
+        &tt_public_key_json,
+        serde_json::to_string_pretty(&ceremony.master_tt_pk)?,
     )?;
 
     // 3. Cluster CA + service certs. The CA and every service key are
@@ -100,6 +113,11 @@ pub fn write_artifacts(
         let signing_key_path = output_dir.join(format!("{name}-signing-key.bin"));
         fs::write(&signing_key_path, signing_key.to_bytes())?;
         service_signing_keys.insert(name.clone(), signing_key_path);
+
+        // Per-service bearer token for internal endpoint authentication.
+        let service_token = derive_service_token(master_seed, name);
+        let service_token_path = output_dir.join(format!("{name}-service-token.txt"));
+        fs::write(&service_token_path, service_token.expose_secret())?;
     }
 
     // ER admin token is a separate secret file.
@@ -146,6 +164,11 @@ pub fn write_artifacts(
         service_configs.insert(name.clone(), path);
     }
 
+    // 5.5 Copy the base configuration into the ceremony directory with
+    // absolute paths so that `election-admin -c <output_dir>` works without
+    // further environment overrides.
+    write_self_contained_base_config(output_dir, base_settings, host)?;
+
     // 6. DKG share files.
     let mut rt_share_files = Vec::new();
     for (i, rt) in ceremony.rt_tellers.iter().enumerate() {
@@ -188,6 +211,8 @@ pub fn write_artifacts(
         ca_pem,
         seed_bin,
         election_context_json,
+        rt_public_key_json,
+        tt_public_key_json,
         sunlight_yaml,
         checkpoints_db,
         service_configs,
@@ -230,6 +255,16 @@ fn derive_admin_token(master_seed: &MasterSeed) -> secrecy::SecretString {
     secrecy::SecretString::new(hex::encode(hasher.finalize()))
 }
 
+/// Deterministic service bearer token derived from the master seed.
+fn derive_service_token(master_seed: &MasterSeed, service_name: &str) -> secrecy::SecretString {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    master_seed.expose(|seed| hasher.update(seed));
+    hasher.update(service_name.as_bytes());
+    hasher.update(b"service-token");
+    secrecy::SecretString::new(hex::encode(hasher.finalize()))
+}
+
 fn service_names(settings: &ElectionSettings) -> Vec<(String, String)> {
     let mut names = vec![("er".to_string(), "er".to_string())];
     names.push(("dip".to_string(), "dip".to_string()));
@@ -263,6 +298,67 @@ fn service_port(name: &str) -> u16 {
         "pm" => 8040,
         _ => 9000,
     }
+}
+
+/// Write a copy of `configuration/base.yaml` into `<output_dir>/configuration/`
+/// with absolute TLS paths and a concrete WBB URL. This makes the ceremony
+/// output self-contained: `election-admin -c <output_dir>` loads without
+/// `APP_TLS__CA_PEM` overrides.
+fn write_self_contained_base_config(
+    output_dir: &Path,
+    base_settings: &Settings,
+    host: &str,
+) -> Result<(), ArtifactError> {
+    let config_dir = output_dir.join("configuration");
+    fs::create_dir_all(&config_dir)?;
+
+    let mut value: serde_yaml::Value =
+        serde_yaml::from_slice(include_bytes!("../../../configuration/base.yaml"))?;
+    let mapping = value
+        .as_mapping_mut()
+        .ok_or_else(|| ArtifactError::Yaml(DeError::custom("base.yaml root is not a mapping")))?;
+
+    let make_absolute = |rel: &str| output_dir.join(rel).display().to_string();
+
+    if let Some(tls) = mapping.get_mut(serde_yaml::Value::String("tls".to_string())) {
+        if let Some(tls_map) = tls.as_mapping_mut() {
+            tls_map.insert(
+                serde_yaml::Value::String("cert_pem".to_string()),
+                serde_yaml::Value::String(make_absolute("cert.pem")),
+            );
+            tls_map.insert(
+                serde_yaml::Value::String("key_pem".to_string()),
+                serde_yaml::Value::String(make_absolute("key.pem")),
+            );
+            tls_map.insert(
+                serde_yaml::Value::String("ca_pem".to_string()),
+                serde_yaml::Value::String(make_absolute("ca.pem")),
+            );
+        }
+    }
+
+    if let Some(wbb) = mapping.get_mut(serde_yaml::Value::String("wbb".to_string())) {
+        if let Some(wbb_map) = wbb.as_mapping_mut() {
+            wbb_map.insert(
+                serde_yaml::Value::String("base_url".to_string()),
+                serde_yaml::Value::String(format!("https://{host}:8090/wbb")),
+            );
+        }
+    }
+
+    // Ensure the election block contains the inner threshold. If the bundled
+    // base.yaml already has it this is a no-op.
+    if let Some(election) = mapping.get_mut(serde_yaml::Value::String("election".to_string())) {
+        if let Some(election_map) = election.as_mapping_mut() {
+            election_map.insert(
+                serde_yaml::Value::String("t_prime".to_string()),
+                serde_yaml::Value::Number(base_settings.election.t_prime.into()),
+            );
+        }
+    }
+
+    fs::write(config_dir.join("base.yaml"), serde_yaml::to_string(&value)?)?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

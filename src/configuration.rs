@@ -113,6 +113,9 @@ pub struct ElectionSettings {
     pub n_voters: usize,
     #[serde(deserialize_with = "deserialize_number_from_string")]
     pub n_acc: usize,
+    /// Inner RT threshold `t'_RT` used by the ACC generator (D11).
+    #[serde(deserialize_with = "deserialize_number_from_string")]
+    pub t_prime: usize,
     #[serde(deserialize_with = "deserialize_number_from_string")]
     pub max_casts_per_voter: usize,
 }

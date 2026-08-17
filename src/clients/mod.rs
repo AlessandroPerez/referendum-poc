@@ -4,4 +4,6 @@
 //! Implemented per roadmap: `wbb` (M2), `er`/`dip`/`ns` (M3), `rt`/`tt` (M4),
 //! `bb`/`voter` (M5–M6).
 
+pub mod rt;
+pub mod tt;
 pub mod wbb;

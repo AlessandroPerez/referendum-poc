@@ -5,6 +5,7 @@
 //! `merkle` (M3), `enrollment` (M5), `cat`/`voting` (M6), `pin_management`
 //! (M7), `tally`/`audit` (M8).
 
+pub mod acc;
 pub mod clock;
 pub mod merkle;
 pub mod rng;
