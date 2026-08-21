@@ -11,6 +11,7 @@ pub mod er;
 pub mod ns;
 pub mod rt;
 pub mod tt;
+pub mod voter;
 
 /// Placeholder entrypoint used by binary targets whose milestone has not landed
 /// yet. Initializes telemetry and exits successfully.

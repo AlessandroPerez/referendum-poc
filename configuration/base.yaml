@@ -21,9 +21,22 @@ wbb:
   base_url: https://localhost:8090/wbb
   request_timeout_ms: 10000
 
-peers: []
+peers:
+  - name: rt-1
+    base_url: https://localhost:8011/
+  - name: rt-2
+    base_url: https://localhost:8012/
+  - name: rt-3
+    base_url: https://localhost:8013/
+
+er:
+  base_url: https://localhost:8001/
+
+ns:
+  base_url: https://localhost:8003/
 
 dip:
+  base_url: https://localhost:8002/
   voters:
     - id: VOTER-001
       name: Alice Anderson
@@ -52,3 +65,7 @@ election:
   n_acc: 10
   t_prime: 2
   max_casts_per_voter: 10
+
+voter:
+  state_dir: state
+  static_dir: static

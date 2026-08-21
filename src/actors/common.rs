@@ -41,6 +41,23 @@ pub async fn load_signing_key(path: &Path) -> anyhow::Result<SigningKey> {
     Ok(SigningKey::from_bytes(&seed))
 }
 
+/// Load the shared internal-API token (`internal-api-token.txt`) written by
+/// the ceremony next to the election context.  Authenticates service→service
+/// calls such as ER `/tokens/verify` (roadmap §6.1).
+pub async fn load_internal_token(
+    settings: &crate::configuration::Settings,
+) -> anyhow::Result<secrecy::SecretString> {
+    let context_path = std::path::PathBuf::from(&settings._ceremony.election_context);
+    let base_dir = context_path.parent().unwrap_or_else(|| Path::new("."));
+    let path = base_dir.join("internal-api-token.txt");
+    let token = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to read internal token {}: {}", path.display(), e))?
+        .trim()
+        .to_string();
+    Ok(secrecy::SecretString::new(token))
+}
+
 async fn health() -> &'static str {
     "ok"
 }

@@ -90,10 +90,19 @@ impl ClusterCa {
 }
 
 /// A service leaf certificate signed by the cluster CA.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ServiceCert {
     cert_pem: String,
     key_pem: String,
+}
+
+impl std::fmt::Debug for ServiceCert {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceCert")
+            .field("cert_pem", &self.cert_pem)
+            .field("key_pem", &"<redacted>")
+            .finish()
+    }
 }
 
 impl ServiceCert {
@@ -159,11 +168,15 @@ pub fn issue_service_cert(
     })
 }
 
-/// Build a `reqwest::Client` that trusts only the cluster CA.
+/// Build a `reqwest::Client` that trusts only the cluster CA (D16).
+///
+/// The built-in webpki root store is explicitly disabled so the cluster CA is
+/// the sole trust anchor.
 pub fn reqwest_client_trusting_ca(ca_cert_pem: &str) -> Result<reqwest::Client, TlsError> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cert = reqwest::Certificate::from_pem(ca_cert_pem.as_bytes())?;
     reqwest::Client::builder()
+        .tls_built_in_root_certs(false)
         .add_root_certificate(cert)
         .timeout(std::time::Duration::from_secs(30))
         .build()

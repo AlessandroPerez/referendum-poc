@@ -106,6 +106,7 @@ hex = "0.4"
 rcgen = "0.13"
 p256 = { version = "0.13", features = ["arithmetic", "pkcs8", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+ring = "0.17"
 curve25519-dalek = "4"
 
 [dev-dependencies]

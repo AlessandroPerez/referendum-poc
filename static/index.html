@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vote App — Referendum PoC</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <h1>Vote App</h1>
+    <p class="subtitle">Referendum proof-of-concept — voter enrollment</p>
+
+    <section id="screen-login" class="screen">
+      <h2>1 · eID login</h2>
+      <label for="fiscal-id">Fiscal ID</label>
+      <input id="fiscal-id" placeholder="VOTER-001" autocomplete="off">
+      <button id="btn-login">Log in via DIP</button>
+    </section>
+
+    <section id="screen-enroll" class="screen hidden">
+      <h2>2 · Enrollment</h2>
+      <p>Logged in. Assigned pseudonymous id: <strong id="vid-label"></strong></p>
+      <button id="btn-enroll">Enroll this device</button>
+      <div id="passphrase-box" class="hidden">
+        <p class="warning">Write down your passphrase — it is shown only once
+          and unlocks every later step:</p>
+        <code id="passphrase"></code>
+      </div>
+    </section>
+
+    <section id="screen-status" class="screen hidden">
+      <h2>3 · PIN delivery status</h2>
+      <label for="passphrase-input">Passphrase</label>
+      <input id="passphrase-input" placeholder="six-words-joined-by-dashes" autocomplete="off">
+      <button id="btn-status">Check status</button>
+      <p id="status-label"></p>
+      <button id="btn-retrieve" class="hidden">Retrieve PIN</button>
+    </section>
+
+    <section id="screen-pin" class="screen hidden">
+      <h2>4 · Your PIN</h2>
+      <p>Voting PIN (8 digits):</p>
+      <code id="pin"></code>
+      <h2>5 · Verify PIN</h2>
+      <label for="pin-input">Type your PIN to verify it locally</label>
+      <input id="pin-input" inputmode="numeric" autocomplete="off">
+      <button id="btn-verify">Verify</button>
+      <p id="verify-label"></p>
+    </section>
+
+    <p id="error" class="error hidden"></p>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

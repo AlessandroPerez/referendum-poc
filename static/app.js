@@ -1,0 +1,98 @@
+// Vote App SPA (M5): login → enroll → status poll → PIN retrieve → PIN verify.
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const show = (el) => el.classList.remove("hidden");
+const hide = (el) => el.classList.add("hidden");
+
+function setError(message) {
+  const el = $("error");
+  if (message) {
+    el.textContent = message;
+    show(el);
+  } else {
+    hide(el);
+  }
+}
+
+async function api(path, body) {
+  setError(null);
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || `HTTP ${response.status}`);
+  }
+  return payload;
+}
+
+let fiscalId = null;
+
+$("btn-login").addEventListener("click", async () => {
+  try {
+    fiscalId = $("fiscal-id").value.trim();
+    const result = await api("/api/login", { fiscal_id: fiscalId });
+    $("vid-label").textContent = result.vid;
+    show($("screen-enroll"));
+  } catch (e) {
+    setError(`Login failed: ${e.message}`);
+  }
+});
+
+$("btn-enroll").addEventListener("click", async () => {
+  try {
+    const result = await api("/api/enroll", { fiscal_id: fiscalId });
+    $("passphrase").textContent = result.passphrase;
+    $("passphrase-input").value = result.passphrase;
+    show($("passphrase-box"));
+    show($("screen-status"));
+  } catch (e) {
+    setError(`Enrollment failed: ${e.message}`);
+  }
+});
+
+$("btn-status").addEventListener("click", async () => {
+  try {
+    const passphrase = $("passphrase-input").value.trim();
+    const result = await api("/api/status", { passphrase });
+    if (result.pin_set) {
+      $("status-label").textContent = "PIN already retrieved.";
+      show($("btn-retrieve"));
+    } else if (result.pin_ready) {
+      $("status-label").textContent =
+        "Enough registration tellers have notified — the PIN is ready.";
+      show($("btn-retrieve"));
+    } else {
+      $("status-label").textContent = "PIN not ready yet — try again shortly.";
+    }
+  } catch (e) {
+    setError(`Status check failed: ${e.message}`);
+  }
+});
+
+$("btn-retrieve").addEventListener("click", async () => {
+  try {
+    const passphrase = $("passphrase-input").value.trim();
+    const result = await api("/api/pin/retrieve", { passphrase });
+    $("pin").textContent = String(result.pin).padStart(8, "0");
+    show($("screen-pin"));
+  } catch (e) {
+    setError(`PIN retrieval failed: ${e.message}`);
+  }
+});
+
+$("btn-verify").addEventListener("click", async () => {
+  try {
+    const passphrase = $("passphrase-input").value.trim();
+    const pin = parseInt($("pin-input").value, 10);
+    const result = await api("/api/pin/verify", { passphrase, pin });
+    $("verify-label").textContent = result.valid
+      ? "✔ PIN is valid."
+      : "✘ PIN is NOT valid.";
+  } catch (e) {
+    setError(`Verification failed: ${e.message}`);
+  }
+});

@@ -39,12 +39,23 @@ impl MasterSeed {
 }
 
 /// Per-actor deterministic RNG source.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ActorSeed {
     seed: [u8; 32],
 }
 
 impl ActorSeed {
+    /// Rebuild an actor seed from provisioned bytes (e.g. a ceremony-written
+    /// `voter-{i}-seed.bin` file).
+    pub fn from_bytes(seed: [u8; 32]) -> Self {
+        Self { seed }
+    }
+
+    /// Expose the raw seed bytes for ceremony provisioning only.
+    pub(crate) fn bytes(&self) -> &[u8; 32] {
+        &self.seed
+    }
+
     pub fn into_rng(self) -> ActorRng {
         ActorRng {
             seed: self.seed,
@@ -53,11 +64,28 @@ impl ActorSeed {
     }
 }
 
+impl std::fmt::Debug for ActorSeed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActorSeed")
+            .field("seed", &"<redacted>")
+            .finish()
+    }
+}
+
 /// A per-actor RNG registry.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ActorRng {
     seed: [u8; 32],
     counter: u64,
+}
+
+impl std::fmt::Debug for ActorRng {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActorRng")
+            .field("seed", &"<redacted>")
+            .field("counter", &self.counter)
+            .finish()
+    }
 }
 
 impl ActorRng {
@@ -70,6 +98,13 @@ impl ActorRng {
     pub fn counter(&self) -> u64 {
         self.counter
     }
+}
+
+/// Derive a one-off operation RNG from an actor seed without going through the
+/// stateful [`ActorRng`] counter (for services that keep their own per-purpose
+/// counters, e.g. RT decoy/DVNIZKP/τ generation).
+pub fn operation_rng(actor_seed: &ActorSeed, purpose: &str, counter: u64) -> ChaCha20Rng {
+    ChaCha20Rng::from_seed(derive_operation_seed(&actor_seed.seed, purpose, counter))
 }
 
 fn derive_actor_seed(master: &[u8; 32], actor_id: &str) -> ActorSeed {

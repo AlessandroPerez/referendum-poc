@@ -22,8 +22,14 @@ pub struct Settings {
     pub wbb: WbbSettings,
     #[serde(default)]
     pub peers: Vec<PeerSettings>,
+    #[serde(default)]
+    pub er: ErClientSettings,
+    #[serde(default)]
+    pub ns: NsClientSettings,
     pub election: ElectionSettings,
     pub dip: DipSettings,
+    #[serde(default)]
+    pub voter: VoterSettings,
     #[serde(default)]
     pub _ceremony: CeremonyPaths,
 }
@@ -86,8 +92,21 @@ pub struct PeerSettings {
     pub base_url: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ErClientSettings {
+    pub base_url: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NsClientSettings {
+    pub base_url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DipSettings {
+    /// Base URL of the DIP service (empty when not used by this actor).
+    #[serde(default)]
+    pub base_url: String,
     pub voters: Vec<DipVoter>,
 }
 
@@ -95,6 +114,23 @@ pub struct DipSettings {
 pub struct DipVoter {
     pub id: String,
     pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoterSettings {
+    /// Directory where per-voter state JSON files are persisted.
+    pub state_dir: String,
+    /// Directory containing the SPA static assets.
+    pub static_dir: String,
+}
+
+impl Default for VoterSettings {
+    fn default() -> Self {
+        Self {
+            state_dir: "state".to_string(),
+            static_dir: "static".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -19,8 +19,8 @@ use crate::actors::common::load_signing_key;
 use crate::clients::rt::{RtClient, RtError};
 use crate::clients::wbb::{sign_entry, SignedEntry, WbbClient};
 use crate::protocol::acc::{
-    acc_rng_from_signing_key_seeds, build_acc_pub_key_data_string, generate_credentials,
-    load_rt_share, reconstruct_rt_teller,
+    acc_rng_from_seeds, build_acc_pub_key_data_string, generate_credentials, load_rt_share,
+    reconstruct_rt_teller,
 };
 use crate::protocol::clock::LogicalClock;
 use crate::protocol::tls::reqwest_client_trusting_ca;
@@ -98,6 +98,7 @@ pub async fn gen_credentials(cfg: GenCredentialsConfig) -> Result<(), AdminError
 
     let mut tellers: Vec<ThresholdRegistrationTeller<RistrettoGroup>> = Vec::with_capacity(3);
     let mut signing_key_seeds = Vec::with_capacity(3);
+    let mut operation_seeds: Vec<[u8; 32]> = Vec::with_capacity(3);
     for i in 1..=3 {
         let share_path = cfg.ceremony_dir.join(format!("rt-{i}-share.json"));
         let share = tokio::task::spawn_blocking({
@@ -111,10 +112,23 @@ pub async fn gen_credentials(cfg: GenCredentialsConfig) -> Result<(), AdminError
         let key_path = cfg.ceremony_dir.join(format!("rt-{i}-signing-key.bin"));
         let key = load_signing_key(&key_path).await?;
         signing_key_seeds.push(key.to_bytes());
+
+        let seed_path = cfg.ceremony_dir.join(format!("rt-{i}-seed.bin"));
+        let bytes = tokio::fs::read(&seed_path).await.map_err(|e| {
+            AdminError::Other(format!(
+                "failed to read RT operation seed {}: {e}",
+                seed_path.display()
+            ))
+        })?;
+        let seed: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| AdminError::Other("operation seed must be 32 bytes".into()))?;
+        operation_seeds.push(seed);
     }
 
-    // Deterministic RNG seeded from the RT signing keys.
-    let mut rng = acc_rng_from_signing_key_seeds(&signing_key_seeds);
+    // Deterministic RNG seeded from the RT operation seeds (§9.2), decoupled
+    // from the WBB entry-signing keys used below for co-signing.
+    let mut rng = acc_rng_from_seeds(&operation_seeds);
 
     let (packages, short_accs) = tokio::task::spawn_blocking(move || {
         generate_credentials(
@@ -135,7 +149,7 @@ pub async fn gen_credentials(cfg: GenCredentialsConfig) -> Result<(), AdminError
     tokio::fs::write(&packages_path, serde_json::to_string_pretty(&packages)?).await?;
 
     // Build the WBB data string and sign it.
-    let data_string = build_acc_pub_key_data_string(&short_accs, cfg.t_prime)?;
+    let data_string = build_acc_pub_key_data_string(&short_accs)?;
     let mut clock = cfg.clock;
     let signed_entries =
         sign_acc_pub_key_entries(&cfg, &data_string, &signing_key_seeds, &mut clock).await?;

@@ -109,6 +109,28 @@ impl EnrollmentPackage {
             share_broadcasts: shares,
         }
     }
+
+    /// The subset of the package the ER hands to the voter at login.
+    pub fn credential_package(&self) -> CredentialPackage {
+        CredentialPackage {
+            a: self.a,
+            enc_a_ext: self.enc_a_ext.clone(),
+        }
+    }
+}
+
+/// The part of an enrollment package the voter receives from the ER at login.
+///
+/// The per-RT `AccShareBroadcast`s are deliberately absent: the voter fetches
+/// those over HTTPS from ≥ t_RT registration tellers (`/credentials/deliver`),
+/// per roadmap Deviation 5 and §3.6.3.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialPackage {
+    /// The credential point `A` recovered by threshold decryption.
+    #[serde(with = "PointHelper::<G>")]
+    pub a: <G as GroupPoint>::Point,
+    /// `E_pkTT[A]` produced by the RTs, including the effective randomness.
+    pub enc_a_ext: SerializableExtendedCiphertext,
 }
 
 /// Load a single RT share from the JSON file written by the setup ceremony.
@@ -243,28 +265,31 @@ pub fn generate_credentials(
     Ok((packages, short_accs))
 }
 
+/// WBB staging threshold for RT-role entries (D11; matches the fork's
+/// hardcoded `setup,RT,acc_pub_key,t≥2` policy row).  Distinct from the
+/// crypto thresholds `t_rt`/`t′`, which they merely happen to equal.
+pub const WBB_RT_STAGING_THRESHOLD: usize = 2;
+
 /// Build the WBB data string for the `setup,RT,acc_pub_key,2,…` entry.
 ///
 /// The content (the JSON-encoded `ShortPublicACC` list) is base64-encoded so
 /// the CSV payload does not contain commas.
-pub fn build_acc_pub_key_data_string(
-    short_accs: &[ShortPublicACC<G>],
-    t_prime: usize,
-) -> Result<String, AccError> {
+pub fn build_acc_pub_key_data_string(short_accs: &[ShortPublicACC<G>]) -> Result<String, AccError> {
     let json = serde_json::to_string(short_accs)?;
     Ok(format!(
         "setup,RT,acc_pub_key,{},{}",
-        t_prime,
+        WBB_RT_STAGING_THRESHOLD,
         BASE64.encode(json.as_bytes())
     ))
 }
 
-/// Derive a deterministic ACC-generation RNG from the RT signing key seeds.
+/// Derive a deterministic ACC-generation RNG from the RT operation seeds
+/// (`rt-{i}-seed.bin`, §9.2).
 ///
-/// Each service already owns a 32-byte Ed25519 seed; hashing the three seeds
-/// together yields a seed that is available to the admin driver without
-/// requiring the master seed.
-pub fn acc_rng_from_signing_key_seeds(seeds: &[[u8; 32]]) -> ChaCha20Rng {
+/// Hashing the three dedicated operation seeds together yields a seed that is
+/// available to the admin driver without requiring the master seed, and keeps
+/// credential randomness decoupled from the WBB entry-signing keys.
+pub fn acc_rng_from_seeds(seeds: &[[u8; 32]]) -> ChaCha20Rng {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     for seed in seeds {

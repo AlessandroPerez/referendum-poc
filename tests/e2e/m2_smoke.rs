@@ -66,6 +66,25 @@ async fn run_once() -> String {
         .expect("entry included");
     assert_eq!(found.leaf_index, 0);
 
+    // All 3 signers arrived before publication, so exactly one leaf must exist
+    // (a late `ref:N` leaf would change the root hash and flake determinism).
+    let entries = wbb.client.entries().await.expect("entries");
+    assert_eq!(entries.entries.len(), 1, "expected a single published leaf");
+
+    // D16 negative check: a client without the cluster CA must fail the TLS
+    // handshake against the WBB.
+    let untrusting = reqwest::Client::builder()
+        .tls_built_in_root_certs(false)
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("plain client");
+    let err = untrusting
+        .get(format!("https://127.0.0.1:{port}/wbb/entries"))
+        .send()
+        .await
+        .expect_err("handshake must fail without the cluster CA");
+    assert!(err.is_connect() || err.is_request());
+
     // Fetch the signed checkpoint bytes.
     let checkpoint = wbb.client.checkpoint().await.expect("checkpoint");
     extract_root_hash(&checkpoint).expect("valid checkpoint root hash")

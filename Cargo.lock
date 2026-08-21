@@ -1880,6 +1880,7 @@ dependencies = [
  "rand_core 0.6.4",
  "rcgen",
  "reqwest",
+ "ring",
  "rustls",
  "secrecy",
  "serde",

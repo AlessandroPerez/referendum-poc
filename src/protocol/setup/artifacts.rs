@@ -118,12 +118,41 @@ pub fn write_artifacts(
         let service_token = derive_service_token(master_seed, name);
         let service_token_path = output_dir.join(format!("{name}-service-token.txt"));
         fs::write(&service_token_path, service_token.expose_secret())?;
+
+        // Dedicated per-service operation seed (§9.2) so protocol RNGs are
+        // not derived from the WBB entry-signing keys.
+        let op_seed = master_seed.actor_seed(name);
+        fs::write(output_dir.join(format!("{name}-seed.bin")), op_seed.bytes())?;
     }
 
     // ER admin token is a separate secret file.
     let admin_token = derive_admin_token(master_seed);
     let admin_token_path = output_dir.join("er-admin-token.txt");
     fs::write(&admin_token_path, admin_token.expose_secret())?;
+
+    // Shared internal-API token authenticating service→service calls that are
+    // not voter-facing (e.g. ER `/tokens/verify`, roadmap §6.1).
+    let internal_token = derive_service_token(master_seed, "internal-api");
+    fs::write(
+        output_dir.join("internal-api-token.txt"),
+        internal_token.expose_secret(),
+    )?;
+
+    // Per-voter deterministic seeds + TLS certs (M5, roadmap §9/D16).  Voter
+    // servers are not WBB entities, so they get no entry in `sunlight.yaml`;
+    // each instance only ever sees its own seed file.
+    for i in 1..=base_settings.election.n_voters {
+        let name = format!("voter-{i}");
+        let actor_seed = master_seed.actor_seed(&name);
+        fs::write(
+            output_dir.join(format!("{name}-seed.bin")),
+            actor_seed.bytes(),
+        )?;
+        let service_seed = derive_service_seed(&master_seed_bytes, &name);
+        let cert = issue_service_cert(&ca, &name, &service_seed)?;
+        fs::write(output_dir.join(format!("{name}.pem")), cert.cert_pem())?;
+        fs::write(output_dir.join(format!("{name}-key.pem")), cert.key_pem())?;
+    }
 
     // 4. WBB config and checkpoints DB.
     let sunlight_yaml = output_dir.join("sunlight.yaml");

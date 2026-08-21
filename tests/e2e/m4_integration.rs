@@ -258,8 +258,11 @@ fn build_rt_settings(
             request_timeout_ms: 10000,
         },
         peers: Vec::new(),
+        er: Default::default(),
+        ns: Default::default(),
         election: base.election.clone(),
         dip: base.dip.clone(),
+        voter: Default::default(),
         _ceremony: CeremonyPaths {
             seed_bin: ceremony_dir.join("seed.bin").display().to_string(),
             sunlight_yaml: ceremony_dir.join("sunlight.yaml").display().to_string(),

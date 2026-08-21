@@ -13,5 +13,8 @@ certs/
 *.db-shm
 *.db-wal
 
+# Voter-server encrypted state files (created at runtime)
+state/
+
 # Validation
 docs/validation/
