@@ -344,14 +344,25 @@ fn cluster_settings(
             base_url: format!("https://127.0.0.1:{wbb_port}/wbb/"),
             request_timeout_ms: 10000,
         },
-        peers: rt_ports
-            .iter()
-            .enumerate()
-            .map(|(i, p)| PeerSettings {
-                name: format!("rt-{}", i + 1),
-                base_url: format!("https://127.0.0.1:{p}/"),
-            })
-            .collect(),
+        peers: {
+            let mut peers: Vec<PeerSettings> = rt_ports
+                .iter()
+                .enumerate()
+                .map(|(i, p)| PeerSettings {
+                    name: format!("rt-{}", i + 1),
+                    base_url: format!("https://127.0.0.1:{p}/"),
+                })
+                .collect();
+            // The enrollment flow never contacts a BB, but the voter server
+            // requires BB peers at boot (M6); point them at unused ports.
+            for i in 1..=2 {
+                peers.push(PeerSettings {
+                    name: format!("bb-{i}"),
+                    base_url: format!("https://127.0.0.1:{}/", 1024 + i),
+                });
+            }
+            peers
+        },
         er: ErClientSettings {
             base_url: format!("https://127.0.0.1:{er_port}/"),
         },
@@ -364,6 +375,7 @@ fn cluster_settings(
             voters: base.dip.voters.clone(),
         },
         voter: VoterSettings::default(),
+        wbb_ui: Default::default(),
         _ceremony: CeremonyPaths {
             seed_bin: ceremony_dir.join("seed.bin").display().to_string(),
             sunlight_yaml: ceremony_dir.join("sunlight.yaml").display().to_string(),

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::clients::dip::DipAssertion;
-use crate::domain::{TokenValue, Vid};
+use crate::domain::{CommB, TokenValue, Vid};
 use crate::protocol::acc::CredentialPackage;
 
 /// Request body for `POST /login`.
@@ -54,6 +54,8 @@ pub struct VerifyTokenRequest {
     pub token: TokenValue,
     pub expected_type: Option<String>,
     pub consume: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comm_b: Option<CommB>,
 }
 
 /// Response from `POST /tokens/verify`.
@@ -213,6 +215,7 @@ impl ErClient {
                 token: token.clone(),
                 expected_type: expected_type.map(str::to_string),
                 consume,
+                comm_b: None,
             })
             .timeout(Duration::from_secs(5))
             .send()
@@ -226,6 +229,85 @@ impl ErClient {
             Err(ErError::Http(status, body))
         }
     }
+
+    /// `POST /tokens/casting` — request anonymous casting tokens for `comm_b`
+    /// (§5.3.1.6). `signature` is the base64 EdDSA signature over the commB
+    /// bytes made with the voter's app key.
+    pub async fn casting_tokens(
+        &self,
+        registration_token: &TokenValue,
+        comm_b: &CommB,
+        signature: &str,
+    ) -> Result<CastingTokensResponse, ErError> {
+        let url = self.base_url.join("tokens/casting")?;
+        #[derive(Serialize)]
+        struct Req {
+            comm_b: CommB,
+            signature: String,
+        }
+        let response = self
+            .client
+            .post(url)
+            .header("Authorization", format!("Bearer {registration_token}"))
+            .json(&Req {
+                comm_b: *comm_b,
+                signature: signature.to_string(),
+            })
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(ErError::Network)?;
+        let status = response.status();
+        let body = response.text().await.map_err(ErError::Network)?;
+        if status.is_success() {
+            serde_json::from_str(&body).map_err(ErError::Json)
+        } else {
+            Err(ErError::Http(status, body))
+        }
+    }
+
+    /// Like [`ErClient::verify_token`] but also presents the observed `comm_b`
+    /// so the ER can check the casting-token binding (§5.3.1.6).
+    pub async fn verify_token_with_comm_b(
+        &self,
+        token: &TokenValue,
+        expected_type: Option<&str>,
+        consume: bool,
+        comm_b: &CommB,
+        internal_token: &SecretString,
+    ) -> Result<VerifyTokenResponse, ErError> {
+        let url = self.base_url.join("tokens/verify")?;
+        let response = self
+            .client
+            .post(url)
+            .header(
+                "Authorization",
+                format!("Bearer {}", internal_token.expose_secret()),
+            )
+            .json(&VerifyTokenRequest {
+                token: token.clone(),
+                expected_type: expected_type.map(str::to_string),
+                consume,
+                comm_b: Some(*comm_b),
+            })
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(ErError::Network)?;
+        let status = response.status();
+        let body = response.text().await.map_err(ErError::Network)?;
+        if status.is_success() {
+            serde_json::from_str(&body).map_err(ErError::Json)
+        } else {
+            Err(ErError::Http(status, body))
+        }
+    }
+}
+
+/// Response from `POST /tokens/casting`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CastingTokensResponse {
+    pub casting_tokens: Vec<TokenValue>,
 }
 
 /// Errors from the ER client.

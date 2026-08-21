@@ -141,8 +141,12 @@ pub fn write_artifacts(
     // Per-voter deterministic seeds + TLS certs (M5, roadmap §9/D16).  Voter
     // servers are not WBB entities, so they get no entry in `sunlight.yaml`;
     // each instance only ever sees its own seed file.
-    for i in 1..=base_settings.election.n_voters {
-        let name = format!("voter-{i}");
+    // `wbb-ui` (public read proxy) gets a TLS cert but is not a WBB entity.
+    let mut non_entity_services: Vec<String> = (1..=base_settings.election.n_voters)
+        .map(|i| format!("voter-{i}"))
+        .collect();
+    non_entity_services.push("wbb-ui".to_string());
+    for name in non_entity_services {
         let actor_seed = master_seed.actor_seed(&name);
         fs::write(
             output_dir.join(format!("{name}-seed.bin")),

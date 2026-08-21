@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Public Bulletin Board — Referendum PoC</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <h1>Public Bulletin Board</h1>
+    <p class="subtitle">Append-only transparency log of the referendum</p>
+    <p>Current phase: <strong id="phase">…</strong></p>
+
+    <section class="screen">
+      <h2>Verify your ballot</h2>
+      <label for="digest-input">Ballot digest</label>
+      <input id="digest-input" placeholder="paste the digest shown by your Vote App" autocomplete="off">
+      <button id="btn-search">Search</button>
+      <div id="search-result"></div>
+    </section>
+
+    <section class="screen">
+      <h2>Log entries</h2>
+      <button id="btn-refresh">Refresh</button>
+      <div class="table-wrap">
+        <table id="entries">
+          <thead>
+            <tr><th>#</th><th>Phase</th><th>Role</th><th>Type</th><th>Signers</th><th>Timestamp</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <p id="error" class="error hidden"></p>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

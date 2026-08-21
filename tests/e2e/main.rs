@@ -6,6 +6,7 @@ mod m2_smoke;
 mod m3_integration;
 mod m4_integration;
 mod m5_integration;
+mod m6_integration;
 
 #[test]
 fn harness_loads() {

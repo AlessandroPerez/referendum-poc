@@ -96,3 +96,70 @@ $("btn-verify").addEventListener("click", async () => {
     setError(`Verification failed: ${e.message}`);
   }
 });
+
+// ── Voting (M6): build → cast → publication check → CAI confirm ──────────
+
+async function refreshPhase() {
+  try {
+    const response = await fetch("/api/election");
+    if (response.ok) {
+      const info = await response.json();
+      $("phase-label").textContent = info.phase;
+    }
+  } catch (_) {
+    /* phase banner is best-effort */
+  }
+}
+refreshPhase();
+
+$("btn-vote").addEventListener("click", async () => {
+  try {
+    const passphrase = $("passphrase-input").value.trim();
+    const result = await api("/api/vote", {
+      passphrase,
+      option: $("vote-option").value,
+      pin: parseInt($("vote-pin").value, 10),
+    });
+    $("ballot-digest").textContent = result.digest;
+    $("ballot-emoji").textContent = (result.emoji || []).join(" ");
+    show($("ballot-box"));
+  } catch (e) {
+    setError(`Vote failed: ${e.message}`);
+  }
+});
+
+$("btn-cast").addEventListener("click", async () => {
+  try {
+    const passphrase = $("passphrase-input").value.trim();
+    const result = await api("/api/cast", { passphrase });
+    $("cast-label").textContent =
+      `Cast to ${result.receipts.length} ballot box(es).`;
+    show($("btn-status"));
+    show($("btn-confirm"));
+  } catch (e) {
+    setError(`Cast failed: ${e.message}`);
+  }
+});
+
+$("btn-status").addEventListener("click", async () => {
+  try {
+    const passphrase = $("passphrase-input").value.trim();
+    const result = await api("/api/ballot/status", { passphrase });
+    $("cast-label").textContent = result.no_bot
+      ? `✔ Published by ballot boxes ${result.published_bb_ids.join(", ")} (no ⊥).`
+      : `⚠ Published by ${result.published_bb_ids.length} ballot box(es) — fewer than 2 (⊥).`;
+  } catch (e) {
+    setError(`Status check failed: ${e.message}`);
+  }
+});
+
+$("btn-confirm").addEventListener("click", async () => {
+  try {
+    const passphrase = $("passphrase-input").value.trim();
+    const result = await api("/api/confirm", { passphrase });
+    $("cast-label").textContent =
+      `✔ Cast-as-intended proof published (confirmed at ${result.confirmed_at_ms}).`;
+  } catch (e) {
+    setError(`Confirmation failed: ${e.message}`);
+  }
+});

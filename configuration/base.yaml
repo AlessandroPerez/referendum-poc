@@ -28,6 +28,10 @@ peers:
     base_url: https://localhost:8012/
   - name: rt-3
     base_url: https://localhost:8013/
+  - name: bb-1
+    base_url: https://localhost:8031/
+  - name: bb-2
+    base_url: https://localhost:8032/
 
 er:
   base_url: https://localhost:8001/
@@ -69,3 +73,6 @@ election:
 voter:
   state_dir: state
   static_dir: static
+
+wbb_ui:
+  static_dir: static-wbb

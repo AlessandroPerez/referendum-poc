@@ -263,6 +263,7 @@ fn build_rt_settings(
         election: base.election.clone(),
         dip: base.dip.clone(),
         voter: Default::default(),
+        wbb_ui: Default::default(),
         _ceremony: CeremonyPaths {
             seed_bin: ceremony_dir.join("seed.bin").display().to_string(),
             sunlight_yaml: ceremony_dir.join("sunlight.yaml").display().to_string(),

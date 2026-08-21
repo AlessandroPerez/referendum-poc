@@ -269,3 +269,38 @@ async fn sign_acc_pub_key_entries(
 /// Convenience re-export of the enrollment package type for callers that need
 /// to inspect the generated artifacts.
 pub use crate::protocol::acc::EnrollmentPackage;
+
+/// Configuration for a PM phase transition (§3.4.2, roadmap A4).
+#[derive(Clone, Debug)]
+pub struct PhaseTransitionConfig {
+    /// Directory containing `pm-signing-key.bin`.
+    pub ceremony_dir: std::path::PathBuf,
+    /// WBB log base URL.
+    pub wbb_url: Url,
+    /// Cluster CA PEM for TLS.
+    pub ca_pem: String,
+    /// Logical clock for the entry timestamp (§9.4).
+    pub clock: LogicalClock,
+}
+
+/// Publish a PM-signed `phase_transition` entry moving the WBB from `from` to
+/// `to` (forward-only `setup → voting → tallying`, enforced by the WBB).
+pub async fn transition_phase(
+    cfg: PhaseTransitionConfig,
+    from: &str,
+    to: &str,
+) -> Result<(), AdminError> {
+    let pm_key = load_signing_key(&cfg.ceremony_dir.join("pm-signing-key.bin")).await?;
+    let data = crate::protocol::voting::phase_transition_data_string(from, to);
+    let mut clock = cfg.clock;
+    let timestamp = clock.now_ms() as i64;
+    clock.advance();
+    let entry = sign_entry(data.as_bytes(), "PM-1", timestamp, &pm_key);
+
+    let client = reqwest_client_trusting_ca(&cfg.ca_pem)?;
+    let wbb = WbbClient::new(client, cfg.wbb_url.clone());
+    wbb.submit_and_wait(&entry, std::time::Duration::from_secs(10))
+        .await
+        .map_err(|e| AdminError::Other(format!("phase transition rejected: {e}")))?;
+    Ok(())
+}

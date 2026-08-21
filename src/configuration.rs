@@ -31,6 +31,8 @@ pub struct Settings {
     #[serde(default)]
     pub voter: VoterSettings,
     #[serde(default)]
+    pub wbb_ui: WbbUiSettings,
+    #[serde(default)]
     pub _ceremony: CeremonyPaths,
 }
 
@@ -129,6 +131,20 @@ impl Default for VoterSettings {
         Self {
             state_dir: "state".to_string(),
             static_dir: "static".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WbbUiSettings {
+    /// Directory containing the public WBB page static assets.
+    pub static_dir: String,
+}
+
+impl Default for WbbUiSettings {
+    fn default() -> Self {
+        Self {
+            static_dir: "static-wbb".to_string(),
         }
     }
 }

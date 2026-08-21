@@ -49,6 +49,28 @@
       <p id="verify-label"></p>
     </section>
 
+    <section id="screen-vote" class="screen">
+      <h2>6 · Vote</h2>
+      <p>Phase: <strong id="phase-label">…</strong></p>
+      <label for="vote-option">Your choice</label>
+      <select id="vote-option">
+        <option value="blank">Scheda bianca (blank)</option>
+        <option value="approve">Sì (approve)</option>
+        <option value="reject">No (reject)</option>
+      </select>
+      <label for="vote-pin">PIN</label>
+      <input id="vote-pin" inputmode="numeric" autocomplete="off">
+      <button id="btn-vote">Build ballot</button>
+      <div id="ballot-box" class="hidden">
+        <p>Ballot digest: <code id="ballot-digest"></code></p>
+        <p>Emoji receipt: <code id="ballot-emoji"></code></p>
+        <button id="btn-cast">Cast to ballot boxes</button>
+        <button id="btn-status" class="hidden">Check publication</button>
+        <button id="btn-confirm" class="hidden">Confirm (CAI)</button>
+        <p id="cast-label"></p>
+      </div>
+    </section>
+
     <p id="error" class="error hidden"></p>
   </main>
   <script src="/app.js"></script>

@@ -28,7 +28,7 @@ use crate::actors::common::{health_router, serve_rustls, with_state};
 use crate::clients::dip::DipAssertion;
 use crate::clients::wbb::{sign_entry, WbbClient};
 use crate::configuration::{DipSettings, Settings};
-use crate::domain::{TokenValue, Vid};
+use crate::domain::{CommB, TokenValue, Vid};
 use crate::protocol::acc::{CredentialPackage, EnrollmentPackage};
 use crate::protocol::clock::LogicalClock;
 use crate::protocol::merkle::voter_id_merkle_root;
@@ -56,12 +56,20 @@ pub struct ErState {
     last_rid: Arc<Mutex<HashMap<Vid, String>>>,
     /// Logical clock for WBB entry timestamps (§9.4).
     clock: Arc<Mutex<LogicalClock>>,
+    /// Casting tokens issued per vid, keyed by ballot commitment (CAT rate
+    /// limit over DISTINCT commitments, D3/§12).  Re-requesting tokens for
+    /// the SAME commitment returns the cached tokens instead of minting new
+    /// ones, so idempotent re-casts neither burn budget nor grow the store.
+    cast_commitments: Arc<Mutex<HashMap<Vid, CommitmentTokens>>>,
     /// Dedicated operation seed (`er-seed.bin`, §9.2) for token generation.
     token_seed: ActorSeed,
     /// Shared internal-API token authenticating service→service calls
     /// (`/tokens/verify`, roadmap §6.1).
     internal_token: SecretString,
 }
+
+/// Casting tokens issued for each of a voter's distinct ballot commitments.
+type CommitmentTokens = HashMap<CommB, Vec<TokenValue>>;
 
 /// A registered voter device (PoC: app public key + opaque state blob).
 #[derive(Debug, Clone)]
@@ -89,6 +97,8 @@ struct TokenMeta {
     token_type: TokenType,
     vid: Vid,
     rid: Option<String>,
+    /// Casting tokens are bound to the ballot commitment `commB` (§5.3.1.6).
+    comm_b: Option<CommB>,
     used: bool,
 }
 
@@ -98,6 +108,7 @@ enum TokenType {
     PinRequest,
     Retrieval,
     Ns,
+    Casting,
 }
 
 impl ErState {
@@ -130,6 +141,7 @@ impl ErState {
             devices: Arc::new(Mutex::new(HashMap::new())),
             last_rid: Arc::new(Mutex::new(HashMap::new())),
             clock: Arc::new(Mutex::new(clock)),
+            cast_commitments: Arc::new(Mutex::new(HashMap::new())),
             token_seed,
             internal_token,
         }
@@ -145,7 +157,13 @@ impl ErState {
 
     /// Mint a fresh single-use token from the ER's dedicated operation seed
     /// (§9.2; deliberately decoupled from the WBB entry-signing key).
-    async fn next_token(&self, token_type: TokenType, vid: Vid, rid: Option<String>) -> TokenValue {
+    async fn next_token(
+        &self,
+        token_type: TokenType,
+        vid: Vid,
+        rid: Option<String>,
+        comm_b: Option<CommB>,
+    ) -> TokenValue {
         use rand::RngCore;
         let mut counter = self.token_counter.lock().await;
         *counter += 1;
@@ -159,6 +177,7 @@ impl ErState {
                 token_type,
                 vid,
                 rid,
+                comm_b,
                 used: false,
             },
         );
@@ -318,7 +337,9 @@ async fn login_handler(
         .map(EnrollmentPackage::credential_package)
         .ok_or_else(|| ErError::Internal("missing enrollment package".into()))?;
 
-    let registration_token = state.next_token(TokenType::Registration, vid, None).await;
+    let registration_token = state
+        .next_token(TokenType::Registration, vid, None, None)
+        .await;
     state.enrolled_vids.lock().await.insert(vid);
 
     Ok(Json(LoginResponse {
@@ -378,12 +399,12 @@ async fn pin_request_tokens_handler(
     for _ in 0..state.election.n_rt {
         rt_tokens.push(
             state
-                .next_token(TokenType::PinRequest, meta.vid, Some(rid.clone()))
+                .next_token(TokenType::PinRequest, meta.vid, Some(rid.clone()), None)
                 .await,
         );
     }
     let ns_token = state
-        .next_token(TokenType::Ns, meta.vid, Some(rid.clone()))
+        .next_token(TokenType::Ns, meta.vid, Some(rid.clone()), None)
         .await;
 
     Ok(Json(PinRequestTokensResponse {
@@ -427,12 +448,113 @@ async fn retrieval_tokens_handler(
     for _ in 0..t_rt {
         retrieval_tokens.push(
             state
-                .next_token(TokenType::Retrieval, meta.vid, Some(rid.clone()))
+                .next_token(TokenType::Retrieval, meta.vid, Some(rid.clone()), None)
                 .await,
         );
     }
 
     Ok(Json(RetrievalTokensResponse { retrieval_tokens }))
+}
+
+#[derive(Deserialize)]
+struct CastingTokensRequest {
+    comm_b: CommB,
+    /// Base64 EdDSA signature over the commB bytes, made with the voter's
+    /// app secret key AtSK (§5.3.1.6, §3.13).
+    signature: String,
+}
+
+impl std::fmt::Debug for CastingTokensRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CastingTokensRequest")
+            .field("comm_b", &self.comm_b)
+            .field("signature", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct CastingTokensResponse {
+    /// One anonymous single-use token per ballot box, bound to `comm_b`.
+    casting_tokens: Vec<TokenValue>,
+}
+
+/// V12: issue anonymous single-use casting tokens (§5.3.1.6).
+///
+/// The voter authenticates with the registration token and an EdDSA signature
+/// over `comm_b` made with the registered app key; the ER rate-limits per vid
+/// and binds each token to `comm_b` so the BB can check the commitment.
+async fn casting_tokens_handler(
+    Extension(state): Extension<Arc<ErState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<CastingTokensRequest>,
+) -> Result<Json<CastingTokensResponse>, ErError> {
+    let token = bearer_token(&headers)?;
+    let meta = state.verify_token(&token, TokenType::Registration).await?;
+
+    // Verify the AtSK signature against the device's registered app key.
+    let at_pk = {
+        let devices = state.devices.lock().await;
+        let record = devices.get(&meta.vid).ok_or(ErError::Unauthorized)?;
+        let bytes: [u8; 32] = hex::decode(&record.at_pk)
+            .map_err(|_| ErError::Unauthorized)?
+            .try_into()
+            .map_err(|_| ErError::Unauthorized)?;
+        VerifyingKey::from_bytes(&bytes).map_err(|_| ErError::Unauthorized)?
+    };
+    let signature_bytes: [u8; 64] = BASE64
+        .decode(&req.signature)
+        .map_err(|_| ErError::Unauthorized)?
+        .try_into()
+        .map_err(|_| ErError::Unauthorized)?;
+    at_pk
+        .verify(
+            req.comm_b.as_bytes(),
+            &ed25519_dalek::Signature::from_bytes(&signature_bytes),
+        )
+        .map_err(|_| ErError::Unauthorized)?;
+
+    // CAT rate limit (max_casts_per_voter, D3/§12) over DISTINCT ballot
+    // commitments.  A re-request for an already-committed ballot replays the
+    // cached tokens (idempotent: no budget burn, no token-store growth); the
+    // reservation happens atomically under the lock, so the limit is
+    // race-safe.
+    {
+        let mut commitments = state.cast_commitments.lock().await;
+        let seen = commitments.entry(meta.vid).or_default();
+        if let Some(cached) = seen.get(&req.comm_b) {
+            if !cached.is_empty() {
+                return Ok(Json(CastingTokensResponse {
+                    casting_tokens: cached.clone(),
+                }));
+            }
+        } else {
+            if seen.len() >= state.election.max_casts_per_voter {
+                return Err(ErError::RateLimited);
+            }
+            seen.insert(req.comm_b, Vec::new());
+        }
+    }
+
+    let mut casting_tokens = Vec::with_capacity(state.election.n_bb);
+    for _ in 0..state.election.n_bb {
+        casting_tokens.push(
+            state
+                .next_token(TokenType::Casting, meta.vid, None, Some(req.comm_b))
+                .await,
+        );
+    }
+    if let Some(slot) = state
+        .cast_commitments
+        .lock()
+        .await
+        .entry(meta.vid)
+        .or_default()
+        .get_mut(&req.comm_b)
+    {
+        *slot = casting_tokens.clone();
+    }
+    Ok(Json(CastingTokensResponse { casting_tokens }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -445,6 +567,10 @@ struct VerifyTokenRequest {
     /// When true, a valid single-use token is atomically marked consumed.
     #[serde(default)]
     consume: bool,
+    /// For casting tokens: the commitment the caller observed; must match the
+    /// binding recorded at issuance (§5.3.1.6).
+    #[serde(default)]
+    comm_b: Option<CommB>,
 }
 
 #[derive(Debug, Serialize)]
@@ -487,14 +613,27 @@ async fn verify_token_handler(
     if meta.used || !type_matches {
         return Ok(Json(VerifyTokenResponse::invalid()));
     }
+    // Casting tokens are bound to commB: the caller must present the matching
+    // commitment (§5.3.1.6).
+    if let Some(bound) = &meta.comm_b {
+        if req.comm_b.as_ref() != Some(bound) {
+            return Ok(Json(VerifyTokenResponse::invalid()));
+        }
+    }
     if req.consume {
         meta.used = true;
     }
+    // Casting tokens are anonymous towards the BB: no vid/rid in the response.
+    let (vid, rid) = if meta.token_type == TokenType::Casting {
+        (None, None)
+    } else {
+        (Some(meta.vid), meta.rid.clone())
+    };
     Ok(Json(VerifyTokenResponse {
         valid: true,
         token_type: Some(type_name),
-        vid: Some(meta.vid),
-        rid: meta.rid.clone(),
+        vid,
+        rid,
     }))
 }
 
@@ -531,6 +670,8 @@ fn bearer_token(headers: &axum::http::HeaderMap) -> Result<TokenValue, ErError> 
 enum ErError {
     #[error("unauthorized")]
     Unauthorized,
+    #[error("casting rate limit exceeded")]
+    RateLimited,
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("wbb error: {0}")]
@@ -543,6 +684,7 @@ impl IntoResponse for ErError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
+            Self::RateLimited => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
             // Internal failures are logged but not leaked (style guide §03).
             Self::Json(_) | Self::Wbb(_) | Self::Internal(_) => {
                 tracing::error!(error = %self, "er-server internal error");
@@ -564,6 +706,7 @@ pub fn router(state: Arc<ErState>) -> Router {
             .route("/devices", post(device_register_handler))
             .route("/tokens/pin-request", post(pin_request_tokens_handler))
             .route("/tokens/retrieval", post(retrieval_tokens_handler))
+            .route("/tokens/casting", post(casting_tokens_handler))
             .route("/tokens/verify", post(verify_token_handler)),
         state,
     )

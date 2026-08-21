@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use referendum_poc::actors::admin::{gen_credentials, GenCredentialsConfig};
+use referendum_poc::actors::admin::{
+    gen_credentials, transition_phase, GenCredentialsConfig, PhaseTransitionConfig,
+};
 use referendum_poc::actors::load_settings;
 use referendum_poc::protocol::clock::LogicalClock;
 use reqwest::Url;
@@ -38,6 +40,55 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         rt_urls: Vec<Url>,
     },
+
+    /// Publish the PM phase transition `setup → voting` (§3.4.2, A4).
+    OpenVoting {
+        /// WBB log base URL (overrides configuration).
+        #[arg(long)]
+        wbb_url: Option<Url>,
+    },
+
+    /// Publish the PM phase transition `voting → tallying` (§3.4.2, A4).
+    CloseVoting {
+        /// WBB log base URL (overrides configuration).
+        #[arg(long)]
+        wbb_url: Option<Url>,
+    },
+}
+
+/// Shared plumbing for the PM phase-transition subcommands.
+async fn run_transition(
+    settings: &referendum_poc::configuration::Settings,
+    config_dir: &std::path::Path,
+    wbb_url: Option<Url>,
+    from: &str,
+    to: &str,
+) -> anyhow::Result<()> {
+    let ceremony_dir = std::path::PathBuf::from(&settings._ceremony.election_context)
+        .parent()
+        .unwrap_or(config_dir)
+        .to_path_buf();
+    let ca_pem = tokio::fs::read_to_string(&settings.tls.ca_pem)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to read CA cert: {e}"))?;
+    let wbb_url = match wbb_url {
+        Some(url) => url,
+        None => Url::parse(&settings.wbb.base_url)
+            .map_err(|e| anyhow::anyhow!("invalid wbb.base_url: {e}"))?,
+    };
+    transition_phase(
+        PhaseTransitionConfig {
+            ceremony_dir,
+            wbb_url,
+            ca_pem,
+            clock: LogicalClock::new(settings.clock.base_ms, settings.clock.tick_ms),
+        },
+        from,
+        to,
+    )
+    .await?;
+    println!("phase transition {from} -> {to} published");
+    Ok(())
 }
 
 #[tokio::main]
@@ -110,6 +161,12 @@ async fn main() -> anyhow::Result<()> {
                 clock,
             })
             .await?;
+        }
+        Command::OpenVoting { wbb_url } => {
+            run_transition(&settings, &cli.config, wbb_url, "setup", "voting").await?;
+        }
+        Command::CloseVoting { wbb_url } => {
+            run_transition(&settings, &cli.config, wbb_url, "voting", "tallying").await?;
         }
     }
 

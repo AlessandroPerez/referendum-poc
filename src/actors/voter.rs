@@ -37,15 +37,20 @@ use tokio::sync::Mutex;
 use tower_http::services::ServeDir;
 
 use crate::actors::common::serve_rustls;
+use crate::clients::bb::BbClient;
 use crate::clients::dip::DipClient;
 use crate::clients::er::ErClient;
 use crate::clients::ns::NsClient;
 use crate::clients::rt::RtClient;
+use crate::clients::wbb::WbbClient;
 use crate::configuration::Settings;
-use crate::domain::{PinCode, TokenValue, Vid};
+use crate::domain::{BallotDigest, PinCode, ReferendumOption, TokenValue, Vid};
 use crate::protocol::acc::CredentialPackage;
 use crate::protocol::rng::{ActorRng, ActorSeed};
 use crate::protocol::tls::{reqwest_client_trusting_ca, rustls_config_for_service};
+use crate::protocol::voting::{self, ballot_digest, comm_b, referendum_choice, BallotDigestEntry};
+use evoting::api::client::Ballot;
+use evoting::api::prelude::{DiscloseCAI, Receipt};
 
 type G = RistrettoGroup;
 
@@ -60,6 +65,10 @@ pub struct VoterState {
     er_client: ErClient,
     ns_client: NsClient,
     rt_clients: Vec<RtClient>,
+    /// One client per trusted ballot box (V10 default: all configured BBs).
+    bb_clients: Vec<BbClient>,
+    /// Read-only WBB access for publication checks (V14).
+    wbb_client: WbbClient,
     /// Deterministic per-voter operation RNG (§9.2); short critical sections
     /// only, so a sync mutex is fine.
     rng: std::sync::Mutex<ActorRng>,
@@ -98,6 +107,30 @@ struct VoterSession {
     ns_token: Option<TokenValue>,
     pin: Option<PinCode>,
     voter: Option<Voter<G>>,
+    /// Ballot built by `/api/vote`, awaiting cast/confirmation (§3.8).
+    held: Option<HeldVote>,
+    /// Cast history (receipts per BB, confirmation state).
+    casts: Vec<CastRecord>,
+}
+
+/// A built-but-not-yet-confirmed ballot with its CAI disclosure (§3.8.4).
+/// Never derives `Debug`: the disclosure reveals the vote.
+#[derive(Clone, Serialize, Deserialize)]
+struct HeldVote {
+    ballot: Ballot<G>,
+    disclosure: DiscloseCAI<G>,
+    digest: BallotDigest,
+    /// Hex-encoded commitment randomness (§5.3.1.6).
+    rndcomm: String,
+    emoji: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct CastRecord {
+    digest: BallotDigest,
+    receipts: Vec<Receipt>,
+    emoji: Vec<String>,
+    confirmed_at_ms: Option<u64>,
 }
 
 impl VoterState {
@@ -300,6 +333,8 @@ async fn enroll_handler(
         ns_token: Some(tokens.ns_token),
         pin: None,
         voter: None,
+        held: None,
+        casts: Vec::new(),
     };
     state.save_session(&passphrase, &session).await?;
 
@@ -560,6 +595,276 @@ async fn pin_verify_handler(
     Ok(Json(VerifyPinResponse { valid }))
 }
 
+#[derive(Debug, Serialize)]
+struct ElectionResponse {
+    phase: String,
+    options: Vec<&'static str>,
+}
+
+/// Public election info for the SPA (V1/V11).
+#[tracing::instrument(skip(state))]
+async fn election_handler(
+    Extension(state): Extension<Arc<VoterState>>,
+) -> Result<Json<ElectionResponse>, VoterError> {
+    let phase = state
+        .wbb_client
+        .phase()
+        .await
+        .map_err(|e| VoterError::Protocol(format!("WBB phase query failed: {e}")))?;
+    Ok(Json(ElectionResponse {
+        phase,
+        options: vec!["blank", "approve", "reject"],
+    }))
+}
+
+#[derive(Deserialize)]
+struct VoteRequest {
+    passphrase: String,
+    option: ReferendumOption,
+    /// The PIN the voter types.  Deliberately NOT checked against the stored
+    /// credential here: a wrong (or ruse) PIN builds a ballot that verifies
+    /// at the BB but is filtered at tally time (§3.8.2 coercion resistance).
+    pin: PinCode,
+}
+
+impl std::fmt::Debug for VoteRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VoteRequest")
+            .field("passphrase", &"<redacted>")
+            .field("option", &"<redacted>")
+            .field("pin", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct VoteResponse {
+    digest: BallotDigest,
+    emoji: Vec<String>,
+}
+
+/// V11: build the ballot + CAI disclosure and hold it for casting (§3.8.2).
+#[tracing::instrument(skip(state, req))]
+async fn vote_handler(
+    Extension(state): Extension<Arc<VoterState>>,
+    Json(req): Json<VoteRequest>,
+) -> Result<Json<VoteResponse>, VoterError> {
+    let mut session = state.session_for(&req.passphrase).await?;
+    let voter = session.voter.clone().ok_or(VoterError::PinNotRetrieved)?;
+
+    let params = state.election_context.choice.clone();
+    let mut vote_rng = state.next_rng("vote");
+    let pin = req.pin.value() as usize;
+    let option = req.option;
+    let (ballot, disclosure) = tokio::task::spawn_blocking(move || {
+        let choice = referendum_choice(option, &params)?;
+        let builder = evoting::api::client::BallotBuilder::new(choice);
+        // D13: disclose the l1 code slot; l2 is trivial for a referendum.
+        Ok::<_, crate::protocol::voting::VotingError>(voter.vote_with_disclosure(
+            &builder,
+            pin,
+            true,
+            false,
+            &mut vote_rng,
+        ))
+    })
+    .await
+    .map_err(|e| VoterError::Protocol(e.to_string()))?
+    .map_err(|e| VoterError::Protocol(e.to_string()))?;
+
+    let digest = ballot_digest(&ballot).map_err(|e| VoterError::Protocol(e.to_string()))?;
+    let emoji: Vec<String> = ballot.to_emoji().iter().map(|s| s.to_string()).collect();
+    let rndcomm: [u8; 32] = {
+        let mut rng = state.next_rng("rndcomm");
+        let mut bytes = [0u8; 32];
+        rng.fill_bytes(&mut bytes);
+        bytes
+    };
+
+    session.held = Some(HeldVote {
+        ballot,
+        disclosure,
+        digest,
+        rndcomm: hex::encode(rndcomm),
+        emoji: emoji.clone(),
+    });
+    state.save_session(&req.passphrase, &session).await?;
+
+    Ok(Json(VoteResponse { digest, emoji }))
+}
+
+#[derive(Debug, Serialize)]
+struct CastResultResponse {
+    digest: BallotDigest,
+    receipts: Vec<Receipt>,
+    emoji: Vec<String>,
+}
+
+/// V12: cast the held ballot with CAT tokens to every trusted BB (§5.3.1.6,
+/// §3.8.4 steps 1–7).
+#[tracing::instrument(skip(state, req))]
+async fn cast_handler(
+    Extension(state): Extension<Arc<VoterState>>,
+    Json(req): Json<PassphraseRequest>,
+) -> Result<Json<CastResultResponse>, VoterError> {
+    let mut session = state.session_for(&req.passphrase).await?;
+    let held = session.held.clone().ok_or(VoterError::NoHeldBallot)?;
+
+    let rndcomm: [u8; 32] = hex::decode(&held.rndcomm)
+        .map_err(|e| VoterError::Protocol(format!("stored rndcomm corrupt: {e}")))?
+        .try_into()
+        .map_err(|_| VoterError::Protocol("stored rndcomm corrupt".into()))?;
+    let commitment =
+        comm_b(&held.ballot, &rndcomm).map_err(|e| VoterError::Protocol(e.to_string()))?;
+
+    // Sign commB with the app key (AtSK) and request casting tokens.
+    let at_sk_seed: [u8; 32] = hex::decode(&session.at_sk_seed)
+        .map_err(|e| VoterError::Protocol(format!("stored app key corrupt: {e}")))?
+        .try_into()
+        .map_err(|_| VoterError::Protocol("stored app key corrupt".into()))?;
+    let at_sk = ed25519_dalek::SigningKey::from_bytes(&at_sk_seed);
+    use base64::Engine as _;
+    use ed25519_dalek::Signer as _;
+    let signature = base64::engine::general_purpose::STANDARD
+        .encode(at_sk.sign(commitment.as_bytes()).to_bytes());
+
+    let tokens = state
+        .er_client
+        .casting_tokens(&session.registration_token, &commitment, &signature)
+        .await?;
+    if tokens.casting_tokens.len() != state.bb_clients.len() {
+        return Err(VoterError::Protocol(
+            "ER issued an unexpected number of casting tokens".into(),
+        ));
+    }
+
+    // Cast to every trusted BB (V10 default: all).
+    let mut receipts = Vec::with_capacity(state.bb_clients.len());
+    for (bb, token) in state.bb_clients.iter().zip(&tokens.casting_tokens) {
+        let response = bb.cast(&held.ballot, &rndcomm, token).await?;
+        receipts.push(response.receipt);
+    }
+
+    session.casts.push(CastRecord {
+        digest: held.digest,
+        receipts: receipts.clone(),
+        emoji: held.emoji.clone(),
+        confirmed_at_ms: None,
+    });
+    state.save_session(&req.passphrase, &session).await?;
+
+    Ok(Json(CastResultResponse {
+        digest: held.digest,
+        receipts,
+        emoji: held.emoji,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct BallotStatusResponse {
+    digest: BallotDigest,
+    /// BB ids whose `ballot_digest` entry is on the WBB.
+    published_bb_ids: Vec<u64>,
+    /// True when ≥ 2 BBs published the digest (no ⊥, §3.8.5).
+    no_bot: bool,
+    confirmed_at_ms: Option<u64>,
+}
+
+/// V12 step 7 / V14: check the WBB publication of the last cast ballot.
+#[tracing::instrument(skip(state, req))]
+async fn ballot_status_handler(
+    Extension(state): Extension<Arc<VoterState>>,
+    Json(req): Json<PassphraseRequest>,
+) -> Result<Json<BallotStatusResponse>, VoterError> {
+    let session = state.session_for(&req.passphrase).await?;
+    let record = session.casts.last().ok_or(VoterError::NoHeldBallot)?;
+    let published_bb_ids = wbb_digest_publications(&state, &record.digest).await?;
+    Ok(Json(BallotStatusResponse {
+        digest: record.digest,
+        no_bot: published_bb_ids.len() >= voting::NO_BOT_MIN_BBS,
+        published_bb_ids,
+        confirmed_at_ms: record.confirmed_at_ms,
+    }))
+}
+
+/// Collect the bb_ids whose `ballot_digest` WBB entry matches `digest`.
+async fn wbb_digest_publications(
+    state: &VoterState,
+    digest: &BallotDigest,
+) -> Result<Vec<u64>, VoterError> {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    let entries = state
+        .wbb_client
+        .entries()
+        .await
+        .map_err(|e| VoterError::Protocol(format!("WBB read failed: {e}")))?;
+    let mut bb_ids = Vec::new();
+    for sequenced in &entries.entries {
+        let Some(data_b64) = sequenced.entry.get("data").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Ok(data) = B64.decode(data_b64) else {
+            continue;
+        };
+        let Some(parsed) = voting::parse_wbb_data(&data) else {
+            continue;
+        };
+        if parsed.entry_type != "ballot_digest" {
+            continue;
+        }
+        let Ok(payload) = parsed.decode_payload::<BallotDigestEntry>() else {
+            continue;
+        };
+        if payload.digest == *digest {
+            bb_ids.push(payload.receipt.bb_id);
+        }
+    }
+    bb_ids.sort_unstable();
+    bb_ids.dedup();
+    Ok(bb_ids)
+}
+
+#[derive(Debug, Serialize)]
+struct ConfirmResponse {
+    digest: BallotDigest,
+    confirmed_at_ms: u64,
+}
+
+/// V13: send the held CAI disclosure to the BBs (§3.8.4 steps 8–17).
+#[tracing::instrument(skip(state, req))]
+async fn confirm_handler(
+    Extension(state): Extension<Arc<VoterState>>,
+    Json(req): Json<PassphraseRequest>,
+) -> Result<Json<ConfirmResponse>, VoterError> {
+    let mut session = state.session_for(&req.passphrase).await?;
+    let held = session.held.clone().ok_or(VoterError::NoHeldBallot)?;
+    if !session.casts.iter().any(|c| c.digest == held.digest) {
+        return Err(VoterError::Protocol(
+            "ballot must be cast before confirmation".into(),
+        ));
+    }
+
+    let mut confirmed_at_ms = 0u64;
+    for bb in &state.bb_clients {
+        let response = bb.cai(&held.digest, &held.disclosure).await?;
+        confirmed_at_ms = response.confirmed_at_ms.max(confirmed_at_ms);
+    }
+
+    if let Some(record) = session.casts.iter_mut().find(|c| c.digest == held.digest) {
+        record.confirmed_at_ms = Some(confirmed_at_ms);
+    }
+    // The disclosure has served its purpose; drop the held ballot.
+    session.held = None;
+    let digest = held.digest;
+    state.save_session(&req.passphrase, &session).await?;
+
+    Ok(Json(ConfirmResponse {
+        digest,
+        confirmed_at_ms,
+    }))
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
@@ -574,6 +879,8 @@ enum VoterError {
     PinNotReady,
     #[error("PIN has not been retrieved yet")]
     PinNotRetrieved,
+    #[error("no ballot to operate on — vote (and cast) first")]
+    NoHeldBallot,
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
@@ -588,6 +895,8 @@ enum VoterError {
     Ns(#[from] crate::clients::ns::NsError),
     #[error("RT error: {0}")]
     Rt(#[from] crate::clients::rt::RtError),
+    #[error("BB error: {0}")]
+    Bb(#[from] crate::clients::bb::BbError),
 }
 
 impl IntoResponse for VoterError {
@@ -598,6 +907,7 @@ impl IntoResponse for VoterError {
             Self::AlreadyEnrolled => (StatusCode::CONFLICT, self.to_string()),
             Self::PinNotReady => (StatusCode::CONFLICT, self.to_string()),
             Self::PinNotRetrieved => (StatusCode::BAD_REQUEST, self.to_string()),
+            Self::NoHeldBallot => (StatusCode::BAD_REQUEST, self.to_string()),
             // Internal failures are logged but not leaked (style guide §03).
             _ => {
                 tracing::error!(error = %self, "voter-server internal error");
@@ -621,6 +931,11 @@ pub fn router(state: Arc<VoterState>) -> Router {
         .route("/api/pin/retrieve", post(pin_retrieve_handler))
         .route("/api/pin", post(pin_show_handler))
         .route("/api/pin/verify", post(pin_verify_handler))
+        .route("/api/election", axum::routing::get(election_handler))
+        .route("/api/vote", post(vote_handler))
+        .route("/api/cast", post(cast_handler))
+        .route("/api/ballot/status", post(ballot_status_handler))
+        .route("/api/confirm", post(confirm_handler))
         .fallback_service(ServeDir::new(&state.static_dir).append_index_html_on_directories(true))
         .layer(Extension(state))
 }
@@ -652,10 +967,15 @@ pub async fn build_service(
     let dip_client = DipClient::new(client.clone(), parse(&settings.dip.base_url, "DIP")?);
     let er_client = ErClient::new(client.clone(), parse(&settings.er.base_url, "ER")?);
     let ns_client = NsClient::new(client.clone(), parse(&settings.ns.base_url, "NS")?);
-    let rt_clients = build_rt_clients(&settings, client)?;
+    let rt_clients = build_rt_clients(&settings, client.clone())?;
     if rt_clients.is_empty() {
         anyhow::bail!("no RT peers configured (peers named rt-* required)");
     }
+    let bb_clients = build_bb_clients(&settings, client.clone())?;
+    if bb_clients.is_empty() {
+        anyhow::bail!("no BB peers configured (peers named bb-* required for casting)");
+    }
+    let wbb_client = WbbClient::new(client, parse(&settings.wbb.base_url, "WBB")?);
 
     let state = Arc::new(VoterState {
         state_dir: PathBuf::from(&settings.voter.state_dir),
@@ -667,6 +987,8 @@ pub async fn build_service(
         er_client,
         ns_client,
         rt_clients,
+        bb_clients,
+        wbb_client,
         rng: std::sync::Mutex::new(actor_seed.into_rng()),
         pending_logins: Mutex::new(HashMap::new()),
     });
@@ -686,6 +1008,18 @@ pub async fn build_service(
         .map_err(|e| anyhow::anyhow!("failed to load TLS config: {e}"))?;
 
     Ok((addr, rustls_config, state))
+}
+
+fn build_bb_clients(settings: &Settings, client: reqwest::Client) -> anyhow::Result<Vec<BbClient>> {
+    let mut clients = Vec::new();
+    for peer in &settings.peers {
+        if peer.name.starts_with("bb-") {
+            let url = reqwest::Url::parse(&peer.base_url)
+                .map_err(|e| anyhow::anyhow!("invalid BB peer URL {}: {}", peer.base_url, e))?;
+            clients.push(BbClient::new(client.clone(), url));
+        }
+    }
+    Ok(clients)
 }
 
 fn build_rt_clients(settings: &Settings, client: reqwest::Client) -> anyhow::Result<Vec<RtClient>> {

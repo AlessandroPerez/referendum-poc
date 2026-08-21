@@ -5,6 +5,7 @@
 use anyhow::Context;
 
 pub mod admin;
+pub mod bb;
 pub mod common;
 pub mod dip;
 pub mod er;
@@ -12,6 +13,7 @@ pub mod ns;
 pub mod rt;
 pub mod tt;
 pub mod voter;
+pub mod wbb_ui;
 
 /// Placeholder entrypoint used by binary targets whose milestone has not landed
 /// yet. Initializes telemetry and exits successfully.

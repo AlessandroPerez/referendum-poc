@@ -11,3 +11,4 @@ pub mod merkle;
 pub mod rng;
 pub mod setup;
 pub mod tls;
+pub mod voting;
