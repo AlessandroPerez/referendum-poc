@@ -38,6 +38,7 @@ const EXPECTED_PIN_VOTER_1: usize = 25149446;
 #[tokio::test]
 async fn voter_enrolls_and_verifies_deterministic_pin() {
     helpers::init();
+    let _cluster = helpers::cluster_guard().await;
 
     // ── 1. Ceremony ────────────────────────────────────────────────────────
     let temp = tempfile::tempdir().expect("tempdir");

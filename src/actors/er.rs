@@ -56,6 +56,13 @@ pub struct ErState {
     last_rid: Arc<Mutex<HashMap<Vid, String>>>,
     /// Logical clock for WBB entry timestamps (§9.4).
     clock: Arc<Mutex<LogicalClock>>,
+    /// Revoked vids (V9); their credentials are excluded from the eligible
+    /// list and filtered at tally (M8).
+    revoked_vids: Arc<Mutex<HashSet<Vid>>>,
+    /// Post-revocation vid reassignments, keyed by fiscal id (V9).
+    vid_overrides: Arc<Mutex<HashMap<String, Vid>>>,
+    /// Next spare vid to hand out on revocation (n_voters+1 ..= n_acc, D12).
+    next_spare_vid: Arc<Mutex<u64>>,
     /// Casting tokens issued per vid, keyed by ballot commitment (CAT rate
     /// limit over DISTINCT commitments, D3/§12).  Re-requesting tokens for
     /// the SAME commitment returns the cached tokens instead of minting new
@@ -72,12 +79,23 @@ pub struct ErState {
 type CommitmentTokens = HashMap<CommB, Vec<TokenValue>>;
 
 /// A registered voter device (PoC: app public key + opaque state blob).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct DeviceRecord {
-    #[allow(dead_code)]
     at_pk: String,
     #[allow(dead_code)]
     pk_dv: String,
+    /// Passphrase-encrypted voter state (Deviation 6): the ER cannot read it;
+    /// it is returned verbatim on new-device recovery (V8).
+    state_blob: Option<String>,
+}
+
+impl std::fmt::Debug for DeviceRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceRecord")
+            .field("at_pk", &self.at_pk)
+            .field("state_blob", &"<opaque>")
+            .finish_non_exhaustive()
+    }
 }
 
 impl std::fmt::Debug for ErState {
@@ -126,6 +144,7 @@ impl ErState {
         token_seed: ActorSeed,
         internal_token: SecretString,
     ) -> Self {
+        let first_spare = election.n_voters as u64 + 1;
         Self {
             signing_key_seed: SecretString::new(hex::encode(signing_key.to_bytes())),
             admin_token,
@@ -141,6 +160,9 @@ impl ErState {
             devices: Arc::new(Mutex::new(HashMap::new())),
             last_rid: Arc::new(Mutex::new(HashMap::new())),
             clock: Arc::new(Mutex::new(clock)),
+            revoked_vids: Arc::new(Mutex::new(HashSet::new())),
+            vid_overrides: Arc::new(Mutex::new(HashMap::new())),
+            next_spare_vid: Arc::new(Mutex::new(first_spare)),
             cast_commitments: Arc::new(Mutex::new(HashMap::new())),
             token_seed,
             internal_token,
@@ -197,6 +219,21 @@ impl ErState {
             return Err(ErError::Unauthorized);
         }
         Ok(meta)
+    }
+
+    /// Resolve a fiscal id to its EFFECTIVE vid: the ceremony assignment
+    /// (index+1, §3.5.3) unless a revocation reassigned it (V9).
+    async fn effective_vid(&self, fiscal_id: &str) -> Result<Vid, ErError> {
+        if let Some(vid) = self.vid_overrides.lock().await.get(fiscal_id) {
+            return Ok(*vid);
+        }
+        let voter_index = self
+            .dip
+            .voters
+            .iter()
+            .position(|v| v.id == fiscal_id)
+            .ok_or(ErError::Unauthorized)?;
+        Vid::new((voter_index + 1) as u64).map_err(|_| ErError::Internal("vid out of range".into()))
     }
 
     fn verify_dip_assertion(
@@ -319,21 +356,15 @@ async fn login_handler(
     state.verify_dip_assertion(&req.assertion, &req.signature)?;
 
     // Deterministic vid assignment: the i-th registry voter gets vid i (§3.5.3,
-    // matches the ceremony's `assign_vids` ordering).  Re-login returns the
-    // same vid with a fresh registration token.  Unknown ids get the same
-    // generic 401 as a bad signature (anti-enumeration, style guide §09).
-    let voter_index = state
-        .dip
-        .voters
-        .iter()
-        .position(|v| v.id == req.assertion.fiscal_id)
-        .ok_or(ErError::Unauthorized)?;
-    let vid = Vid::new((voter_index + 1) as u64)
-        .map_err(|_| ErError::Internal("vid out of range".into()))?;
+    // matches the ceremony's `assign_vids` ordering), unless a revocation
+    // reassigned a spare vid (V9).  Re-login returns the same vid with a
+    // fresh registration token.  Unknown ids get the same generic 401 as a
+    // bad signature (anti-enumeration, style guide §09).
+    let vid = state.effective_vid(&req.assertion.fiscal_id).await?;
 
     let credential_package = state
         .enrollment_packages
-        .get(voter_index)
+        .get((vid.value() - 1) as usize)
         .map(EnrollmentPackage::credential_package)
         .ok_or_else(|| ErError::Internal("missing enrollment package".into()))?;
 
@@ -356,6 +387,9 @@ struct DeviceRegisterRequest {
     pk_dv: String,
     #[serde(default)]
     at_pk: String,
+    /// Passphrase-encrypted voter state blob (Deviation 6, base64).
+    #[serde(default)]
+    state_blob: Option<String>,
 }
 
 async fn device_register_handler(
@@ -370,9 +404,219 @@ async fn device_register_handler(
         DeviceRecord {
             at_pk: req.at_pk,
             pk_dv: req.pk_dv,
+            state_blob: req.state_blob,
         },
     );
     Ok(StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+struct DeviceBlobRequest {
+    registration_token: TokenValue,
+    /// Passphrase-encrypted voter state blob (base64).
+    state_blob: String,
+}
+
+impl std::fmt::Debug for DeviceBlobRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceBlobRequest")
+            .field("registration_token", &self.registration_token)
+            .field("state_blob", &"<opaque>")
+            .finish()
+    }
+}
+
+/// Refresh the stored recovery blob (called after PIN retrieval, V8).
+#[tracing::instrument(skip(state, req))]
+async fn device_blob_handler(
+    Extension(state): Extension<Arc<ErState>>,
+    Json(req): Json<DeviceBlobRequest>,
+) -> Result<StatusCode, ErError> {
+    let meta = state
+        .verify_token(&req.registration_token, TokenType::Registration)
+        .await?;
+    let mut devices = state.devices.lock().await;
+    let record = devices.get_mut(&meta.vid).ok_or(ErError::Unauthorized)?;
+    record.state_blob = Some(req.state_blob);
+    Ok(StatusCode::OK)
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceRecoverRequest {
+    assertion: DipAssertion,
+    signature: String,
+}
+
+#[derive(Serialize)]
+struct DeviceRecoverResponse {
+    vid: Vid,
+    /// Passphrase-encrypted state blob — only the passphrase holder can
+    /// decrypt it (§3.7.4 approximation, Deviation 6).
+    state_blob: String,
+}
+
+impl std::fmt::Debug for DeviceRecoverResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceRecoverResponse")
+            .field("vid", &self.vid)
+            .field("state_blob", &"<opaque>")
+            .finish()
+    }
+}
+
+/// V8: new-device recovery — a fresh DIP login returns the encrypted state
+/// blob; the passphrase check happens client-side by decryption (fails
+/// closed on a wrong passphrase).
+#[tracing::instrument(skip(state, req))]
+async fn device_recover_handler(
+    Extension(state): Extension<Arc<ErState>>,
+    Json(req): Json<DeviceRecoverRequest>,
+) -> Result<Json<DeviceRecoverResponse>, ErError> {
+    state.verify_dip_assertion(&req.assertion, &req.signature)?;
+    let vid = state.effective_vid(&req.assertion.fiscal_id).await?;
+    let devices = state.devices.lock().await;
+    let record = devices.get(&vid).ok_or(ErError::Unauthorized)?;
+    let state_blob = record.state_blob.clone().ok_or(ErError::Unauthorized)?;
+    Ok(Json(DeviceRecoverResponse { vid, state_blob }))
+}
+
+#[derive(Debug, Deserialize)]
+struct RevocationRequest {
+    assertion: DipAssertion,
+    signature: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RevocationResponse {
+    /// The freshly assigned spare vid (§3.7.5).
+    vid: Vid,
+    registration_token: TokenValue,
+    credential_package: CredentialPackage,
+}
+
+/// V9: revoke the caller's credential and re-issue a spare vid (§3.7.5).
+///
+/// Publishes a salted-hash `voting,ER,revocation_commitment,1,…` entry: the
+/// commitment binds (old vid, new vid) without revealing the linkage.
+#[tracing::instrument(skip(state, req))]
+async fn revocation_handler(
+    Extension(state): Extension<Arc<ErState>>,
+    Json(req): Json<RevocationRequest>,
+) -> Result<Json<RevocationResponse>, ErError> {
+    state.verify_dip_assertion(&req.assertion, &req.signature)?;
+    let old_vid = state.effective_vid(&req.assertion.fiscal_id).await?;
+
+    // Assign the next spare vid (nACC > nV leaves spares, D12).
+    let new_vid = {
+        let mut next = state.next_spare_vid.lock().await;
+        if *next > state.election.n_acc as u64 {
+            return Err(ErError::Internal("spare credentials exhausted".into()));
+        }
+        let vid = Vid::new(*next).map_err(|_| ErError::Internal("vid out of range".into()))?;
+        *next += 1;
+        vid
+    };
+    state.revoked_vids.lock().await.insert(old_vid);
+    state
+        .vid_overrides
+        .lock()
+        .await
+        .insert(req.assertion.fiscal_id.clone(), new_vid);
+    // The new credential has no device/session state yet.
+    state.devices.lock().await.remove(&old_vid);
+    // Defense in depth: kill every outstanding token of the revoked vid so
+    // its registration session cannot mint casting tokens any more (the
+    // tally-side ACC filtering in M8 remains the protocol-level backstop).
+    for meta in state.tokens.lock().await.values_mut() {
+        if meta.vid == old_vid {
+            meta.used = true;
+        }
+    }
+
+    // Publish the commitment: SHA3-256(domain ‖ salt ‖ old ‖ new); the salt
+    // comes from the ER operation seed so the pair is not publicly linkable.
+    let commitment = {
+        use rand::RngCore;
+        use sha3::{Digest as _, Sha3_256};
+        let mut salt_rng = operation_rng(&state.token_seed, "revocation-salt", old_vid.value());
+        let mut salt = [0u8; 32];
+        salt_rng.fill_bytes(&mut salt);
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"referendum-poc-revocation");
+        hasher.update(salt);
+        hasher.update(old_vid.value().to_le_bytes());
+        hasher.update(new_vid.value().to_le_bytes());
+        hex::encode(hasher.finalize())
+    };
+    let payload = serde_json::json!({ "commitment": commitment });
+    let data = crate::protocol::voting::wbb_data_string(
+        "voting",
+        "ER",
+        "revocation_commitment",
+        1,
+        &payload,
+    )
+    .map_err(|e| ErError::Internal(e.to_string()))?;
+    let timestamp = {
+        let mut clock = state.clock.lock().await;
+        let ts = clock.now_ms() as i64;
+        clock.advance();
+        ts
+    };
+    let signing_key = state.signing_key();
+    let entry = tokio::task::spawn_blocking(move || {
+        sign_entry(data.as_bytes(), "ER-1", timestamp, &signing_key)
+    })
+    .await
+    .map_err(|e| ErError::Internal(e.to_string()))?;
+    state
+        .wbb_client
+        .submit_and_wait(&entry, std::time::Duration::from_secs(10))
+        .await
+        .map_err(|e| ErError::Internal(format!("WBB publication failed: {e}")))?;
+
+    let credential_package = state
+        .enrollment_packages
+        .get((new_vid.value() - 1) as usize)
+        .map(EnrollmentPackage::credential_package)
+        .ok_or_else(|| ErError::Internal("missing spare enrollment package".into()))?;
+    let registration_token = state
+        .next_token(TokenType::Registration, new_vid, None, None)
+        .await;
+    state.enrolled_vids.lock().await.insert(new_vid);
+
+    Ok(Json(RevocationResponse {
+        vid: new_vid,
+        registration_token,
+        credential_package,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct EligibleResponse {
+    vids: Vec<Vid>,
+}
+
+/// A7 support: the eligible vid list (assigned minus revoked), also
+/// published to the WBB at tally start (M8).
+async fn eligible_handler(
+    Extension(state): Extension<Arc<ErState>>,
+) -> Result<Json<EligibleResponse>, ErError> {
+    let overrides = state.vid_overrides.lock().await;
+    let revoked = state.revoked_vids.lock().await;
+    let mut vids = Vec::with_capacity(state.dip.voters.len());
+    for (index, voter) in state.dip.voters.iter().enumerate() {
+        let vid = match overrides.get(&voter.id) {
+            Some(vid) => *vid,
+            None => Vid::new((index + 1) as u64)
+                .map_err(|_| ErError::Internal("vid out of range".into()))?,
+        };
+        if !revoked.contains(&vid) {
+            vids.push(vid);
+        }
+    }
+    vids.sort_unstable();
+    Ok(Json(EligibleResponse { vids }))
 }
 
 #[derive(Debug, Serialize)]
@@ -704,6 +948,10 @@ pub fn router(state: Arc<ErState>) -> Router {
             .route("/admin/setup", post(setup_handler))
             .route("/login", post(login_handler))
             .route("/devices", post(device_register_handler))
+            .route("/devices/blob", post(device_blob_handler))
+            .route("/devices/recover", post(device_recover_handler))
+            .route("/revocations", post(revocation_handler))
+            .route("/voters/eligible", axum::routing::get(eligible_handler))
             .route("/tokens/pin-request", post(pin_request_tokens_handler))
             .route("/tokens/retrieval", post(retrieval_tokens_handler))
             .route("/tokens/casting", post(casting_tokens_handler))

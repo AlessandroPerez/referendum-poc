@@ -42,6 +42,7 @@ struct ClusterPorts {
 #[tokio::test]
 async fn three_voters_cast_with_cat_and_cai() {
     helpers::init();
+    let _cluster = helpers::cluster_guard().await;
 
     // ── 1. Ceremony + WBB (entities incl. BBs and the phase manager) ──────
     let temp = tempfile::tempdir().expect("tempdir");
@@ -412,6 +413,7 @@ async fn three_voters_cast_with_cat_and_cai() {
 #[tokio::test]
 async fn wbb_policy_enforcement() {
     helpers::init();
+    let _cluster = helpers::cluster_guard().await;
 
     let temp = tempfile::tempdir().expect("tempdir");
     let ceremony_dir = temp.path();

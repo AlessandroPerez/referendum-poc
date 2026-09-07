@@ -32,6 +32,7 @@ pub struct DeviceRegisterRequest {
     pub registration_token: TokenValue,
     pub pk_dv: String,
     pub at_pk: String,
+    pub state_blob: Option<String>,
 }
 
 /// Response from `POST /tokens/pin-request`.
@@ -114,6 +115,7 @@ impl ErClient {
         registration_token: &TokenValue,
         pk_dv: &str,
         at_pk: &str,
+        state_blob: Option<String>,
     ) -> Result<(), ErError> {
         let url = self.base_url.join("devices")?;
         let response = self
@@ -123,6 +125,7 @@ impl ErClient {
                 registration_token: registration_token.clone(),
                 pk_dv: pk_dv.to_string(),
                 at_pk: at_pk.to_string(),
+                state_blob,
             })
             .timeout(Duration::from_secs(10))
             .send()
@@ -230,6 +233,122 @@ impl ErClient {
         }
     }
 
+    /// `POST /devices/blob` — refresh the encrypted recovery blob (V8).
+    pub async fn upload_device_blob(
+        &self,
+        registration_token: &TokenValue,
+        state_blob: &str,
+    ) -> Result<(), ErError> {
+        #[derive(Serialize)]
+        struct Req {
+            registration_token: TokenValue,
+            state_blob: String,
+        }
+        let url = self.base_url.join("devices/blob")?;
+        let response = self
+            .client
+            .post(url)
+            .json(&Req {
+                registration_token: registration_token.clone(),
+                state_blob: state_blob.to_string(),
+            })
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(ErError::Network)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let status = response.status();
+            let body = response.text().await.map_err(ErError::Network)?;
+            Err(ErError::Http(status, body))
+        }
+    }
+
+    /// `POST /devices/recover` — fetch the encrypted recovery blob (V8).
+    pub async fn recover_device(
+        &self,
+        assertion: &DipAssertion,
+        signature: &str,
+    ) -> Result<DeviceRecoverResponse, ErError> {
+        #[derive(Serialize)]
+        struct Req {
+            assertion: DipAssertion,
+            signature: String,
+        }
+        let url = self.base_url.join("devices/recover")?;
+        let response = self
+            .client
+            .post(url)
+            .json(&Req {
+                assertion: assertion.clone(),
+                signature: signature.to_string(),
+            })
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(ErError::Network)?;
+        let status = response.status();
+        let body = response.text().await.map_err(ErError::Network)?;
+        if status.is_success() {
+            serde_json::from_str(&body).map_err(ErError::Json)
+        } else {
+            Err(ErError::Http(status, body))
+        }
+    }
+
+    /// `POST /revocations` — revoke the caller's credential, re-issue a
+    /// spare vid (V9, §3.7.5).
+    pub async fn revoke(
+        &self,
+        assertion: &DipAssertion,
+        signature: &str,
+    ) -> Result<RevocationResponse, ErError> {
+        #[derive(Serialize)]
+        struct Req {
+            assertion: DipAssertion,
+            signature: String,
+        }
+        let url = self.base_url.join("revocations")?;
+        let response = self
+            .client
+            .post(url)
+            .json(&Req {
+                assertion: assertion.clone(),
+                signature: signature.to_string(),
+            })
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(ErError::Network)?;
+        let status = response.status();
+        let body = response.text().await.map_err(ErError::Network)?;
+        if status.is_success() {
+            serde_json::from_str(&body).map_err(ErError::Json)
+        } else {
+            Err(ErError::Http(status, body))
+        }
+    }
+
+    /// `GET /voters/eligible` — the current eligible vid list (A7).
+    pub async fn eligible(&self) -> Result<EligibleResponse, ErError> {
+        let url = self.base_url.join("voters/eligible")?;
+        let response = self
+            .client
+            .get(url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(ErError::Network)?;
+        let status = response.status();
+        let body = response.text().await.map_err(ErError::Network)?;
+        if status.is_success() {
+            serde_json::from_str(&body).map_err(ErError::Json)
+        } else {
+            Err(ErError::Http(status, body))
+        }
+    }
+
     /// `POST /tokens/casting` — request anonymous casting tokens for `comm_b`
     /// (§5.3.1.6). `signature` is the base64 EdDSA signature over the commB
     /// bytes made with the voter's app key.
@@ -302,6 +421,36 @@ impl ErClient {
             Err(ErError::Http(status, body))
         }
     }
+}
+
+/// Response from `POST /devices/recover`.
+#[derive(Clone, Deserialize)]
+pub struct DeviceRecoverResponse {
+    pub vid: Vid,
+    pub state_blob: String,
+}
+
+impl std::fmt::Debug for DeviceRecoverResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceRecoverResponse")
+            .field("vid", &self.vid)
+            .field("state_blob", &"<opaque>")
+            .finish()
+    }
+}
+
+/// Response from `POST /revocations`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RevocationResponse {
+    pub vid: Vid,
+    pub registration_token: TokenValue,
+    pub credential_package: crate::protocol::acc::CredentialPackage,
+}
+
+/// Response from `GET /voters/eligible`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EligibleResponse {
+    pub vids: Vec<Vid>,
 }
 
 /// Response from `POST /tokens/casting`.

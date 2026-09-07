@@ -25,6 +25,7 @@ const MASTER_SEED: [u8; 32] = [0xabu8; 32];
 #[tokio::test]
 async fn er_publishes_three_setup_entries_to_wbb() {
     helpers::init();
+    let _cluster = helpers::cluster_guard().await;
 
     // 1. Run ceremony in a temp directory.
     let temp = tempfile::tempdir().expect("tempdir");

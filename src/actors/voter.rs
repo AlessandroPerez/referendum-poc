@@ -65,8 +65,12 @@ pub struct VoterState {
     er_client: ErClient,
     ns_client: NsClient,
     rt_clients: Vec<RtClient>,
-    /// One client per trusted ballot box (V10 default: all configured BBs).
+    /// Peer names aligned with `rt_clients` (for V10 trusted selection).
+    rt_names: Vec<String>,
+    /// One client per configured ballot box (V10 default: all trusted).
     bb_clients: Vec<BbClient>,
+    /// Peer names aligned with `bb_clients`.
+    bb_names: Vec<String>,
     /// Read-only WBB access for publication checks (V14).
     wbb_client: WbbClient,
     /// Deterministic per-voter operation RNG (§9.2); short critical sections
@@ -111,6 +115,21 @@ struct VoterSession {
     held: Option<HeldVote>,
     /// Cast history (receipts per BB, confirmation state).
     casts: Vec<CastRecord>,
+    /// Ruse PIN + simulated voter (V7, §3.7.3 / Deviation 4).
+    #[serde(default)]
+    ruse_pin: Option<PinCode>,
+    #[serde(default)]
+    ruse_voter: Option<Voter<G>>,
+    /// Trusted authority selection (V10, §3.12).  `None` = all configured.
+    #[serde(default)]
+    trusted: Option<TrustedSettings>,
+}
+
+/// Trusted RT/BB selection (V10).  Names are peer names (`rt-1`, `bb-2`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TrustedSettings {
+    rts: Vec<String>,
+    bbs: Vec<String>,
 }
 
 /// A built-but-not-yet-confirmed ballot with its CAI disclosure (§3.8.4).
@@ -196,6 +215,209 @@ impl VoterState {
         self.load_session(passphrase)
             .await?
             .ok_or(VoterError::Unauthorized)
+    }
+
+    /// The RT clients the session trusts (V10; default all, order preserved).
+    fn trusted_rts<'a>(&'a self, session: &VoterSession) -> Vec<&'a RtClient> {
+        match &session.trusted {
+            Some(t) => self
+                .rt_names
+                .iter()
+                .zip(&self.rt_clients)
+                .filter(|(name, _)| t.rts.contains(name))
+                .map(|(_, c)| c)
+                .collect(),
+            None => self.rt_clients.iter().collect(),
+        }
+    }
+
+    /// The BB clients the session trusts (V10; default all, order preserved).
+    fn trusted_bbs<'a>(&'a self, session: &VoterSession) -> Vec<&'a BbClient> {
+        match &session.trusted {
+            Some(t) => self
+                .bb_names
+                .iter()
+                .zip(&self.bb_clients)
+                .filter(|(name, _)| t.bbs.contains(name))
+                .map(|(_, c)| c)
+                .collect(),
+            None => self.bb_clients.iter().collect(),
+        }
+    }
+
+    /// V3: request PIN delivery — fresh pin-request tokens under a new rid,
+    /// NS registration, and RT `/credentials/request` on the trusted tellers
+    /// (§5.3.1.2/.3).  Updates `session.rid`/`ns_token`.
+    async fn run_pin_request(&self, session: &mut VoterSession) -> Result<(), VoterError> {
+        let tokens = self
+            .er_client
+            .pin_request_tokens(&session.registration_token)
+            .await?;
+        self.ns_client.register(session.vid, &tokens.rid).await?;
+        let trusted = self.trusted_rts(session);
+        if tokens.rt_tokens.len() < trusted.len() {
+            return Err(VoterError::Protocol(
+                "ER issued fewer RT tokens than trusted tellers".into(),
+            ));
+        }
+        for (rt, token) in trusted.iter().zip(&tokens.rt_tokens) {
+            rt.credentials_request(token, &tokens.rid).await?;
+        }
+        session.rid = Some(tokens.rid);
+        session.ns_token = Some(tokens.ns_token);
+        Ok(())
+    }
+
+    /// V4: retrieval-token share delivery + threshold DVNIZKP against the
+    /// trusted tellers, finalizing the `Voter` (§5.3.1.4/.5, §3.6.2/.3).
+    async fn run_retrieval(&self, session: &mut VoterSession) -> Result<PinCode, VoterError> {
+        let rid = session.rid.clone().ok_or(VoterError::PinNotReady)?;
+
+        // Gate on NS readiness (≥ t_RT notifications, §5.3.1.4).
+        let notifications = self.ns_client.notifications(session.vid, &rid).await?;
+        if notifications.notifications.len() < self.t_rt {
+            return Err(VoterError::PinNotReady);
+        }
+
+        // Re-login for retrieval tokens (§5.3.1.4).
+        let auth = self
+            .dip_client
+            .authenticate(&session.fiscal_id)
+            .await
+            .map_err(|_| VoterError::Unauthorized)?;
+        let retrieval = self
+            .er_client
+            .retrieval_tokens(
+                &session.registration_token,
+                &auth.assertion,
+                &auth.signature,
+            )
+            .await?;
+        let trusted = self.trusted_rts(session);
+        if retrieval.retrieval_tokens.len() > trusted.len() {
+            return Err(VoterError::Protocol(
+                "more retrieval tokens than trusted RTs".into(),
+            ));
+        }
+
+        // Fetch this voter's AccShareBroadcast from t_RT tellers (§3.6.3,
+        // Deviation 5: shares travel over HTTPS from the RTs, not the ER).
+        let delivery: Vec<(&RtClient, TokenValue)> = trusted
+            .into_iter()
+            .zip(retrieval.retrieval_tokens.iter().cloned())
+            .collect();
+        let mut share_broadcasts = Vec::with_capacity(delivery.len());
+        for (rt, token) in &delivery {
+            share_broadcasts.push(rt.credentials_deliver(token).await?);
+        }
+
+        // Rebuild the credential builder + PIN locally (§8.3 step 4-5).
+        let election_context = self.election_context.clone();
+        let rt_pk = self.rt_pk.clone();
+        let package = session.credential_package.clone();
+        let mut build_rng = self.next_rng("voter-build-acc");
+        let mut voter_rng = self.next_rng("voter-builder");
+        let (credential_builder, pin, voter_builder, p1a, a_point) =
+            tokio::task::spawn_blocking(move || {
+                let enc_a_ext = package.enc_a_ext.clone().into();
+                let (builder, pin, _public_acc) = voter_build_acc(
+                    &election_context.pk,
+                    &rt_pk,
+                    package.a,
+                    enc_a_ext,
+                    &share_broadcasts,
+                    &mut build_rng,
+                );
+                let voter_builder =
+                    VoterBuilder::new(&election_context, builder.clone(), &mut voter_rng);
+                let p1a = ThresholdRegistrationTeller::credential_p1a(
+                    &election_context.pk,
+                    &builder,
+                    pin,
+                );
+                let a_point = builder.credential_point();
+                (builder, pin, voter_builder, p1a, a_point)
+            })
+            .await
+            .map_err(|e| VoterError::Protocol(e.to_string()))?;
+
+        // DVNIZKP round 1 with the RTs holding our delivery sessions (§3.6.2).
+        let mut round1 = Vec::with_capacity(delivery.len());
+        for (rt, token) in &delivery {
+            round1.push(rt.dvnizkp_round1(token, &a_point).await?);
+        }
+        let all_ids: Vec<usize> = round1.iter().map(|b| b.from_id).collect();
+
+        // Combiner step: the voter derives the S1 challenge (§3.6.2).
+        let dv_pk = voter_builder.voter_pk();
+        let election_pk = self.election_context.pk.clone();
+        let mut combine_rng = self.next_rng("dvnizkp-combine");
+        let round1_for_combine = round1.clone();
+        let (i0, c0, z0, c1) = tokio::task::spawn_blocking(move || {
+            ThresholdRegistrationTeller::dvnizkp_combine_commitments(
+                &election_pk,
+                &dv_pk,
+                a_point,
+                p1a,
+                &round1_for_combine,
+                &mut combine_rng,
+            )
+        })
+        .await
+        .map_err(|e| VoterError::Protocol(e.to_string()))?;
+
+        // Round 2: collect the z1 scalar shares.
+        let mut z1_shares = Vec::with_capacity(delivery.len());
+        for (rt, token) in &delivery {
+            z1_shares.push(rt.dvnizkp_round2(token, &c1, &all_ids).await?);
+        }
+
+        // Assemble, finalize, and locally verify the PIN (§3.7.1).
+        let voter = tokio::task::spawn_blocking(move || {
+            let proof =
+                ThresholdRegistrationTeller::dvnizkp_assemble(&round1, i0, c0, z0, c1, &z1_shares);
+            let credential = credential_builder.build_with_dvnizkp(proof);
+            let voter = voter_builder.finalize(credential);
+            voter.verify_pin(pin).map(|_| voter)
+        })
+        .await
+        .map_err(|e| VoterError::Protocol(e.to_string()))?
+        .map_err(|e| {
+            VoterError::Protocol(format!("delivered credential failed PIN check: {e:?}"))
+        })?;
+
+        let pin_code = PinCode::new(pin as u32)
+            .map_err(|e| VoterError::Protocol(format!("library PIN out of range: {e}")))?;
+        session.pin = Some(pin_code);
+        session.voter = Some(voter);
+        Ok(pin_code)
+    }
+
+    /// The passphrase-encrypted state blob for ER-side recovery (V8,
+    /// Deviation 6).  The SIV encryption is deterministic, so the blob
+    /// matches the on-disk state file byte-for-byte.
+    fn recovery_blob(
+        &self,
+        passphrase: &str,
+        session: &VoterSession,
+    ) -> Result<String, VoterError> {
+        use base64::Engine as _;
+        let plaintext = serde_json::to_vec(session).map_err(VoterError::Json)?;
+        let ciphertext = encrypt_state(&plaintext, passphrase)?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(ciphertext))
+    }
+
+    /// Upload the recovery blob for an already-registered device.
+    async fn upload_recovery_blob(
+        &self,
+        passphrase: &str,
+        session: &VoterSession,
+    ) -> Result<(), VoterError> {
+        let blob = self.recovery_blob(passphrase, session)?;
+        self.er_client
+            .upload_device_blob(&session.registration_token, &blob)
+            .await?;
+        Ok(())
     }
 }
 
@@ -305,38 +527,30 @@ async fn enroll_handler(
     // ordering note) — so the PoC registers the app key only.
     state
         .er_client
-        .register_device(&pending.registration_token, "", &at_pk)
+        .register_device(&pending.registration_token, "", &at_pk, None)
         .await?;
 
-    // PIN request tokens (§5.3.1.2) + NS registration + RT PIN requests.
-    let tokens = state
-        .er_client
-        .pin_request_tokens(&pending.registration_token)
-        .await?;
-    state.ns_client.register(pending.vid, &tokens.rid).await?;
-    if tokens.rt_tokens.len() != state.rt_clients.len() {
-        return Err(VoterError::Protocol(
-            "ER issued an unexpected number of RT tokens".into(),
-        ));
-    }
-    for (rt, token) in state.rt_clients.iter().zip(&tokens.rt_tokens) {
-        rt.credentials_request(token, &tokens.rid).await?;
-    }
-
-    let session = VoterSession {
+    let mut session = VoterSession {
         fiscal_id: req.fiscal_id,
         vid: pending.vid,
         registration_token: pending.registration_token,
         credential_package: pending.credential_package,
         at_sk_seed: hex::encode(at_sk_seed),
-        rid: Some(tokens.rid),
-        ns_token: Some(tokens.ns_token),
+        rid: None,
+        ns_token: None,
         pin: None,
         voter: None,
         held: None,
         casts: Vec::new(),
+        ruse_pin: None,
+        ruse_voter: None,
+        trusted: None,
     };
+    // PIN request (§5.3.1.2/.3): tokens + NS registration + RT requests.
+    state.run_pin_request(&mut session).await?;
     state.save_session(&passphrase, &session).await?;
+    // Seed the recovery blob (V8, Deviation 6).
+    state.upload_recovery_blob(&passphrase, &session).await?;
 
     Ok(Json(EnrollResponse {
         vid: session.vid,
@@ -416,144 +630,43 @@ async fn pin_retrieve_handler(
 ) -> Result<Json<PinResponse>, VoterError> {
     let mut session = state.session_for(&req.passphrase).await?;
 
-    // Idempotent: a second retrieval re-displays the stored PIN.
+    // Idempotent: a second retrieval re-displays the stored PIN — or the
+    // ruse PIN while one is active (§3.7.3 cover story, see pin_show).
     if let Some(pin) = session.pin {
         return Ok(Json(PinResponse {
             vid: session.vid,
-            pin,
+            pin: session.ruse_pin.unwrap_or(pin),
         }));
     }
 
-    let rid = session.rid.clone().ok_or(VoterError::PinNotReady)?;
-
-    // Gate on NS readiness (≥ t_RT notifications, §5.3.1.4).
-    let notifications = state.ns_client.notifications(session.vid, &rid).await?;
-    if notifications.notifications.len() < state.t_rt {
-        return Err(VoterError::PinNotReady);
-    }
-
-    // Re-login for retrieval tokens (§5.3.1.4).
-    let auth = state
-        .dip_client
-        .authenticate(&session.fiscal_id)
-        .await
-        .map_err(|_| VoterError::Unauthorized)?;
-    let retrieval = state
-        .er_client
-        .retrieval_tokens(
-            &session.registration_token,
-            &auth.assertion,
-            &auth.signature,
-        )
-        .await?;
-    if retrieval.retrieval_tokens.len() > state.rt_clients.len() {
-        return Err(VoterError::Protocol(
-            "more retrieval tokens than RTs".into(),
-        ));
-    }
-
-    // Fetch this voter's AccShareBroadcast from t_RT tellers (§3.6.3,
-    // Deviation 5: shares travel over HTTPS from the RTs, not from the ER).
-    let delivery: Vec<(&RtClient, TokenValue)> = state
-        .rt_clients
-        .iter()
-        .zip(retrieval.retrieval_tokens.iter().cloned())
-        .collect();
-    let mut share_broadcasts = Vec::with_capacity(delivery.len());
-    for (rt, token) in &delivery {
-        share_broadcasts.push(rt.credentials_deliver(token).await?);
-    }
-
-    // Rebuild the credential builder + PIN locally (§8.3 step 4-5).
-    let election_context = state.election_context.clone();
-    let rt_pk = state.rt_pk.clone();
-    let package = session.credential_package.clone();
-    let mut build_rng = state.next_rng("voter-build-acc");
-    let mut voter_rng = state.next_rng("voter-builder");
-    let (credential_builder, pin, voter_builder, p1a, a_point) =
-        tokio::task::spawn_blocking(move || {
-            let enc_a_ext = package.enc_a_ext.clone().into();
-            let (builder, pin, _public_acc) = voter_build_acc(
-                &election_context.pk,
-                &rt_pk,
-                package.a,
-                enc_a_ext,
-                &share_broadcasts,
-                &mut build_rng,
-            );
-            let voter_builder =
-                VoterBuilder::new(&election_context, builder.clone(), &mut voter_rng);
-            let p1a =
-                ThresholdRegistrationTeller::credential_p1a(&election_context.pk, &builder, pin);
-            let a_point = builder.credential_point();
-            (builder, pin, voter_builder, p1a, a_point)
-        })
-        .await
-        .map_err(|e| VoterError::Protocol(e.to_string()))?;
-
-    // DVNIZKP round 1 with the RTs holding our delivery sessions (§3.6.2).
-    let mut round1 = Vec::with_capacity(delivery.len());
-    for (rt, token) in &delivery {
-        round1.push(rt.dvnizkp_round1(token, &a_point).await?);
-    }
-    let all_ids: Vec<usize> = round1.iter().map(|b| b.from_id).collect();
-
-    // Combiner step: the voter derives the S1 challenge (§3.6.2).
-    let dv_pk = voter_builder.voter_pk();
-    let election_pk = state.election_context.pk.clone();
-    let mut combine_rng = state.next_rng("dvnizkp-combine");
-    let round1_for_combine = round1.clone();
-    let (i0, c0, z0, c1) = tokio::task::spawn_blocking(move || {
-        ThresholdRegistrationTeller::dvnizkp_combine_commitments(
-            &election_pk,
-            &dv_pk,
-            a_point,
-            p1a,
-            &round1_for_combine,
-            &mut combine_rng,
-        )
-    })
-    .await
-    .map_err(|e| VoterError::Protocol(e.to_string()))?;
-
-    // Round 2: collect the z1 scalar shares.
-    let mut z1_shares = Vec::with_capacity(delivery.len());
-    for (rt, token) in &delivery {
-        z1_shares.push(rt.dvnizkp_round2(token, &c1, &all_ids).await?);
-    }
-
-    // Assemble, finalize, and locally verify the PIN (§3.7.1).
-    let voter = tokio::task::spawn_blocking(move || {
-        let proof =
-            ThresholdRegistrationTeller::dvnizkp_assemble(&round1, i0, c0, z0, c1, &z1_shares);
-        let credential = credential_builder.build_with_dvnizkp(proof);
-        let voter = voter_builder.finalize(credential);
-        voter.verify_pin(pin).map(|_| voter)
-    })
-    .await
-    .map_err(|e| VoterError::Protocol(e.to_string()))?
-    .map_err(|e| VoterError::Protocol(format!("delivered credential failed PIN check: {e:?}")))?;
-
-    let pin_code = PinCode::new(pin as u32)
-        .map_err(|e| VoterError::Protocol(format!("library PIN out of range: {e}")))?;
-    session.pin = Some(pin_code);
-    session.voter = Some(voter);
+    let pin = state.run_retrieval(&mut session).await?;
     state.save_session(&req.passphrase, &session).await?;
+    // Refresh the recovery blob now that the credential exists (V8).
+    state
+        .upload_recovery_blob(&req.passphrase, &session)
+        .await?;
 
     Ok(Json(PinResponse {
         vid: session.vid,
-        pin: pin_code,
+        pin,
     }))
 }
 
 /// Show the stored PIN (post-retrieval display).
+///
+/// While a ruse PIN is active it is shown INSTEAD of the real one (§3.7.3
+/// cover story): a coercer inspecting the device sees only the decoy; the
+/// real PIN lives in the voter's memory and stays fully usable.
 #[tracing::instrument(skip(state, req))]
 async fn pin_show_handler(
     Extension(state): Extension<Arc<VoterState>>,
     Json(req): Json<PassphraseRequest>,
 ) -> Result<Json<PinResponse>, VoterError> {
     let session = state.session_for(&req.passphrase).await?;
-    let pin = session.pin.ok_or(VoterError::PinNotRetrieved)?;
+    let pin = session
+        .ruse_pin
+        .or(session.pin)
+        .ok_or(VoterError::PinNotRetrieved)?;
     Ok(Json(PinResponse {
         vid: session.vid,
         pin,
@@ -588,10 +701,15 @@ async fn pin_verify_handler(
 ) -> Result<Json<VerifyPinResponse>, VoterError> {
     let session = state.session_for(&req.passphrase).await?;
     let voter = session.voter.ok_or(VoterError::PinNotRetrieved)?;
+    let ruse = session.ruse_voter.clone();
     let pin = req.pin.value() as usize;
-    let valid = tokio::task::spawn_blocking(move || voter.verify_pin(pin).is_ok())
-        .await
-        .map_err(|e| VoterError::Protocol(e.to_string()))?;
+    // The ruse credential's forged DV proof makes its PIN verify exactly like
+    // the real one (§3.7.3) — a coercer watching this check learns nothing.
+    let valid = tokio::task::spawn_blocking(move || {
+        voter.verify_pin(pin).is_ok() || ruse.map(|r| r.verify_pin(pin).is_ok()).unwrap_or(false)
+    })
+    .await
+    .map_err(|e| VoterError::Protocol(e.to_string()))?;
     Ok(Json(VerifyPinResponse { valid }))
 }
 
@@ -650,7 +768,17 @@ async fn vote_handler(
     Json(req): Json<VoteRequest>,
 ) -> Result<Json<VoteResponse>, VoterError> {
     let mut session = state.session_for(&req.passphrase).await?;
-    let voter = session.voter.clone().ok_or(VoterError::PinNotRetrieved)?;
+    // V7 dispatch: the ruse PIN routes to the simulated voter whose forged DV
+    // proof verifies locally but whose ballots are filtered at tally
+    // (§3.7.3).  Any other PIN uses the real credential.
+    let voter = if session.ruse_pin.is_some() && session.ruse_pin == Some(req.pin) {
+        session
+            .ruse_voter
+            .clone()
+            .ok_or(VoterError::PinNotRetrieved)?
+    } else {
+        session.voter.clone().ok_or(VoterError::PinNotRetrieved)?
+    };
 
     let params = state.election_context.choice.clone();
     let mut vote_rng = state.next_rng("vote");
@@ -732,15 +860,16 @@ async fn cast_handler(
         .er_client
         .casting_tokens(&session.registration_token, &commitment, &signature)
         .await?;
-    if tokens.casting_tokens.len() != state.bb_clients.len() {
+    let trusted = state.trusted_bbs(&session);
+    if tokens.casting_tokens.len() < trusted.len() {
         return Err(VoterError::Protocol(
-            "ER issued an unexpected number of casting tokens".into(),
+            "ER issued fewer casting tokens than trusted BBs".into(),
         ));
     }
 
     // Cast to every trusted BB (V10 default: all).
-    let mut receipts = Vec::with_capacity(state.bb_clients.len());
-    for (bb, token) in state.bb_clients.iter().zip(&tokens.casting_tokens) {
+    let mut receipts = Vec::with_capacity(trusted.len());
+    for (bb, token) in trusted.iter().zip(&tokens.casting_tokens) {
         let response = bb.cast(&held.ballot, &rndcomm, token).await?;
         receipts.push(response.receipt);
     }
@@ -846,7 +975,7 @@ async fn confirm_handler(
     }
 
     let mut confirmed_at_ms = 0u64;
-    for bb in &state.bb_clients {
+    for bb in state.trusted_bbs(&session) {
         let response = bb.cai(&held.digest, &held.disclosure).await?;
         confirmed_at_ms = response.confirmed_at_ms.max(confirmed_at_ms);
     }
@@ -862,6 +991,290 @@ async fn confirm_handler(
     Ok(Json(ConfirmResponse {
         digest,
         confirmed_at_ms,
+    }))
+}
+
+#[derive(Serialize)]
+struct RusePinResponse {
+    ruse_pin: PinCode,
+}
+
+impl std::fmt::Debug for RusePinResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RusePinResponse")
+            .field("ruse_pin", &"<redacted>")
+            .finish()
+    }
+}
+
+/// V7: obtain a ruse PIN (§3.7.3, Deviation 4).  Unlimited; each call
+/// replaces the previous ruse credential.
+#[tracing::instrument(skip(state, req))]
+async fn pin_ruse_handler(
+    Extension(state): Extension<Arc<VoterState>>,
+    Json(req): Json<PassphraseRequest>,
+) -> Result<Json<RusePinResponse>, VoterError> {
+    let mut session = state.session_for(&req.passphrase).await?;
+    let voter = session.voter.clone().ok_or(VoterError::PinNotRetrieved)?;
+    let real_pin = session.pin.ok_or(VoterError::PinNotRetrieved)?;
+
+    // Draw an 8-digit ruse PIN ≠ the real PIN from the operation RNG.
+    let ruse_pin = {
+        let mut rng = state.next_rng("ruse-pin");
+        loop {
+            let candidate = rng.next_u32() % PinCode::MAX;
+            if candidate != real_pin.value() {
+                break PinCode::new(candidate)
+                    .map_err(|e| VoterError::Protocol(format!("ruse pin: {e}")))?;
+            }
+        }
+    };
+
+    // Simulate over the REAL credential builder: the forged DV proof makes
+    // local verification of the ruse PIN succeed, while ballots built with it
+    // unmask a wrong x and are filtered by the tally ACC check.
+    let mut sim_rng = state.next_rng("ruse-simulate");
+    let pin = ruse_pin.value() as usize;
+    let ruse_voter =
+        tokio::task::spawn_blocking(move || voter.to_builder().simulate(pin, &mut sim_rng))
+            .await
+            .map_err(|e| VoterError::Protocol(e.to_string()))?
+            .map_err(|e| VoterError::Protocol(format!("ruse simulation failed: {e:?}")))?;
+
+    session.ruse_pin = Some(ruse_pin);
+    session.ruse_voter = Some(ruse_voter);
+    state.save_session(&req.passphrase, &session).await?;
+
+    Ok(Json(RusePinResponse { ruse_pin }))
+}
+
+/// V6: PIN re-sending (§3.7.2) — a fresh rid′ + RT requests + retrieval.
+/// The re-derived PIN must equal the stored one.
+#[tracing::instrument(skip(state, req))]
+async fn pin_resend_handler(
+    Extension(state): Extension<Arc<VoterState>>,
+    Json(req): Json<PassphraseRequest>,
+) -> Result<Json<PinResponse>, VoterError> {
+    let mut session = state.session_for(&req.passphrase).await?;
+    let stored_pin = session.pin;
+
+    state.run_pin_request(&mut session).await?;
+    let pin = state.run_retrieval(&mut session).await?;
+    if let Some(stored) = stored_pin {
+        if stored != pin {
+            return Err(VoterError::Protocol(
+                "re-delivered PIN does not match the original".into(),
+            ));
+        }
+    }
+    state.save_session(&req.passphrase, &session).await?;
+    state
+        .upload_recovery_blob(&req.passphrase, &session)
+        .await?;
+
+    Ok(Json(PinResponse {
+        vid: session.vid,
+        pin,
+    }))
+}
+
+#[derive(Deserialize)]
+struct RecoverRequest {
+    fiscal_id: String,
+    passphrase: String,
+}
+
+impl std::fmt::Debug for RecoverRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecoverRequest")
+            .field("fiscal_id", &self.fiscal_id)
+            .field("passphrase", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct RecoverResponse {
+    vid: Vid,
+    pin_set: bool,
+}
+
+/// V8: new-device recovery (§3.7.4, Deviation 6).  A fresh DIP login fetches
+/// the encrypted blob; only the correct passphrase decrypts it.
+#[tracing::instrument(skip(state, req))]
+async fn device_recover_handler(
+    Extension(state): Extension<Arc<VoterState>>,
+    Json(req): Json<RecoverRequest>,
+) -> Result<Json<RecoverResponse>, VoterError> {
+    use base64::Engine as _;
+    let auth = state
+        .dip_client
+        .authenticate(&req.fiscal_id)
+        .await
+        .map_err(|_| VoterError::Unauthorized)?;
+    let recovered = state
+        .er_client
+        .recover_device(&auth.assertion, &auth.signature)
+        .await
+        .map_err(|_| VoterError::Unauthorized)?;
+
+    let ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(&recovered.state_blob)
+        .map_err(|_| VoterError::Unauthorized)?;
+    // The passphrase check IS the decryption (fails closed, generic 401).
+    let plaintext =
+        decrypt_state(&ciphertext, &req.passphrase).map_err(|_| VoterError::Unauthorized)?;
+    let session: VoterSession = serde_json::from_slice(&plaintext).map_err(VoterError::Json)?;
+
+    state.save_session(&req.passphrase, &session).await?;
+    Ok(Json(RecoverResponse {
+        vid: session.vid,
+        pin_set: session.pin.is_some(),
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct RevokeResponse {
+    /// The freshly assigned spare vid (§3.7.5).
+    vid: Vid,
+}
+
+/// V9: revoke the credential and start over on a spare vid (§3.7.5).
+#[tracing::instrument(skip(state, req))]
+async fn revoke_handler(
+    Extension(state): Extension<Arc<VoterState>>,
+    Json(req): Json<PassphraseRequest>,
+) -> Result<Json<RevokeResponse>, VoterError> {
+    let mut session = state.session_for(&req.passphrase).await?;
+    let auth = state
+        .dip_client
+        .authenticate(&session.fiscal_id)
+        .await
+        .map_err(|_| VoterError::Unauthorized)?;
+    let revocation = state
+        .er_client
+        .revoke(&auth.assertion, &auth.signature)
+        .await?;
+
+    // Drop the old state file so the passphrase resolves to one session only.
+    let old_path = state.state_path(session.vid);
+    let _ = tokio::fs::remove_file(&old_path).await;
+
+    // Reset the credential state onto the spare vid and re-run the PIN
+    // request; retrieval then follows the normal V4 flow.
+    session.vid = revocation.vid;
+    session.registration_token = revocation.registration_token;
+    session.credential_package = revocation.credential_package;
+    session.pin = None;
+    session.voter = None;
+    session.ruse_pin = None;
+    session.ruse_voter = None;
+    session.held = None;
+    session.rid = None;
+    session.ns_token = None;
+    state.run_pin_request(&mut session).await?;
+    state.save_session(&req.passphrase, &session).await?;
+
+    // Register this device under the spare vid (the old record was dropped),
+    // seeding the recovery blob in the same call.
+    let at_pk = {
+        let seed: [u8; 32] = hex::decode(&session.at_sk_seed)
+            .map_err(|e| VoterError::Protocol(format!("stored app key corrupt: {e}")))?
+            .try_into()
+            .map_err(|_| VoterError::Protocol("stored app key corrupt".into()))?;
+        hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&seed)
+                .verifying_key()
+                .to_bytes(),
+        )
+    };
+    let blob = state.recovery_blob(&req.passphrase, &session)?;
+    state
+        .er_client
+        .register_device(&session.registration_token, "", &at_pk, Some(blob))
+        .await?;
+
+    Ok(Json(RevokeResponse { vid: session.vid }))
+}
+
+#[derive(Debug, Serialize)]
+struct TrustedResponse {
+    rts: Vec<String>,
+    bbs: Vec<String>,
+}
+
+/// V10: read the trusted authority selection (§3.12).
+#[tracing::instrument(skip(state, req))]
+async fn trusted_get_handler(
+    Extension(state): Extension<Arc<VoterState>>,
+    Json(req): Json<PassphraseRequest>,
+) -> Result<Json<TrustedResponse>, VoterError> {
+    let session = state.session_for(&req.passphrase).await?;
+    let (rts, bbs) = match session.trusted {
+        Some(t) => (t.rts, t.bbs),
+        None => (state.rt_names.clone(), state.bb_names.clone()),
+    };
+    Ok(Json(TrustedResponse { rts, bbs }))
+}
+
+#[derive(Deserialize)]
+struct TrustedPutRequest {
+    passphrase: String,
+    rts: Vec<String>,
+    bbs: Vec<String>,
+}
+
+impl std::fmt::Debug for TrustedPutRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrustedPutRequest")
+            .field("passphrase", &"<redacted>")
+            .field("rts", &self.rts)
+            .field("bbs", &self.bbs)
+            .finish()
+    }
+}
+
+/// V10: update the trusted authority selection (§3.12).  Bounds: at least
+/// t_RT registration tellers and at least NO_BOT_MIN_BBS ballot boxes.
+#[tracing::instrument(skip(state, req))]
+async fn trusted_put_handler(
+    Extension(state): Extension<Arc<VoterState>>,
+    Json(req): Json<TrustedPutRequest>,
+) -> Result<Json<TrustedResponse>, VoterError> {
+    let mut session = state.session_for(&req.passphrase).await?;
+
+    if req.rts.iter().any(|n| !state.rt_names.contains(n))
+        || req.bbs.iter().any(|n| !state.bb_names.contains(n))
+    {
+        return Err(VoterError::BadSelection("unknown authority name".into()));
+    }
+    // Count DISTINCT authorities: duplicates must not satisfy the thresholds.
+    let mut req = req;
+    req.rts.sort_unstable();
+    req.rts.dedup();
+    req.bbs.sort_unstable();
+    req.bbs.dedup();
+    if req.rts.len() < state.t_rt {
+        return Err(VoterError::BadSelection(format!(
+            "at least {} registration tellers required",
+            state.t_rt
+        )));
+    }
+    if req.bbs.len() < voting::NO_BOT_MIN_BBS {
+        return Err(VoterError::BadSelection(format!(
+            "at least {} ballot boxes required",
+            voting::NO_BOT_MIN_BBS
+        )));
+    }
+
+    session.trusted = Some(TrustedSettings {
+        rts: req.rts.clone(),
+        bbs: req.bbs.clone(),
+    });
+    state.save_session(&req.passphrase, &session).await?;
+    Ok(Json(TrustedResponse {
+        rts: req.rts,
+        bbs: req.bbs,
     }))
 }
 
@@ -881,6 +1294,8 @@ enum VoterError {
     PinNotRetrieved,
     #[error("no ballot to operate on — vote (and cast) first")]
     NoHeldBallot,
+    #[error("invalid trusted-authority selection: {0}")]
+    BadSelection(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
@@ -908,6 +1323,7 @@ impl IntoResponse for VoterError {
             Self::PinNotReady => (StatusCode::CONFLICT, self.to_string()),
             Self::PinNotRetrieved => (StatusCode::BAD_REQUEST, self.to_string()),
             Self::NoHeldBallot => (StatusCode::BAD_REQUEST, self.to_string()),
+            Self::BadSelection(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             // Internal failures are logged but not leaked (style guide §03).
             _ => {
                 tracing::error!(error = %self, "voter-server internal error");
@@ -931,6 +1347,15 @@ pub fn router(state: Arc<VoterState>) -> Router {
         .route("/api/pin/retrieve", post(pin_retrieve_handler))
         .route("/api/pin", post(pin_show_handler))
         .route("/api/pin/verify", post(pin_verify_handler))
+        .route("/api/pin/ruse", post(pin_ruse_handler))
+        .route("/api/pin/resend", post(pin_resend_handler))
+        .route("/api/device/recover", post(device_recover_handler))
+        .route("/api/revoke", post(revoke_handler))
+        .route(
+            "/api/settings/trusted",
+            post(trusted_put_handler).put(trusted_put_handler),
+        )
+        .route("/api/settings/trusted/show", post(trusted_get_handler))
         .route("/api/election", axum::routing::get(election_handler))
         .route("/api/vote", post(vote_handler))
         .route("/api/cast", post(cast_handler))
@@ -967,11 +1392,11 @@ pub async fn build_service(
     let dip_client = DipClient::new(client.clone(), parse(&settings.dip.base_url, "DIP")?);
     let er_client = ErClient::new(client.clone(), parse(&settings.er.base_url, "ER")?);
     let ns_client = NsClient::new(client.clone(), parse(&settings.ns.base_url, "NS")?);
-    let rt_clients = build_rt_clients(&settings, client.clone())?;
+    let (rt_names, rt_clients) = build_rt_clients(&settings, client.clone())?;
     if rt_clients.is_empty() {
         anyhow::bail!("no RT peers configured (peers named rt-* required)");
     }
-    let bb_clients = build_bb_clients(&settings, client.clone())?;
+    let (bb_names, bb_clients) = build_bb_clients(&settings, client.clone())?;
     if bb_clients.is_empty() {
         anyhow::bail!("no BB peers configured (peers named bb-* required for casting)");
     }
@@ -987,7 +1412,9 @@ pub async fn build_service(
         er_client,
         ns_client,
         rt_clients,
+        rt_names,
         bb_clients,
+        bb_names,
         wbb_client,
         rng: std::sync::Mutex::new(actor_seed.into_rng()),
         pending_logins: Mutex::new(HashMap::new()),
@@ -1010,24 +1437,34 @@ pub async fn build_service(
     Ok((addr, rustls_config, state))
 }
 
-fn build_bb_clients(settings: &Settings, client: reqwest::Client) -> anyhow::Result<Vec<BbClient>> {
+fn build_bb_clients(
+    settings: &Settings,
+    client: reqwest::Client,
+) -> anyhow::Result<(Vec<String>, Vec<BbClient>)> {
+    let mut names = Vec::new();
     let mut clients = Vec::new();
     for peer in &settings.peers {
         if peer.name.starts_with("bb-") {
             let url = reqwest::Url::parse(&peer.base_url)
                 .map_err(|e| anyhow::anyhow!("invalid BB peer URL {}: {}", peer.base_url, e))?;
+            names.push(peer.name.clone());
             clients.push(BbClient::new(client.clone(), url));
         }
     }
-    Ok(clients)
+    Ok((names, clients))
 }
 
-fn build_rt_clients(settings: &Settings, client: reqwest::Client) -> anyhow::Result<Vec<RtClient>> {
+fn build_rt_clients(
+    settings: &Settings,
+    client: reqwest::Client,
+) -> anyhow::Result<(Vec<String>, Vec<RtClient>)> {
+    let mut names = Vec::new();
     let mut clients = Vec::new();
     for peer in &settings.peers {
         if peer.name.starts_with("rt-") {
             let url = reqwest::Url::parse(&peer.base_url)
                 .map_err(|e| anyhow::anyhow!("invalid RT peer URL {}: {}", peer.base_url, e))?;
+            names.push(peer.name.clone());
             clients.push(RtClient::new(
                 client.clone(),
                 url,
@@ -1035,7 +1472,7 @@ fn build_rt_clients(settings: &Settings, client: reqwest::Client) -> anyhow::Res
             ));
         }
     }
-    Ok(clients)
+    Ok((names, clients))
 }
 
 async fn load_election_context(settings: &Settings) -> anyhow::Result<ElectionContext<G>> {

@@ -163,3 +163,70 @@ $("btn-confirm").addEventListener("click", async () => {
     setError(`Confirmation failed: ${e.message}`);
   }
 });
+
+// ── PIN & credential management (M7) ─────────────────────────────────────
+
+$("btn-ruse").addEventListener("click", async () => {
+  try {
+    const passphrase = $("passphrase-input").value.trim();
+    const result = await api("/api/pin/ruse", { passphrase });
+    const el = $("ruse-pin");
+    el.textContent = String(result.ruse_pin).padStart(8, "0");
+    show(el);
+    $("manage-label").textContent =
+      "Ruse PIN issued — it verifies like the real one, but its ballots are discarded at tally.";
+  } catch (e) {
+    setError(`Ruse PIN failed: ${e.message}`);
+  }
+});
+
+$("btn-resend").addEventListener("click", async () => {
+  try {
+    const passphrase = $("passphrase-input").value.trim();
+    const result = await api("/api/pin/resend", { passphrase });
+    $("manage-label").textContent = `PIN re-delivered: ${String(result.pin).padStart(8, "0")}`;
+  } catch (e) {
+    setError(`PIN re-send failed: ${e.message}`);
+  }
+});
+
+$("btn-revoke").addEventListener("click", async () => {
+  try {
+    const passphrase = $("passphrase-input").value.trim();
+    const result = await api("/api/revoke", { passphrase });
+    $("manage-label").textContent =
+      `Credential revoked — new pseudonymous id ${result.vid}. Check status, then retrieve your new PIN.`;
+  } catch (e) {
+    setError(`Revocation failed: ${e.message}`);
+  }
+});
+
+$("btn-recover").addEventListener("click", async () => {
+  try {
+    const result = await api("/api/device/recover", {
+      fiscal_id: $("recover-fiscal").value.trim(),
+      passphrase: $("recover-passphrase").value.trim(),
+    });
+    $("passphrase-input").value = $("recover-passphrase").value.trim();
+    $("manage-label").textContent =
+      `Recovered voter ${result.vid} (PIN ${result.pin_set ? "restored" : "not yet retrieved"}).`;
+  } catch (e) {
+    setError(`Recovery failed: ${e.message}`);
+  }
+});
+
+$("btn-trusted").addEventListener("click", async () => {
+  try {
+    const passphrase = $("passphrase-input").value.trim();
+    const split = (value) => value.split(",").map((s) => s.trim()).filter(Boolean);
+    const result = await api("/api/settings/trusted", {
+      passphrase,
+      rts: split($("trusted-rts").value),
+      bbs: split($("trusted-bbs").value),
+    });
+    $("manage-label").textContent =
+      `Trusted: RTs ${result.rts.join(", ")} — BBs ${result.bbs.join(", ")}.`;
+  } catch (e) {
+    setError(`Trusted-authority update failed: ${e.message}`);
+  }
+});

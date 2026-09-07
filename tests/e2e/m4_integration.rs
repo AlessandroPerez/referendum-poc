@@ -28,6 +28,7 @@ const MASTER_SEED: [u8; 32] = [0xabu8; 32];
 #[tokio::test]
 async fn admin_generates_credentials_and_publishes_acc_pub_key() {
     helpers::init();
+    let _cluster = helpers::cluster_guard().await;
 
     // 1. Run ceremony in a temp directory.
     let temp = tempfile::tempdir().expect("tempdir");
@@ -135,6 +136,7 @@ async fn admin_generates_credentials_and_publishes_acc_pub_key() {
 #[tokio::test]
 async fn rt_server_signs_and_generates_decoys() {
     helpers::init();
+    let _cluster = helpers::cluster_guard().await;
 
     let temp = tempfile::tempdir().expect("tempdir");
     let ceremony_dir = temp.path();

@@ -263,6 +263,16 @@ fn init_checkpoints_db(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Serializes the full-cluster e2e tests.  Each spawns ~a dozen servers on
+/// ports found by bind-then-release (`free_port`), and two clusters booting
+/// concurrently in one process can steal each other's just-released ports
+/// (the documented §9.5 race).  Holding this guard for the duration of a
+/// cluster test removes the intra-process race entirely.
+pub async fn cluster_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static CLUSTER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    CLUSTER_LOCK.lock().await
+}
+
 pub fn free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind free port");
     listener.local_addr().unwrap().port()

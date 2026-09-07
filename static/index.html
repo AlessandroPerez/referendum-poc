@@ -71,6 +71,27 @@
       </div>
     </section>
 
+    <section id="screen-manage" class="screen">
+      <h2>7 · PIN &amp; credential management</h2>
+      <button id="btn-ruse">Get a ruse PIN</button>
+      <code id="ruse-pin" class="hidden"></code>
+      <button id="btn-resend">Re-send PIN</button>
+      <button id="btn-revoke">Revoke credential</button>
+      <p id="manage-label"></p>
+      <h3>Recover on this device</h3>
+      <label for="recover-fiscal">Fiscal ID</label>
+      <input id="recover-fiscal" placeholder="VOTER-001" autocomplete="off">
+      <label for="recover-passphrase">Passphrase</label>
+      <input id="recover-passphrase" autocomplete="off">
+      <button id="btn-recover">Recover</button>
+      <h3>Trusted authorities</h3>
+      <label for="trusted-rts">Registration tellers (comma-separated)</label>
+      <input id="trusted-rts" placeholder="rt-1,rt-2,rt-3" autocomplete="off">
+      <label for="trusted-bbs">Ballot boxes (comma-separated)</label>
+      <input id="trusted-bbs" placeholder="bb-1,bb-2" autocomplete="off">
+      <button id="btn-trusted">Save selection</button>
+    </section>
+
     <p id="error" class="error hidden"></p>
   </main>
   <script src="/app.js"></script>
