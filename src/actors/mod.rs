@@ -5,6 +5,7 @@
 use anyhow::Context;
 
 pub mod admin;
+pub mod auditor;
 pub mod bb;
 pub mod common;
 pub mod dip;

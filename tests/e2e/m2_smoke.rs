@@ -15,6 +15,11 @@ const MASTER_SEED: [u8; 32] = [0xabu8; 32];
 #[tokio::test]
 async fn wbb_threshold_entry_and_deterministic_checkpoint() {
     helpers::init();
+    // This test spawns WBB processes on bind-then-released ports twice, so it
+    // participates in the same §9.5 port race as the cluster tests — it must
+    // hold the shared guard too (M8 validation L1; the likely cause of the
+    // historical one-off suite flake).
+    let _cluster = helpers::cluster_guard().await;
     let root1 = run_once().await;
     let root2 = run_once().await;
     assert_eq!(

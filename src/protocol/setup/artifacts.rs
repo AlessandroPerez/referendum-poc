@@ -113,6 +113,12 @@ pub fn write_artifacts(
         let signing_key_path = output_dir.join(format!("{name}-signing-key.bin"));
         fs::write(&signing_key_path, signing_key.to_bytes())?;
         service_signing_keys.insert(name.clone(), signing_key_path);
+        // Public counterpart for external verifiers (the auditor must not
+        // need any secret material to check entry signatures).
+        fs::write(
+            output_dir.join(format!("{name}-verifying-key.bin")),
+            signing_key.verifying_key().as_bytes(),
+        )?;
 
         // Per-service bearer token for internal endpoint authentication.
         let service_token = derive_service_token(master_seed, name);

@@ -56,6 +56,7 @@ pub struct RtState {
     decoy_counter: Arc<AtomicU64>,
     dvnizkp_counter: Arc<AtomicU64>,
     tau_counter: Arc<AtomicU64>,
+    controls_counter: Arc<AtomicU64>,
     enrollment_packages: Vec<EnrollmentPackage>,
     /// Clients to the ER (token verification) and NS (readiness notify);
     /// absent when the service is booted without those peers configured.
@@ -70,6 +71,17 @@ pub struct RtState {
     round1_sessions: Arc<Mutex<HashMap<TokenValue, Round1Session>>>,
     /// Shared internal-API token for the ER `/tokens/verify` call (§6.1).
     internal_token: SecretString,
+    /// Open credential-control session between `/controls/round1` and
+    /// `/round2` (M8, design lock (e)); the serial tally driver runs one at a
+    /// time, so a single slot suffices.
+    controls_session: Arc<Mutex<Option<ControlsSession>>>,
+}
+
+/// Per-vote nonce state + the submitted votes, cached between control rounds
+/// so round 2 provably operates on the same vote list as round 1.
+struct ControlsSession {
+    votes: Vec<evoting::api::prelude::Vote<RistrettoGroup>>,
+    state: evoting::api::prelude::PartialControlState<RistrettoGroup>,
 }
 
 impl std::fmt::Debug for RtState {
@@ -125,6 +137,7 @@ impl RtState {
             decoy_counter: Arc::new(AtomicU64::new(0)),
             dvnizkp_counter: Arc::new(AtomicU64::new(0)),
             tau_counter: Arc::new(AtomicU64::new(0)),
+            controls_counter: Arc::new(AtomicU64::new(0)),
             enrollment_packages,
             er_client,
             ns_client,
@@ -132,6 +145,7 @@ impl RtState {
             dv_sessions: Arc::new(Mutex::new(HashMap::new())),
             round1_sessions: Arc::new(Mutex::new(HashMap::new())),
             internal_token,
+            controls_session: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -172,6 +186,11 @@ impl RtState {
     fn next_tau_rng(&self) -> ChaCha20Rng {
         let counter = self.tau_counter.fetch_add(1, Ordering::SeqCst);
         operation_rng(&self.actor_seed, "tau", counter)
+    }
+
+    fn next_controls_rng(&self) -> ChaCha20Rng {
+        let counter = self.controls_counter.fetch_add(1, Ordering::SeqCst);
+        operation_rng(&self.actor_seed, "controls", counter)
     }
 
     fn er_client(&self) -> Result<&crate::clients::er::ErClient, RtError> {
@@ -469,12 +488,75 @@ async fn dvnizkp_round2_handler(
     Ok(Json(DvnizkpRound2Resp { z1 }))
 }
 
+// ── Credential controls (M8, §3.9 step 11 / §6.2) ───────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(bound = "")]
+pub struct ControlsRound1Request {
+    pub votes: Vec<evoting::api::prelude::Vote<RistrettoGroup>>,
+}
+
+/// Round 1: sample per-vote nonces and broadcast commitments + partial Ay.
+async fn controls_round1_handler(
+    Extension(state): Extension<Arc<RtState>>,
+    headers: HeaderMap,
+    Json(req): Json<ControlsRound1Request>,
+) -> Result<Json<evoting::api::prelude::PartialControlBroadcast<RistrettoGroup>>, RtError> {
+    state.require_bearer(&headers)?;
+    let teller = state.build_teller()?;
+    let mut rng = state.next_controls_rng();
+    let votes = req.votes;
+    let (votes, control_state, broadcast) = tokio::task::spawn_blocking(move || {
+        let (control_state, broadcast) = teller.gen_controls_round1(&votes, &mut rng);
+        (votes, control_state, broadcast)
+    })
+    .await
+    .map_err(|e| RtError::Internal(e.to_string()))?;
+    *state.controls_session.lock().await = Some(ControlsSession {
+        votes,
+        state: control_state,
+    });
+    Ok(Json(broadcast))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(bound = "")]
+pub struct ControlsRound2Request {
+    pub all_round1: Vec<evoting::api::prelude::PartialControlBroadcast<RistrettoGroup>>,
+    pub all_ids: Vec<usize>,
+}
+
+/// Round 2: derive the Fiat–Shamir challenge and respond over the cached
+/// round-1 vote list; consumes the session.
+async fn controls_round2_handler(
+    Extension(state): Extension<Arc<RtState>>,
+    headers: HeaderMap,
+    Json(req): Json<ControlsRound2Request>,
+) -> Result<Json<evoting::api::prelude::PartialControlResponse<RistrettoGroup>>, RtError> {
+    state.require_bearer(&headers)?;
+    let session = state
+        .controls_session
+        .lock()
+        .await
+        .take()
+        .ok_or_else(|| RtError::BadRequest("no open controls session".into()))?;
+    let teller = state.build_teller()?;
+    let response = tokio::task::spawn_blocking(move || {
+        teller.gen_controls_round2(&session.votes, session.state, &req.all_round1, &req.all_ids)
+    })
+    .await
+    .map_err(|e| RtError::Internal(e.to_string()))?;
+    Ok(Json(response))
+}
+
 #[derive(Debug, thiserror::Error)]
 enum RtError {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("unauthorized")]
     Unauthorized,
+    #[error("bad request: {0}")]
+    BadRequest(String),
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -484,6 +566,7 @@ impl IntoResponse for RtError {
         let (status, message) = match &self {
             Self::Json(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
+            Self::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             // Internal failures are logged but not leaked (style guide §03).
             Self::Internal(_) => {
                 tracing::error!(error = %self, "rt-server internal error");
@@ -506,7 +589,9 @@ pub fn router(state: Arc<RtState>) -> Router {
             .route("/credentials/request", post(credentials_request_handler))
             .route("/credentials/deliver", post(credentials_deliver_handler))
             .route("/dvnizkp/round1", post(dvnizkp_round1_handler))
-            .route("/dvnizkp/round2", post(dvnizkp_round2_handler)),
+            .route("/dvnizkp/round2", post(dvnizkp_round2_handler))
+            .route("/controls/round1", post(controls_round1_handler))
+            .route("/controls/round2", post(controls_round2_handler)),
         state,
     )
 }

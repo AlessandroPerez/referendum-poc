@@ -349,6 +349,33 @@ impl ErClient {
         }
     }
 
+    /// `POST /admin/eligible-vids` — publish the eligible vid list to the
+    /// WBB at tally start (M8, A7).  Requires the ER admin token.
+    pub async fn publish_eligible_vids(
+        &self,
+        admin_token: &SecretString,
+    ) -> Result<EligibleResponse, ErError> {
+        let url = self.base_url.join("admin/eligible-vids")?;
+        let response = self
+            .client
+            .post(url)
+            .header(
+                "Authorization",
+                format!("Bearer {}", admin_token.expose_secret()),
+            )
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(ErError::Network)?;
+        let status = response.status();
+        let body = response.text().await.map_err(ErError::Network)?;
+        if status.is_success() {
+            serde_json::from_str(&body).map_err(ErError::Json)
+        } else {
+            Err(ErError::Http(status, body))
+        }
+    }
+
     /// `POST /tokens/casting` — request anonymous casting tokens for `comm_b`
     /// (§5.3.1.6). `signature` is the base64 EdDSA signature over the commB
     /// bytes made with the voter's app key.

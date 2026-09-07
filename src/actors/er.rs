@@ -597,26 +597,71 @@ struct EligibleResponse {
     vids: Vec<Vid>,
 }
 
+impl ErState {
+    /// The eligible vid list: assigned (with revocation overrides applied)
+    /// minus revoked (A7).
+    async fn eligible_vids(&self) -> Result<Vec<Vid>, ErError> {
+        let overrides = self.vid_overrides.lock().await;
+        let revoked = self.revoked_vids.lock().await;
+        let mut vids = Vec::with_capacity(self.dip.voters.len());
+        for (index, voter) in self.dip.voters.iter().enumerate() {
+            let vid = match overrides.get(&voter.id) {
+                Some(vid) => *vid,
+                None => Vid::new((index + 1) as u64)
+                    .map_err(|_| ErError::Internal("vid out of range".into()))?,
+            };
+            if !revoked.contains(&vid) {
+                vids.push(vid);
+            }
+        }
+        vids.sort_unstable();
+        Ok(vids)
+    }
+}
+
 /// A7 support: the eligible vid list (assigned minus revoked), also
 /// published to the WBB at tally start (M8).
 async fn eligible_handler(
     Extension(state): Extension<Arc<ErState>>,
 ) -> Result<Json<EligibleResponse>, ErError> {
-    let overrides = state.vid_overrides.lock().await;
-    let revoked = state.revoked_vids.lock().await;
-    let mut vids = Vec::with_capacity(state.dip.voters.len());
-    for (index, voter) in state.dip.voters.iter().enumerate() {
-        let vid = match overrides.get(&voter.id) {
-            Some(vid) => *vid,
-            None => Vid::new((index + 1) as u64)
-                .map_err(|_| ErError::Internal("vid out of range".into()))?,
-        };
-        if !revoked.contains(&vid) {
-            vids.push(vid);
-        }
-    }
-    vids.sort_unstable();
+    let vids = state.eligible_vids().await?;
     Ok(Json(EligibleResponse { vids }))
+}
+
+#[derive(Debug, Serialize)]
+struct PublishEligibleResponse {
+    vids: Vec<Vid>,
+}
+
+/// A7: publish `tallying,ER,eligible_vids,1,…` at tally start, honoring
+/// revocations (§3.9 step 1, roadmap §6.1).
+async fn publish_eligible_handler(
+    Extension(state): Extension<Arc<ErState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<PublishEligibleResponse>, ErError> {
+    check_admin_token(&headers, &state.admin_token)?;
+    let vids = state.eligible_vids().await?;
+    let data =
+        crate::protocol::voting::wbb_data_string("tallying", "ER", "eligible_vids", 1, &vids)
+            .map_err(|e| ErError::Internal(e.to_string()))?;
+    let timestamp = {
+        let mut clock = state.clock.lock().await;
+        let ts = clock.now_ms() as i64;
+        clock.advance();
+        ts
+    };
+    let signing_key = state.signing_key();
+    let entry = tokio::task::spawn_blocking(move || {
+        sign_entry(data.as_bytes(), "ER-1", timestamp, &signing_key)
+    })
+    .await
+    .map_err(|e| ErError::Internal(e.to_string()))?;
+    state
+        .wbb_client
+        .submit_and_wait(&entry, std::time::Duration::from_secs(10))
+        .await
+        .map_err(|e| ErError::Internal(format!("WBB publication failed: {e}")))?;
+    Ok(Json(PublishEligibleResponse { vids }))
 }
 
 #[derive(Debug, Serialize)]
@@ -946,6 +991,7 @@ pub fn router(state: Arc<ErState>) -> Router {
     with_state(
         health_router()
             .route("/admin/setup", post(setup_handler))
+            .route("/admin/eligible-vids", post(publish_eligible_handler))
             .route("/login", post(login_handler))
             .route("/devices", post(device_register_handler))
             .route("/devices/blob", post(device_blob_handler))

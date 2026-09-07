@@ -291,6 +291,71 @@ impl RtClient {
             Err(RtError::Http(status, body))
         }
     }
+
+    /// `POST /controls/round1` — open a credential-control session over the
+    /// shuffled votes (M8, §3.9 step 11).
+    pub async fn controls_round1(
+        &self,
+        votes: &[evoting::api::prelude::Vote<RistrettoGroup>],
+    ) -> Result<evoting::api::prelude::PartialControlBroadcast<RistrettoGroup>, RtError> {
+        let url = self.base_url.join("controls/round1")?;
+        #[derive(Serialize)]
+        #[serde(bound = "")]
+        struct Req<'a> {
+            votes: &'a [evoting::api::prelude::Vote<RistrettoGroup>],
+        }
+        let response = self
+            .client
+            .post(url)
+            .header("Authorization", self.auth_header())
+            .json(&Req { votes })
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(RtError::Network)?;
+        let status = response.status();
+        let body = response.text().await.map_err(RtError::Network)?;
+        if status.is_success() {
+            serde_json::from_str(&body).map_err(RtError::Json)
+        } else {
+            Err(RtError::Http(status, body))
+        }
+    }
+
+    /// `POST /controls/round2` — obtain this RT's control response; consumes
+    /// the session.
+    pub async fn controls_round2(
+        &self,
+        all_round1: &[evoting::api::prelude::PartialControlBroadcast<RistrettoGroup>],
+        all_ids: &[usize],
+    ) -> Result<evoting::api::prelude::PartialControlResponse<RistrettoGroup>, RtError> {
+        let url = self.base_url.join("controls/round2")?;
+        #[derive(Serialize)]
+        #[serde(bound = "")]
+        struct Req<'a> {
+            all_round1: &'a [evoting::api::prelude::PartialControlBroadcast<RistrettoGroup>],
+            all_ids: &'a [usize],
+        }
+        let response = self
+            .client
+            .post(url)
+            .header("Authorization", self.auth_header())
+            .json(&Req {
+                all_round1,
+                all_ids,
+            })
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(RtError::Network)?;
+        let status = response.status();
+        let body = response.text().await.map_err(RtError::Network)?;
+        if status.is_success() {
+            serde_json::from_str(&body).map_err(RtError::Json)
+        } else {
+            Err(RtError::Http(status, body))
+        }
+    }
 }
 
 /// Errors from the RT client.

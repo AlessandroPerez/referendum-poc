@@ -32,6 +32,12 @@ peers:
     base_url: https://localhost:8031/
   - name: bb-2
     base_url: https://localhost:8032/
+  - name: tt-1
+    base_url: https://localhost:8021/
+  - name: tt-2
+    base_url: https://localhost:8022/
+  - name: tt-3
+    base_url: https://localhost:8023/
 
 er:
   base_url: https://localhost:8001/

@@ -8,6 +8,7 @@ mod m4_integration;
 mod m5_integration;
 mod m6_integration;
 mod m7_integration;
+mod m8_integration;
 
 #[test]
 fn harness_loads() {

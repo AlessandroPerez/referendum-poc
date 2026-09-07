@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use referendum_poc::actors::admin::{
-    gen_credentials, transition_phase, GenCredentialsConfig, PhaseTransitionConfig,
+    gen_credentials, run_tally, transition_phase, GenCredentialsConfig, PhaseTransitionConfig,
+    TallyConfig,
 };
 use referendum_poc::actors::load_settings;
 use referendum_poc::protocol::clock::LogicalClock;
@@ -54,6 +55,43 @@ enum Command {
         #[arg(long)]
         wbb_url: Option<Url>,
     },
+
+    /// Run the full §3.9 tally pipeline over HTTP and publish all artifacts (A5).
+    Tally {
+        /// WBB log base URL (overrides configuration).
+        #[arg(long)]
+        wbb_url: Option<Url>,
+    },
+
+    /// Print the final counts from the WBB `tally_result` entry (V15 support).
+    Results {
+        /// WBB log base URL (overrides configuration).
+        #[arg(long)]
+        wbb_url: Option<Url>,
+    },
+}
+
+/// Collect the `base_url`s of peers named `{prefix}-1..n`, in index order.
+fn peer_urls(
+    settings: &referendum_poc::configuration::Settings,
+    prefix: &str,
+) -> anyhow::Result<Vec<Url>> {
+    let mut peers: Vec<_> = settings
+        .peers
+        .iter()
+        .filter(|p| p.name.starts_with(&format!("{prefix}-")))
+        .collect();
+    peers.sort_by(|a, b| a.name.cmp(&b.name));
+    if peers.is_empty() {
+        anyhow::bail!("no {prefix}-* peers configured");
+    }
+    peers
+        .iter()
+        .map(|p| {
+            Url::parse(&p.base_url)
+                .map_err(|e| anyhow::anyhow!("invalid base_url for {}: {e}", p.name))
+        })
+        .collect()
 }
 
 /// Shared plumbing for the PM phase-transition subcommands.
@@ -167,6 +205,84 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::CloseVoting { wbb_url } => {
             run_transition(&settings, &cli.config, wbb_url, "voting", "tallying").await?;
+        }
+        Command::Tally { wbb_url } => {
+            let ceremony_dir = std::path::PathBuf::from(&settings._ceremony.election_context)
+                .parent()
+                .unwrap_or(&cli.config)
+                .to_path_buf();
+            let ca_pem = tokio::fs::read_to_string(&settings.tls.ca_pem)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to read CA cert: {e}"))?;
+            let wbb_url = match wbb_url {
+                Some(url) => url,
+                None => Url::parse(&settings.wbb.base_url)
+                    .map_err(|e| anyhow::anyhow!("invalid wbb.base_url: {e}"))?,
+            };
+            let outcome = run_tally(TallyConfig {
+                ceremony_dir,
+                wbb_url,
+                er_url: Url::parse(&settings.er.base_url)
+                    .map_err(|e| anyhow::anyhow!("invalid er.base_url: {e}"))?,
+                bb_urls: peer_urls(&settings, "bb")?,
+                rt_urls: peer_urls(&settings, "rt")?,
+                tt_urls: peer_urls(&settings, "tt")?,
+                ca_pem,
+                clock: LogicalClock::new(settings.clock.base_ms, settings.clock.tick_ms),
+                n_acc: settings.election.n_acc,
+                t_tt: settings.election.t_tt,
+            })
+            .await?;
+            println!(
+                "tally complete: blank={} si={} no={} (released={} reconciled={} deduped={} valid={} legitimate={})",
+                outcome.counts.blank,
+                outcome.counts.si,
+                outcome.counts.no,
+                outcome.released,
+                outcome.reconciled,
+                outcome.deduped,
+                outcome.valid,
+                outcome.legitimate,
+            );
+        }
+        Command::Results { wbb_url } => {
+            let ca_pem = tokio::fs::read_to_string(&settings.tls.ca_pem)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to read CA cert: {e}"))?;
+            let wbb_url = match wbb_url {
+                Some(url) => url,
+                None => Url::parse(&settings.wbb.base_url)
+                    .map_err(|e| anyhow::anyhow!("invalid wbb.base_url: {e}"))?,
+            };
+            let client = referendum_poc::protocol::tls::reqwest_client_trusting_ca(&ca_pem)?;
+            let wbb = referendum_poc::clients::wbb::WbbClient::new(client, wbb_url);
+            let entries = wbb
+                .entries()
+                .await
+                .map_err(|e| anyhow::anyhow!("WBB read failed: {e}"))?;
+            let mut counts: Option<referendum_poc::protocol::tally::TallyCounts> = None;
+            for sequenced in &entries.entries {
+                let Some(data_b64) = sequenced.entry.get("data").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let Ok(data) =
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_b64)
+                else {
+                    continue;
+                };
+                if let Some(parsed) = referendum_poc::protocol::voting::parse_wbb_data(&data) {
+                    if parsed.entry_type == "tally_result" {
+                        counts = Some(parsed.decode_payload()?);
+                    }
+                }
+            }
+            match counts {
+                Some(counts) => println!(
+                    "results: blank={} si={} no={}",
+                    counts.blank, counts.si, counts.no
+                ),
+                None => anyhow::bail!("no tally_result entry on the WBB (tally not run yet?)"),
+            }
         }
     }
 
