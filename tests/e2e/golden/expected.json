@@ -1,0 +1,432 @@
+{
+  "ballot_emoji": [
+    [
+      "🏯",
+      "🚥",
+      "🥱",
+      "🏬",
+      "🍅",
+      "🙁"
+    ],
+    [
+      "😫",
+      "🧠",
+      "🌂",
+      "📉",
+      "🌎",
+      "🥬"
+    ],
+    [
+      "🚚",
+      "🦳",
+      "🎿",
+      "🍊",
+      "👬",
+      "🍟"
+    ],
+    [
+      "👨",
+      "🚒",
+      "🦎",
+      "♏",
+      "😗",
+      "📪"
+    ],
+    [
+      "🧓",
+      "🙌",
+      "🧝",
+      "🏂",
+      "🎽",
+      "🤥"
+    ],
+    [
+      "🐝",
+      "🩸",
+      "🧰",
+      "👝",
+      "🥒",
+      "📜"
+    ],
+    [
+      "🌚",
+      "👩",
+      "🚩",
+      "💏",
+      "♎",
+      "🐛"
+    ],
+    [
+      "🦮",
+      "📞",
+      "🧀",
+      "📎",
+      "🦼",
+      "🦉"
+    ],
+    [
+      "🛺",
+      "🥣",
+      "🗼",
+      "🧀",
+      "🔛",
+      "🔋"
+    ]
+  ],
+  "checkpoint_root": "JngPhDFS7FtGz1a14uhCmEkdVT2QC4dXLMK8Wn36VQo=",
+  "election_context_sha256": "d6138a4693510f6635d666ea7e04ea47ecd76487ccebd9f91913331100d94aca",
+  "entries": [
+    {
+      "data_sha256": "b7c1c90f6e313b548c85e9c1c2fd60e9d360a5c6299ffa0fbd7196a633a49c81",
+      "entry_type": "acc_pub_key",
+      "phase": "setup"
+    },
+    {
+      "data_sha256": "084322c7aeba02a8cd0c8c0716a8167bc1283bcbcf00fda2a6326f9fe5ac8feb",
+      "entry_type": "election_pub_key",
+      "phase": "setup"
+    },
+    {
+      "data_sha256": "b45b09c33d8cc58d10dd31310d83b5e157c44b2b29c64f7724c940bb17f867f8",
+      "entry_type": "pseudonymous_id_count",
+      "phase": "setup"
+    },
+    {
+      "data_sha256": "b284f661a81be7162106feb89fa429c2140fae4978482c99659bc5fa4e538a49",
+      "entry_type": "voter_id_merkle_root",
+      "phase": "setup"
+    },
+    {
+      "data_sha256": "461b177a5d83600c6403a97529410c19ca47093898d7248634a2d6595ed757a0",
+      "entry_type": "phase_transition",
+      "phase": "setup"
+    },
+    {
+      "data_sha256": "62b80e69de4b64b435cfacad4047a52d143295c6ce628481f5b4d7a4da3f3f07",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "c94fd2bcac92cae25db187c20398284205a0c0da2efd4417b38ab079b8381130",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "fa1a360ff74392a91ed4d9e6b7af2e01b4307b9e64a94a78a19d4835b6c2cd65",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "e1bd9207b4c423392e9b997c7018b3b4ac5bdb9f39b6382269590189f6f1bd53",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "d0e2a1b5d920864ff96b9ca55d739b379c66243a13b7cc625430d68c57299c88",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "78ede11b1e82f9ed760dc0552b1bdb5d3d5df2ad7e0e1fb81766288943996db2",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "c818e73e44a513ef7ec6601cfffabe4b195e7c709812d06025221fef4acfb6ca",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "b742da926558285b5968eb7fa80bac3a2b3849df6bf3900282f1e8c67d43d809",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "9c8c5e21a8aafb4b6fd313974ce705a56db5f8756babf3c2037822a358c083d9",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "6780009ea522de8ee06a2e4ae35b2477bbe175c7d7768fce3d008c921ba2cee8",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "bb7413941444de93cc9537716dee55c57995bbb1c514d4da9fb355e4cb2408ab",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "b128e8be705a60f1f257edd48ff3cde749188e2ebf80fc345e7f9598127aba92",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "72593e2b05166ff8c5292acacbb4e74c986c23161fcedb3df2499b9aa45693ee",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "698caa34028448b84c9b8ed00d9e6da65c710e755ef49b77c7877357869dac4d",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "5210898d17726e4be97a04c011592b1b32bd0626c82cf9bd9c73587e0c2e8f62",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "045cc81c1ad11a249c4d9948fb365427ec4d9b556618f4c27d0f7acffd902e22",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "655ad8b8c3935496b5a4a567d544d2037a54f27f95e37d8db1b11e2b1b902c88",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "37cec8caacff70e4fd553b9bfcebca1f75e753f305569b665072e4102a31208a",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "daff6b38847a90e483eeee67055ead3c14083aa33d12cc2d44cfb404f70829be",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "626bfc95b4b2832e1ace67dc2a28f0aff6825b2874eb746a4c0b45f6bf2c43bd",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "b920153be24b5b3c2f257363aba5df66fa3672c1d63759dca652fa8406bcf16a",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "1bde66f472ec1dbd4b444d57305a414bbe6ce2a1789cdaede76cf8ee36c10a4e",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "00bae452b2bcb9474a5b612c93be40168c856fad3491ec7a3b9520dbd1cab057",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "743f0fc0dff5618d55aa788e284b811a877bf368c1cb364f9b0789e79e065027",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "1840656103c61532ffaf8b33b18676f578707a4e4aecd5d83c6abeb7659c36ff",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "d6787045cbc8488c5a034059c06d9e5a30fd691d395671d3d4e3613f4b126685",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "50c7318148ad68e535aeb7584bb82ca710b43ac23df77a04d189198d2a243bf8",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "7deb2cb6a01469912f6b5675f1faf7ce9a159d739e5c7e0f237e40f937d6a04e",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "0ed3954c3ebc44369f91525ae8894f2fd72048c0d54d34f585d7c81b0f7ab312",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "efcd15b6fa42492210dbeceffdb458f881bd0fdbb04ef193aac781cffbe06737",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "b49987cec97c1e0059b6d77201507ea776d7a6058fb0b560928797c28c886eb7",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "3b0f12c290abafd92a70e97f8e24bc1f9d500e5415c9856b55745feb01c959f6",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "0e9273c0dc3c9534898a0d9a34a171b2f90b42082c452f6d6ced9a238fa64c58",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "b372a4b0707fc3410503061a9d7550d6d28755b998b0ab595a70e765fd6ccfa0",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "e0f5772e91a0f1f26d57611d10867ff6048f2f78f9da6a8f5b74a69c17cba9a6",
+      "entry_type": "ballot_digest",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "253812846a529949d3a40e0ade33c3391126cb31e6611e715ac9a4b659c9fa78",
+      "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "77861588e1490e7ed44c1158efb93e7806a32dcbba48e7d4589c18846125cabd",
+      "entry_type": "phase_transition",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "b13a2f72192e50ee5fe704bfe6c495ae2f6a31815690c1862623d0f6146d1430",
+      "entry_type": "eligible_vids",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "6353cedf6a25c5fe640991ce0d44b1c66f3389c383edfa4a39ffed0f96873005",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "735792b284fc1ad5f2327118042aceb24bc567fb39eabc612af7fc21d6596703",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "645aef350aaa4966bb7237eb5ce040bba67e5fcf03ed0b2c6e20da034f8deaa8",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "6453b046a61a65b936653c7772e625f7c0c17d055efc8af2c60294a53fe42942",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "2c2250d1ffa68ee4aec0439188d0818652ca5d1fe4beb292a5ab3f1698ad2d16",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "daaaf3402dee1e03cc0e747793e0a590e783b6cacba0cce49021b69b81ddab37",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "fe7032f2646c2ae9b3fd5bf4f63504efdb2262ecf8ef5ea83d76ee427534cd24",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "00c5e3893d8750dcaeaefda40477f74c20d891e6dc6fab7af5acbfbe334cd856",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "ca69e0423f745553bf300e429890724f545602003662e1026e49c1100081955f",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "1462bf2282f93d5110f3fbe8cfe18811eeb0d2c02653d95293fa8407cc549953",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "41dd4eb1bf37337d3f8969bfd838ca42881160c56a5c985302384cfdf960cb98",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "f1f4a065acdbd472374b12e47820b9f7a32d4ff41beabb656e59c42f22e940b1",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "c3648da6cfbd4aab117d495360e1c8db6494dd3834b81a8e63da63ae1df1e20b",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "3ce627873def051af3ae24aac3ad91890b3ae1a85033bea5ed400b9e6519bb8a",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "c87d9c8518392beb1b22eb4a63f689a326cf2f266f8ef212b352abd883dc8342",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "4c04a260c7f38fc0270e5b9b2747499988dcc43bafc6632bb8d47c598c695726",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "16a9b3e1d9c8a1a6c7ea8ae44db035b71f69d6934a21110e31678e66dc453744",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "d95312485f960fc6185f32e9a27fde3b37feb7820d3d074917f34e367ad9eac4",
+      "entry_type": "encrypted_ballot",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "d25797f61d2577144bf200f17f122ac1c0597829f92e3f8b0fbffa1e197e9f19",
+      "entry_type": "re_encryption_proof",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "eceb89767b6b66f328701622ec6ed21ee9bb1f3103422b5a4aeaacbbbd61f85c",
+      "entry_type": "mixed_ballots",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "f6d28d5bbe797a0536e472cc17a9e5e2857695cb8ad5756ab53829a816505402",
+      "entry_type": "re_encryption_proof",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "fb969e15c748607edc60c847e0c6bc14fc556c4d55001f2591c3b74d753bf593",
+      "entry_type": "re_encryption_proof",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "3abfc6e5f4466e65b0445a834bd5c3b58a6d29a212d9e79a0c799bbf0536a4c0",
+      "entry_type": "mixed_ballots",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "33c7495c7b8925c30f35525f454737af9c27893e4db122313a3c913769427128",
+      "entry_type": "re_encryption_proof",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "bf63c0bd99ecbcb7b2181ae8e3baa91feec4850903af4ff7278c777c563b1b8e",
+      "entry_type": "tally_proof",
+      "phase": "tallying"
+    },
+    {
+      "data_sha256": "2d005e9da6148538f3bd7c38e21ad4b8f85b7146193a48471f8d2e8b4237d4ab",
+      "entry_type": "tally_result",
+      "phase": "tallying"
+    }
+  ],
+  "master_seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "tally_counts": {
+    "blank": 1,
+    "no": 3,
+    "si": 4
+  },
+  "wbb_tree_size": 69
+}

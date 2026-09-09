@@ -735,6 +735,67 @@ async fn election_handler(
     }))
 }
 
+#[derive(Debug, Serialize)]
+struct ResultsResponse {
+    phase: String,
+    /// Final counts, present once a `tally_result` entry is published.
+    counts: Option<crate::protocol::tally::TallyCounts>,
+    /// WBB leaf indexes of the `tally_result`/`tally_proof` entries (V15
+    /// links: the voter can inspect them on the public bulletin board).
+    tally_entries: Vec<i64>,
+}
+
+/// V15: results viewing — final counts + links to the WBB tally entries.
+/// Results are public, so no passphrase is required.
+#[tracing::instrument(skip(state))]
+async fn results_handler(
+    Extension(state): Extension<Arc<VoterState>>,
+) -> Result<Json<ResultsResponse>, VoterError> {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+
+    let phase = state
+        .wbb_client
+        .phase()
+        .await
+        .map_err(|e| VoterError::Protocol(format!("WBB phase query failed: {e}")))?;
+    let entries = state
+        .wbb_client
+        .entries()
+        .await
+        .map_err(|e| VoterError::Protocol(format!("WBB entries query failed: {e}")))?;
+
+    let mut counts = None;
+    let mut tally_entries = Vec::new();
+    for sequenced in &entries.entries {
+        let Some(parsed) = sequenced
+            .entry
+            .get("data")
+            .and_then(|v| v.as_str())
+            .and_then(|b64| B64.decode(b64).ok())
+            .and_then(|data| voting::parse_wbb_data(&data))
+        else {
+            continue;
+        };
+        match parsed.entry_type.as_str() {
+            "tally_result" => {
+                tally_entries.push(sequenced.leaf_index);
+                counts = B64
+                    .decode(parsed.content)
+                    .ok()
+                    .and_then(|json| serde_json::from_slice(&json).ok());
+            }
+            "tally_proof" => tally_entries.push(sequenced.leaf_index),
+            _ => {}
+        }
+    }
+    Ok(Json(ResultsResponse {
+        phase,
+        counts,
+        tally_entries,
+    }))
+}
+
 #[derive(Deserialize)]
 struct VoteRequest {
     passphrase: String,
@@ -1357,6 +1418,7 @@ pub fn router(state: Arc<VoterState>) -> Router {
         )
         .route("/api/settings/trusted/show", post(trusted_get_handler))
         .route("/api/election", axum::routing::get(election_handler))
+        .route("/api/results", axum::routing::get(results_handler))
         .route("/api/vote", post(vote_handler))
         .route("/api/cast", post(cast_handler))
         .route("/api/ballot/status", post(ballot_status_handler))

@@ -93,6 +93,23 @@ pub fn write_artifacts(
     let ca_pem = output_dir.join("ca.pem");
     fs::write(&ca_pem, ca.cert_pem())?;
 
+    // The WBB serves TLS via sunlight's `-testcert` flag, which reads
+    // `sunlight.pem`/`sunlight-key.pem` from its working directory (D16).
+    let wbb_cert = issue_service_cert(&ca, "wbb", &derive_service_seed(&master_seed_bytes, "wbb"))?;
+    fs::write(output_dir.join("sunlight.pem"), wbb_cert.cert_pem())?;
+    fs::write(output_dir.join("sunlight-key.pem"), wbb_cert.key_pem())?;
+
+    // Generic admin identity backing the `cert.pem`/`key.pem` paths in the
+    // self-contained base.yaml (the CLIs only need `ca.pem`; servers get
+    // per-service certs via APP_TLS__* overrides).
+    let admin_cert = issue_service_cert(
+        &ca,
+        "admin",
+        &derive_service_seed(&master_seed_bytes, "admin"),
+    )?;
+    fs::write(output_dir.join("cert.pem"), admin_cert.cert_pem())?;
+    fs::write(output_dir.join("key.pem"), admin_cert.key_pem())?;
+
     let mut service_certs = HashMap::new();
     let mut service_signing_keys = HashMap::new();
     let service_names = service_names(&base_settings.election);
@@ -395,6 +412,26 @@ fn write_self_contained_base_config(
             );
         }
     }
+
+    // Absolute ceremony paths so servers booted with this config resolve the
+    // election context, seed, and share files without env overrides.
+    mapping.insert(
+        serde_yaml::Value::String("_ceremony".to_string()),
+        serde_yaml::to_value(serde_yaml::Mapping::from_iter([
+            (
+                serde_yaml::Value::String("seed_bin".to_string()),
+                serde_yaml::Value::String(make_absolute("seed.bin")),
+            ),
+            (
+                serde_yaml::Value::String("sunlight_yaml".to_string()),
+                serde_yaml::Value::String(make_absolute("sunlight.yaml")),
+            ),
+            (
+                serde_yaml::Value::String("election_context".to_string()),
+                serde_yaml::Value::String(make_absolute("election_context.json")),
+            ),
+        ]))?,
+    );
 
     fs::write(config_dir.join("base.yaml"), serde_yaml::to_string(&value)?)?;
     Ok(())

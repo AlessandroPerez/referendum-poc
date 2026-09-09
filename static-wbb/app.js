@@ -54,9 +54,30 @@ async function refreshEntries() {
       }
       tbody.appendChild(tr);
     }
+    renderResults();
   } catch (e) {
     setError(`Failed to load entries: ${e.message}`);
   }
+}
+
+// V15: results view — counts from the tally_result entry + links to the
+// tally entries themselves.
+function renderResults() {
+  const container = $("results");
+  const result = cachedEntries.find((r) => r.entry_type === "tally_result");
+  if (!result || !result.payload) {
+    container.textContent = "No tally published yet.";
+    return;
+  }
+  const proofs = cachedEntries.filter((r) =>
+    ["tally_result", "tally_proof"].includes(r.entry_type),
+  );
+  const { blank, si, no } = result.payload;
+  container.innerHTML =
+    `<p><strong>Sì: ${si}</strong> · <strong>No: ${no}</strong> · blank: ${blank}</p>` +
+    `<p>Published in log ${proofs
+      .map((r) => `entry #${r.leaf_index} (${r.entry_type})`)
+      .join(", ")} — co-signed by the tabulation tellers and verifiable with <code>referendum-auditor</code>.</p>`;
 }
 
 function renderSearch(digest) {

@@ -13,9 +13,27 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use referendum_poc::{
+    actors::admin::{
+        gen_credentials, run_tally, transition_phase, GenCredentialsConfig, PhaseTransitionConfig,
+        TallyConfig, TallyOutcome,
+    },
+    actors::auditor::{run_audit, AuditConfig, AuditReport},
+    actors::common::serve_rustls,
+    actors::{bb, dip, er, ns, rt, tt, voter, wbb_ui},
     clients::wbb::WbbClient,
-    protocol::tls::{reqwest_client_trusting_ca, ClusterCa},
+    configuration::{
+        get_configuration, CeremonyPaths, DipSettings, ErClientSettings, NsClientSettings,
+        PeerSettings, ServiceSettings, Settings, TlsSettings, VoterSettings, WbbSettings,
+        WbbUiSettings,
+    },
+    protocol::clock::LogicalClock,
+    protocol::rng::MasterSeed,
+    protocol::setup::artifacts::write_artifacts,
+    protocol::setup::run_ceremony,
+    protocol::tls::{issue_service_cert, reqwest_client_trusting_ca, ClusterCa},
 };
+use reqwest::Url;
+use secrecy::SecretString;
 use tokio::time::interval;
 
 pub fn init() {
@@ -297,5 +315,633 @@ impl Drop for WbbProcess {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// M9 full-election harness (§13 suite, style guide §05 `spawn_cluster()`).
+//
+// Boots the whole system — ceremony, WBB, DIP/NS/ER, RT×3, BB×2, TT×3,
+// wbb-ui, N voter-servers — and exposes the voter/admin actions the §13
+// tests drive. Holds the cluster guard for its lifetime, so tests using it
+// are serialized automatically.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Tunables for a harness cluster.
+pub struct ElectionOpts {
+    /// Master seed for the ceremony, entity keys, and TLS material.
+    pub master_seed: [u8; 32],
+    /// Override for the CAT rate limit (`rate_limit_and_cat`).
+    pub max_casts_per_voter: Option<usize>,
+}
+
+impl Default for ElectionOpts {
+    fn default() -> Self {
+        Self {
+            master_seed: [0xab; 32],
+            max_casts_per_voter: None,
+        }
+    }
+}
+
+pub struct ElectionPorts {
+    pub wbb: u16,
+    pub dip: u16,
+    pub ns: u16,
+    pub er: u16,
+    pub rt: Vec<u16>,
+    pub bb: Vec<u16>,
+    pub tt: Vec<u16>,
+    pub wbb_ui: u16,
+}
+
+pub struct ElectionCluster {
+    _guard: tokio::sync::MutexGuard<'static, ()>,
+    temp: tempfile::TempDir,
+    pub wbb: WbbProcess,
+    pub wbb_url: Url,
+    pub ca: ClusterCa,
+    pub client: reqwest::Client,
+    pub base: Settings,
+    pub ports: ElectionPorts,
+    pub voter_urls: Vec<String>,
+    pub passphrases: Vec<String>,
+    #[allow(dead_code)]
+    pub master_seed: [u8; 32],
+}
+
+#[allow(dead_code)]
+impl ElectionCluster {
+    /// Ceremony + WBB + full service cluster + `n_voters` voter-servers,
+    /// with the ER setup entries already published (A2).
+    pub async fn start(n_voters: usize, opts: ElectionOpts) -> Self {
+        init();
+        let guard = cluster_guard().await;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ceremony_dir = temp.path().to_path_buf();
+        let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut base = get_configuration(&base_dir).expect("base settings");
+        if let Some(limit) = opts.max_casts_per_voter {
+            base.election.max_casts_per_voter = limit;
+        }
+
+        let master_seed = opts.master_seed;
+        let seed = MasterSeed::new(master_seed);
+        let mut rng = ChaCha20Rng::from_seed(master_seed);
+        let ceremony = run_ceremony(&base.election, &mut rng).expect("ceremony");
+        write_artifacts(&ceremony_dir, &base, &ceremony, &seed, &base.dip)
+            .expect("write ceremony artifacts");
+
+        let ca = ClusterCa::from_seed(&master_seed).expect("cluster ca");
+        let wbb_cert = issue_service_cert(&ca, "wbb", &master_seed).expect("wbb cert");
+        let ports = ElectionPorts {
+            wbb: free_port(),
+            dip: free_port(),
+            ns: free_port(),
+            er: free_port(),
+            rt: (0..3).map(|_| free_port()).collect(),
+            bb: (0..2).map(|_| free_port()).collect(),
+            tt: (0..3).map(|_| free_port()).collect(),
+            wbb_ui: free_port(),
+        };
+
+        let key_of = |name: &str| ceremony_signing_key(&ceremony_dir, name);
+        let pm_key = key_of("pm");
+        let mut wbb_config = WbbSpawnConfig::new(ports.wbb)
+            .with_entity("PM-1", pm_key.verifying_key())
+            .with_entity("ER-1", key_of("er").verifying_key())
+            .with_phase_manager(pm_key.verifying_key());
+        for i in 1..=3 {
+            wbb_config = wbb_config.with_entity(
+                &format!("RT-{i}"),
+                key_of(&format!("rt-{i}")).verifying_key(),
+            );
+            wbb_config = wbb_config.with_entity(
+                &format!("TT-{i}"),
+                key_of(&format!("tt-{i}")).verifying_key(),
+            );
+        }
+        for i in 1..=2 {
+            wbb_config = wbb_config.with_entity(
+                &format!("BB-{i}"),
+                key_of(&format!("bb-{i}")).verifying_key(),
+            );
+        }
+        let wbb = WbbProcess::spawn(
+            &ceremony_dir,
+            &ca,
+            wbb_cert.cert_pem(),
+            wbb_cert.key_pem(),
+            wbb_config,
+        )
+        .await
+        .expect("spawn wbb");
+
+        let wbb_url = Url::parse(&format!("https://127.0.0.1:{}/wbb/", ports.wbb)).unwrap();
+        gen_credentials(GenCredentialsConfig {
+            ceremony_dir: ceremony_dir.clone(),
+            output_dir: ceremony_dir.join("output"),
+            n_acc: base.election.n_acc,
+            t_rt: base.election.t_rt,
+            t_prime: base.election.t_prime,
+            wbb_url: wbb_url.clone(),
+            rt_urls: None,
+            rt_tokens: None,
+            ca_pem: ca.cert_pem().to_string(),
+            clock: LogicalClock::new(base.clock.base_ms, base.clock.tick_ms),
+        })
+        .await
+        .expect("gen credentials");
+
+        let mk =
+            |name: &str, port: u16| election_settings(&ceremony_dir, name, port, &ports, &base);
+
+        tokio::spawn(dip::run(mk("dip", ports.dip), key_of("dip")));
+        tokio::spawn(ns::run(mk("ns", ports.ns), key_of("ns")));
+
+        let admin_token = read_admin_token(&ceremony_dir);
+        let (er_addr, er_tls, er_state) = er::build_service(
+            mk("er", ports.er),
+            key_of("er"),
+            SecretString::new(admin_token.clone()),
+        )
+        .await
+        .expect("build er");
+        tokio::spawn(async move {
+            serve_rustls(er::router(er_state), er_addr, er_tls)
+                .await
+                .expect("er server")
+        });
+
+        for (i, port) in ports.rt.iter().enumerate() {
+            let name = format!("rt-{}", i + 1);
+            let (addr, tls, state) = rt::build_service(mk(&name, *port), key_of(&name))
+                .await
+                .expect("build rt");
+            tokio::spawn(async move {
+                serve_rustls(rt::router(state), addr, tls)
+                    .await
+                    .expect("rt server")
+            });
+        }
+        for (i, port) in ports.bb.iter().enumerate() {
+            let name = format!("bb-{}", i + 1);
+            let (addr, tls, state) = bb::build_service(mk(&name, *port), key_of(&name))
+                .await
+                .expect("build bb");
+            tokio::spawn(async move {
+                serve_rustls(bb::router(state), addr, tls)
+                    .await
+                    .expect("bb server")
+            });
+        }
+        for (i, port) in ports.tt.iter().enumerate() {
+            let name = format!("tt-{}", i + 1);
+            let (addr, tls, state) = tt::build_service(mk(&name, *port), key_of(&name))
+                .await
+                .expect("build tt");
+            tokio::spawn(async move {
+                serve_rustls(tt::router(state), addr, tls)
+                    .await
+                    .expect("tt server")
+            });
+        }
+
+        let mut ui_settings = mk("wbb-ui", ports.wbb_ui);
+        ui_settings.wbb_ui.static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("static-wbb")
+            .display()
+            .to_string();
+        let (ui_addr, ui_tls, ui_state) = wbb_ui::build_service(ui_settings)
+            .await
+            .expect("build wbb-ui");
+        tokio::spawn(async move {
+            serve_rustls(wbb_ui::router(ui_state), ui_addr, ui_tls)
+                .await
+                .expect("wbb-ui server")
+        });
+
+        let client = reqwest_client_trusting_ca(ca.cert_pem()).expect("http client");
+        let mut cluster = Self {
+            _guard: guard,
+            temp,
+            wbb,
+            wbb_url,
+            ca,
+            client,
+            base,
+            ports,
+            voter_urls: Vec::new(),
+            passphrases: Vec::new(),
+            master_seed,
+        };
+        for i in 1..=n_voters {
+            let name = format!("voter-{i}");
+            let url = cluster.spawn_voter_server_as(&name, &name).await;
+            cluster.voter_urls.push(url);
+        }
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // ER publishes the setup entries (A2) — the auditor and tally read
+        // the election context from the log itself.
+        let setup = cluster
+            .client
+            .post(format!(
+                "https://127.0.0.1:{}/admin/setup",
+                cluster.ports.er
+            ))
+            .header("Authorization", format!("Bearer {admin_token}"))
+            .send()
+            .await
+            .expect("admin setup");
+        assert!(setup.status().is_success(), "ER setup publication");
+
+        cluster
+    }
+
+    pub fn ceremony_dir(&self) -> &Path {
+        self.temp.path()
+    }
+
+    /// Spawn a voter-server. `cert_name` must be a ceremony-provisioned TLS
+    /// identity (`voter-1`..`voter-n`); a fresh-device server for `new_device`
+    /// reuses a cert but gets its own state dir via `state_label`.
+    pub async fn spawn_voter_server_as(&self, cert_name: &str, state_label: &str) -> String {
+        let port = free_port();
+        let mut settings =
+            election_settings(self.temp.path(), cert_name, port, &self.ports, &self.base);
+        settings.voter.state_dir = self
+            .temp
+            .path()
+            .join(format!("{state_label}-state"))
+            .display()
+            .to_string();
+        settings.voter.static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("static")
+            .display()
+            .to_string();
+        let (addr, tls, state) = voter::build_service(settings).await.expect("build voter");
+        tokio::spawn(async move {
+            serve_rustls(voter::router(state), addr, tls)
+                .await
+                .expect("voter server")
+        });
+        format!("https://127.0.0.1:{port}")
+    }
+
+    pub fn signing_key(&self, name: &str) -> SigningKey {
+        ceremony_signing_key(self.temp.path(), name)
+    }
+
+    pub fn admin_token(&self) -> String {
+        read_admin_token(self.temp.path())
+    }
+
+    /// Enroll voter `i` (0-based) through V1–V4 and store the passphrase.
+    pub async fn enroll(&mut self, i: usize) -> String {
+        let base_url = self.voter_urls[i].clone();
+        let fiscal_id = format!("VOTER-{:03}", i + 1);
+        let passphrase = enroll_on(&self.client, &base_url, &fiscal_id).await;
+        if self.passphrases.len() <= i {
+            self.passphrases.resize(i + 1, String::new());
+        }
+        self.passphrases[i] = passphrase.clone();
+        passphrase
+    }
+
+    pub async fn enroll_all(&mut self) {
+        for i in 0..self.voter_urls.len() {
+            self.enroll(i).await;
+        }
+    }
+
+    fn transition_config(&self) -> PhaseTransitionConfig {
+        PhaseTransitionConfig {
+            ceremony_dir: self.temp.path().to_path_buf(),
+            wbb_url: self.wbb_url.clone(),
+            ca_pem: self.ca.cert_pem().to_string(),
+            clock: LogicalClock::new(self.base.clock.base_ms, self.base.clock.tick_ms),
+        }
+    }
+
+    pub async fn open_voting(&self) {
+        transition_phase(self.transition_config(), "setup", "voting")
+            .await
+            .expect("open voting");
+    }
+
+    pub async fn close_voting(&self) {
+        transition_phase(self.transition_config(), "voting", "tallying")
+            .await
+            .expect("close voting");
+    }
+
+    pub async fn pin(&self, i: usize) -> u64 {
+        let shown = self
+            .voter_post(
+                i,
+                "/api/pin",
+                serde_json::json!({ "passphrase": self.passphrases[i] }),
+            )
+            .await;
+        shown["pin"].as_u64().expect("pin")
+    }
+
+    pub async fn ruse_pin(&self, i: usize) -> u64 {
+        let ruse = self
+            .voter_post(
+                i,
+                "/api/pin/ruse",
+                serde_json::json!({ "passphrase": self.passphrases[i] }),
+            )
+            .await;
+        ruse["ruse_pin"].as_u64().expect("ruse pin")
+    }
+
+    /// `POST /api/vote` — returns the full response (digest, emoji).
+    pub async fn vote(&self, i: usize, option: &str, pin: u64) -> serde_json::Value {
+        self.voter_post(
+            i,
+            "/api/vote",
+            serde_json::json!({
+                "passphrase": self.passphrases[i], "option": option, "pin": pin
+            }),
+        )
+        .await
+    }
+
+    /// `POST /api/cast` — returns the full response (receipts).
+    pub async fn cast(&self, i: usize) -> serde_json::Value {
+        self.voter_post(
+            i,
+            "/api/cast",
+            serde_json::json!({ "passphrase": self.passphrases[i] }),
+        )
+        .await
+    }
+
+    /// Vote and cast to both BBs, asserting 2 receipts; returns the vote
+    /// response (digest, emoji).
+    pub async fn vote_and_cast(&self, i: usize, option: &str, pin: u64) -> serde_json::Value {
+        let vote = self.vote(i, option, pin).await;
+        assert!(!vote["emoji"].as_array().unwrap().is_empty());
+        let cast = self.cast(i).await;
+        assert_eq!(
+            cast["receipts"].as_array().unwrap().len(),
+            2,
+            "both BBs accept the ballot"
+        );
+        vote
+    }
+
+    pub async fn voter_post(
+        &self,
+        i: usize,
+        path: &str,
+        body: serde_json::Value,
+    ) -> serde_json::Value {
+        post_json(&self.client, &format!("{}{path}", self.voter_urls[i]), body).await
+    }
+
+    /// Run the full §3.9 tally driver over HTTPS.
+    pub async fn tally(&self) -> TallyOutcome {
+        let url = |p: &u16| Url::parse(&format!("https://127.0.0.1:{p}/")).unwrap();
+        run_tally(TallyConfig {
+            ceremony_dir: self.temp.path().to_path_buf(),
+            wbb_url: self.wbb_url.clone(),
+            er_url: url(&self.ports.er),
+            bb_urls: self.ports.bb.iter().map(url).collect(),
+            rt_urls: self.ports.rt.iter().map(url).collect(),
+            tt_urls: self.ports.tt.iter().map(url).collect(),
+            ca_pem: self.ca.cert_pem().to_string(),
+            clock: LogicalClock::new(self.base.clock.base_ms, self.base.clock.tick_ms),
+            n_acc: self.base.election.n_acc,
+            t_tt: self.base.election.t_tt,
+        })
+        .await
+        .expect("tally pipeline")
+    }
+
+    /// Entity verifying keys as the auditor CLI would load them.
+    pub fn entity_keys(&self) -> Vec<(String, VerifyingKey)> {
+        let mut keys = vec![
+            ("PM-1".to_string(), self.signing_key("pm").verifying_key()),
+            ("ER-1".to_string(), self.signing_key("er").verifying_key()),
+        ];
+        for i in 1..=3 {
+            keys.push((
+                format!("RT-{i}"),
+                self.signing_key(&format!("rt-{i}")).verifying_key(),
+            ));
+            keys.push((
+                format!("TT-{i}"),
+                self.signing_key(&format!("tt-{i}")).verifying_key(),
+            ));
+        }
+        for i in 1..=2 {
+            keys.push((
+                format!("BB-{i}"),
+                self.signing_key(&format!("bb-{i}")).verifying_key(),
+            ));
+        }
+        keys
+    }
+
+    pub fn audit_config(&self) -> AuditConfig {
+        AuditConfig {
+            wbb_url: self.wbb_url.clone(),
+            ca_pem: self.ca.cert_pem().to_string(),
+            entity_keys: self.entity_keys(),
+            n_tt: self.base.election.n_tt,
+            t_tt: self.base.election.t_tt,
+        }
+    }
+
+    /// §3.10 universal verification from the log alone.
+    pub async fn audit(&self) -> AuditReport {
+        run_audit(self.audit_config()).await.expect("audit run")
+    }
+
+    /// Count WBB entries of one §4.4 type.
+    pub async fn entry_type_count(&self, wanted: &str) -> usize {
+        let entries = self.wbb.client.entries().await.expect("wbb entries");
+        entries
+            .entries
+            .iter()
+            .filter_map(|e| e.entry.get("data").and_then(|v| v.as_str()))
+            .filter_map(|b64| BASE64.decode(b64).ok())
+            .filter_map(|data| referendum_poc::protocol::voting::parse_wbb_data(&data))
+            .filter(|p| p.entry_type == wanted)
+            .count()
+    }
+
+    pub fn er_base(&self) -> String {
+        format!("https://127.0.0.1:{}", self.ports.er)
+    }
+
+    pub fn ui_base(&self) -> String {
+        format!("https://127.0.0.1:{}", self.ports.wbb_ui)
+    }
+}
+
+fn ceremony_signing_key(ceremony_dir: &Path, name: &str) -> SigningKey {
+    let bytes = std::fs::read(ceremony_dir.join(format!("{name}-signing-key.bin")))
+        .expect("signing key file");
+    let seed: [u8; 32] = bytes.try_into().expect("32-byte signing key seed");
+    SigningKey::from_bytes(&seed)
+}
+
+fn read_admin_token(ceremony_dir: &Path) -> String {
+    std::fs::read_to_string(ceremony_dir.join("er-admin-token.txt"))
+        .expect("admin token")
+        .trim()
+        .to_string()
+}
+
+/// V1–V4: login, enroll, wait for PIN readiness, retrieve the PIN.
+async fn enroll_on(client: &reqwest::Client, base_url: &str, fiscal_id: &str) -> String {
+    let login = post_json(
+        client,
+        &format!("{base_url}/api/login"),
+        serde_json::json!({ "fiscal_id": fiscal_id }),
+    )
+    .await;
+    assert!(login["vid"].as_u64().unwrap() > 0);
+
+    let enroll = post_json(
+        client,
+        &format!("{base_url}/api/enroll"),
+        serde_json::json!({ "fiscal_id": fiscal_id }),
+    )
+    .await;
+    let passphrase = enroll["passphrase"].as_str().unwrap().to_string();
+
+    wait_pin_ready(client, base_url, &passphrase).await;
+    let _pin = post_json(
+        client,
+        &format!("{base_url}/api/pin/retrieve"),
+        serde_json::json!({ "passphrase": passphrase }),
+    )
+    .await;
+    passphrase
+}
+
+/// Poll `/api/status` until the NS reports ≥ t_RT shares ready.
+pub async fn wait_pin_ready(client: &reqwest::Client, base_url: &str, passphrase: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = post_json(
+            client,
+            &format!("{base_url}/api/status"),
+            serde_json::json!({ "passphrase": passphrase }),
+        )
+        .await;
+        if status["pin_ready"] == true {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "PIN never ready");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+pub async fn post_json(
+    client: &reqwest::Client,
+    url: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let response = client.post(url).json(&body).send().await.expect("request");
+    let status = response.status();
+    let text = response.text().await.expect("body");
+    assert!(
+        status.is_success(),
+        "POST {url} failed with {status}: {text}"
+    );
+    serde_json::from_str(&text).expect("json body")
+}
+
+pub async fn get_json(client: &reqwest::Client, url: &str) -> serde_json::Value {
+    let response = client.get(url).send().await.expect("request");
+    let status = response.status();
+    let text = response.text().await.expect("body");
+    assert!(
+        status.is_success(),
+        "GET {url} failed with {status}: {text}"
+    );
+    serde_json::from_str(&text).expect("json body")
+}
+
+/// Per-service settings pointing every client at the harness cluster.
+fn election_settings(
+    ceremony_dir: &Path,
+    name: &str,
+    port: u16,
+    ports: &ElectionPorts,
+    base: &Settings,
+) -> Settings {
+    let mut peers: Vec<PeerSettings> = ports
+        .rt
+        .iter()
+        .enumerate()
+        .map(|(i, p)| PeerSettings {
+            name: format!("rt-{}", i + 1),
+            base_url: format!("https://127.0.0.1:{p}/"),
+        })
+        .collect();
+    peers.extend(ports.bb.iter().enumerate().map(|(i, p)| PeerSettings {
+        name: format!("bb-{}", i + 1),
+        base_url: format!("https://127.0.0.1:{p}/"),
+    }));
+    peers.extend(ports.tt.iter().enumerate().map(|(i, p)| PeerSettings {
+        name: format!("tt-{}", i + 1),
+        base_url: format!("https://127.0.0.1:{p}/"),
+    }));
+
+    Settings {
+        service: ServiceSettings {
+            name: name.to_string(),
+            host: "127.0.0.1".to_string(),
+            port,
+        },
+        tls: TlsSettings {
+            cert_pem: ceremony_dir
+                .join(format!("{name}.pem"))
+                .display()
+                .to_string(),
+            key_pem: ceremony_dir
+                .join(format!("{name}-key.pem"))
+                .display()
+                .to_string(),
+            ca_pem: ceremony_dir.join("ca.pem").display().to_string(),
+        },
+        seeds: base.seeds.clone(),
+        clock: base.clock.clone(),
+        wbb: WbbSettings {
+            base_url: format!("https://127.0.0.1:{}/wbb/", ports.wbb),
+            request_timeout_ms: 10000,
+        },
+        peers,
+        er: ErClientSettings {
+            base_url: format!("https://127.0.0.1:{}/", ports.er),
+        },
+        ns: NsClientSettings {
+            base_url: format!("https://127.0.0.1:{}/", ports.ns),
+        },
+        election: base.election.clone(),
+        dip: DipSettings {
+            base_url: format!("https://127.0.0.1:{}/", ports.dip),
+            voters: base.dip.voters.clone(),
+        },
+        voter: VoterSettings::default(),
+        wbb_ui: WbbUiSettings::default(),
+        _ceremony: CeremonyPaths {
+            seed_bin: ceremony_dir.join("seed.bin").display().to_string(),
+            sunlight_yaml: ceremony_dir.join("sunlight.yaml").display().to_string(),
+            election_context: ceremony_dir
+                .join("election_context.json")
+                .display()
+                .to_string(),
+        },
     }
 }

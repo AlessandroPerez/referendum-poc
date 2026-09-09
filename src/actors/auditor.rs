@@ -143,19 +143,35 @@ pub async fn run_audit(cfg: AuditConfig) -> Result<AuditReport, AuditError> {
     let http = reqwest_client_trusting_ca(&cfg.ca_pem)?;
     let wbb = WbbClient::new(http, cfg.wbb_url.clone());
     let entries = wbb.entries().await?;
+    let raw = entries
+        .entries
+        .iter()
+        .map(|s| (s.leaf_index, s.entry.clone()))
+        .collect();
+    Ok(audit_raw_entries(&cfg, raw).await)
+}
 
-    let mut audited = Vec::with_capacity(entries.entries.len());
-    for sequenced in &entries.entries {
-        let Some(data_b64) = sequenced.entry.get("data").and_then(|v| v.as_str()) else {
+/// Audit a snapshot of raw log entries `(leaf_index, entry_json)`.
+///
+/// This is the same verification path `run_audit` uses after fetching; it is
+/// public so the §13 `auditor_detects_tamper` test can replay TAMPERED copies
+/// of a fetched log and assert the failing step.
+pub async fn audit_raw_entries(
+    cfg: &AuditConfig,
+    raw: Vec<(i64, serde_json::Value)>,
+) -> AuditReport {
+    let mut audited = Vec::with_capacity(raw.len());
+    for (leaf_index, entry) in &raw {
+        let Some(data_b64) = entry.get("data").and_then(|v| v.as_str()) else {
             continue;
         };
         let Ok(data) = BASE64.decode(data_b64) else {
             continue;
         };
         let parsed = parse_wbb_data(&data);
-        let signers = signers_of(&sequenced.entry);
+        let signers = signers_of(entry);
         audited.push(AuditedEntry {
-            leaf_index: sequenced.leaf_index,
+            leaf_index: *leaf_index,
             data,
             parsed,
             signers,
@@ -164,15 +180,13 @@ pub async fn run_audit(cfg: AuditConfig) -> Result<AuditReport, AuditError> {
 
     let keys: HashMap<String, VerifyingKey> = cfg.entity_keys.iter().cloned().collect();
     let (n_tt, t_tt) = (cfg.n_tt, cfg.t_tt);
-    Ok(
-        tokio::task::spawn_blocking(move || audit_entries(&audited, &keys, n_tt, t_tt))
-            .await
-            .unwrap_or_else(|e| {
-                let mut report = AuditReport::default();
-                report.fail("audit_execution", format!("audit task panicked: {e}"));
-                report
-            }),
-    )
+    tokio::task::spawn_blocking(move || audit_entries(&audited, &keys, n_tt, t_tt))
+        .await
+        .unwrap_or_else(|e| {
+            let mut report = AuditReport::default();
+            report.fail("audit_execution", format!("audit task panicked: {e}"));
+            report
+        })
 }
 
 /// Extract `(entity_id, timestamp, signature)` triples from a raw log entry.
