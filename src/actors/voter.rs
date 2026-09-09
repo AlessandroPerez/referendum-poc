@@ -703,10 +703,13 @@ async fn pin_verify_handler(
     let voter = session.voter.ok_or(VoterError::PinNotRetrieved)?;
     let ruse = session.ruse_voter.clone();
     let pin = req.pin.value() as usize;
-    // The ruse credential's forged DV proof makes its PIN verify exactly like
-    // the real one (§3.7.3) — a coercer watching this check learns nothing.
-    let valid = tokio::task::spawn_blocking(move || {
-        voter.verify_pin(pin).is_ok() || ruse.map(|r| r.verify_pin(pin).is_ok()).unwrap_or(false)
+    // §3.7.3: a ruse request SUBSTITUTES the DVNIZKP, so once a ruse PIN is
+    // active only the ruse PIN verifies locally — "PIN^valid will no longer
+    // verify … Vote App will consider PIN^ruse as correct".  The valid PIN
+    // keeps its ability to cast a counted vote (`vote_handler` dispatch).
+    let valid = tokio::task::spawn_blocking(move || match ruse {
+        Some(ruse) => ruse.verify_pin(pin).is_ok(),
+        None => voter.verify_pin(pin).is_ok(),
     })
     .await
     .map_err(|e| VoterError::Protocol(e.to_string()))?;

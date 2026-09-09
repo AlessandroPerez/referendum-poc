@@ -78,15 +78,20 @@ async fn referendum_happy_path() {
     assert_eq!(status["no_bot"], true, "V14: no ⊥ for voter 1");
     assert_eq!(status["published_bb_ids"], serde_json::json!([1, 2]));
 
-    // ── V13: CAI confirmation after the publication check ─────────────────
-    let confirm = cluster
-        .voter_post(
-            0,
-            "/api/confirm",
-            serde_json::json!({ "passphrase": cluster.passphrases[0] }),
-        )
-        .await;
-    assert!(confirm["confirmed_at_ms"].as_u64().unwrap() > 0, "V13");
+    // ── V13: the CAI confirmation happened inside `vote_and_cast` (every
+    //    cast is confirmed); a second confirmation has no held ballot ──────
+    let again = cluster
+        .client
+        .post(format!("{}/api/confirm", cluster.voter_urls[0]))
+        .json(&serde_json::json!({ "passphrase": cluster.passphrases[0] }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        !again.status().is_success(),
+        "V13: a confirmation is single-shot per cast (got {})",
+        again.status()
+    );
 
     // ── V14: manual verification on the public wbb-ui ─────────────────────
     let ui = cluster.ui_base();
@@ -109,6 +114,14 @@ async fn referendum_happy_path() {
                 && r["payload"]["digest"] == serde_json::json!(digests[0])),
         "V14: voter 1's digest is findable on the public page"
     );
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["entry_type"] == "cast_intended_proof"
+                && r["payload"]["digest"] == serde_json::json!(digests[0])),
+        "V13/V14: voter 1's cast-as-intended disclosure is on the public page"
+    );
 
     // ── A5/A7: close voting, run the §3.9 tally ───────────────────────────
     cluster.close_voting().await;
@@ -127,6 +140,11 @@ async fn referendum_happy_path() {
 
     // ── §4.4 census: every tallying artifact is on the log ────────────────
     assert_eq!(cluster.entry_type_count("eligible_vids").await, 1);
+    assert_eq!(
+        cluster.entry_type_count("cast_intended_proof").await,
+        18,
+        "V13: every cast is confirmed on both BBs"
+    );
     assert_eq!(cluster.entry_type_count("encrypted_ballot").await, 18);
     assert_eq!(cluster.entry_type_count("mixed_ballots").await, 2);
     assert_eq!(cluster.entry_type_count("re_encryption_proof").await, 4);

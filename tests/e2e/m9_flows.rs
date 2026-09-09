@@ -46,6 +46,11 @@ async fn coercion_ruse_pin() {
         4,
         "ruse and real casts are indistinguishable on the WBB (2 each)"
     );
+    assert_eq!(
+        cluster.entry_type_count("cast_intended_proof").await,
+        4,
+        "the coerced voter confirms the ruse ballot too — indistinguishable"
+    );
 
     let pin1 = cluster.pin(1).await;
     cluster.vote_and_cast(1, "approve", pin1).await;
@@ -524,6 +529,141 @@ async fn rate_limit_and_cat() {
         401,
         "consumed-token reuse is a BB-level 401"
     );
+}
+
+/// §3.9 step 2 / §3.10 1(d): a ballot that was cast but never confirmed
+/// (no cast-as-intended disclosure) is accepted by the BBs yet discarded at
+/// release, never counted, and its absence is not a censorship finding.
+#[tokio::test]
+async fn unconfirmed_ballot_excluded() {
+    let mut cluster = ElectionCluster::start(4, ElectionOpts::default()).await;
+    cluster.enroll_all().await;
+    cluster.open_voting().await;
+
+    for (i, option) in ["approve", "reject", "blank"].iter().enumerate() {
+        let pin = cluster.pin(i).await;
+        cluster.vote_and_cast(i, option, pin).await;
+    }
+    let pin3 = cluster.pin(3).await;
+    let unconfirmed = cluster.vote_and_cast_unconfirmed(3, "approve", pin3).await;
+    let status = cluster
+        .voter_post(
+            3,
+            "/api/ballot/status",
+            serde_json::json!({ "passphrase": cluster.passphrases[3] }),
+        )
+        .await;
+    assert_eq!(
+        status["no_bot"], true,
+        "the unconfirmed ballot WAS accepted"
+    );
+
+    assert_eq!(
+        cluster.entry_type_count("ballot_digest").await,
+        8,
+        "4 casts × 2 BBs"
+    );
+    assert_eq!(
+        cluster.entry_type_count("cast_intended_proof").await,
+        6,
+        "only 3 ballots were confirmed"
+    );
+
+    cluster.close_voting().await;
+    let outcome = cluster.tally().await;
+    assert_eq!(
+        outcome.released, 6,
+        "the unconfirmed ballot is not released"
+    );
+    assert_eq!(outcome.reconciled, 3);
+    assert_eq!(outcome.legitimate, 3);
+    assert_eq!(
+        (outcome.counts.blank, outcome.counts.si, outcome.counts.no),
+        (1, 1, 1),
+        "voter 4's unconfirmed approve is not counted"
+    );
+    let released_digests: Vec<String> = {
+        let entries = cluster.wbb.client.entries().await.unwrap();
+        entries
+            .entries
+            .iter()
+            .filter_map(|e| e.entry.get("data").and_then(|v| v.as_str()))
+            .filter_map(|b64| {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD.decode(b64).ok()
+            })
+            .filter_map(|d| referendum_poc::protocol::voting::parse_wbb_data(&d))
+            .filter(|p| p.entry_type == "encrypted_ballot")
+            .map(|p| p.content)
+            .collect()
+    };
+    assert_eq!(released_digests.len(), 6);
+
+    let report = cluster.audit().await;
+    assert!(report.ok(), "audit:\n{}", report.render());
+    assert!(
+        report
+            .steps
+            .iter()
+            .any(|s| s.name == "cai_confirmation" && s.ok),
+        "the auditor re-verifies every released confirmation"
+    );
+    drop(unconfirmed);
+}
+
+/// A4 seam: a ballot cast after `close-voting` is refused by the BBs (its
+/// digest can no longer be published), leaves no stored state, and is not
+/// counted — the election stays auditable.
+#[tokio::test]
+async fn late_cast_rejected() {
+    let mut cluster = ElectionCluster::start(4, ElectionOpts::default()).await;
+    cluster.enroll_all().await;
+    cluster.open_voting().await;
+
+    for (i, option) in ["approve", "reject", "blank"].iter().enumerate() {
+        let pin = cluster.pin(i).await;
+        cluster.vote_and_cast(i, option, pin).await;
+    }
+    // Voter 4 builds a ballot in time but casts after the window closes.
+    let pin3 = cluster.pin(3).await;
+    let late = cluster.vote(3, "approve", pin3).await;
+    cluster.close_voting().await;
+
+    let cast = cluster
+        .client
+        .post(format!("{}/api/cast", cluster.voter_urls[3]))
+        .json(&serde_json::json!({ "passphrase": cluster.passphrases[3] }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        !cast.status().is_success(),
+        "a cast after close-voting must be refused (got {})",
+        cast.status()
+    );
+    // Nothing was stored: the BB has no receipt for the late digest.
+    let receipt = cluster
+        .client
+        .get(format!(
+            "https://127.0.0.1:{}/receipts/{}",
+            cluster.ports.bb[0],
+            late["digest"].as_str().unwrap()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(receipt.status(), 404, "the late ballot was rolled back");
+    assert_eq!(cluster.entry_type_count("ballot_digest").await, 6);
+
+    let outcome = cluster.tally().await;
+    assert_eq!(outcome.released, 6);
+    assert_eq!(
+        (outcome.counts.blank, outcome.counts.si, outcome.counts.no),
+        (1, 1, 1),
+        "the late ballot is not counted"
+    );
+    let report = cluster.audit().await;
+    assert!(report.ok(), "audit:\n{}", report.render());
 }
 
 /// Swap the first pair of adjacent, distinct elements found in any array of

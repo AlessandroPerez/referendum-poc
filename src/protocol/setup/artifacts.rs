@@ -262,6 +262,8 @@ pub fn write_artifacts(
         hex::encode(root),
     )?;
 
+    restrict_secret_permissions(output_dir)?;
+
     Ok(ArtifactPaths {
         output_dir: output_dir.to_path_buf(),
         ca_pem,
@@ -354,6 +356,38 @@ fn service_port(name: &str) -> u16 {
         "pm" => 8040,
         _ => 9000,
     }
+}
+
+/// Make every secret artifact owner-readable only (0600): seeds, signing
+/// keys, TLS private keys, bearer tokens, and DKG share files.  Public
+/// material (certificates, verifying keys, the election context, configs)
+/// keeps the default mode.
+fn restrict_secret_permissions(output_dir: &Path) -> Result<(), ArtifactError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let is_secret = |name: &str| {
+            name == "seed.bin"
+                || name == "key.pem"
+                || name.ends_with("-key.pem")
+                || name.ends_with("-signing-key.bin")
+                || name.ends_with("-seed.bin")
+                || name.ends_with("-token.txt")
+                || name.ends_with("-share.json")
+        };
+        for entry in fs::read_dir(output_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if entry.file_type()?.is_file() && is_secret(&name.to_string_lossy()) {
+                fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o600))?;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = output_dir;
+    }
+    Ok(())
 }
 
 /// Write a copy of `configuration/base.yaml` into `<output_dir>/configuration/`

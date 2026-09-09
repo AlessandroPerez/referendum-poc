@@ -335,6 +335,11 @@ async fn full_election_tally_and_audit() {
             .count()
     };
     assert_eq!(type_count("eligible_vids"), 1);
+    assert_eq!(
+        type_count("cast_intended_proof"),
+        12,
+        "6 confirmations × 2 BBs"
+    );
     assert_eq!(type_count("encrypted_ballot"), 12, "per-BB release");
     assert_eq!(type_count("mixed_ballots"), 2, "vote + credential mixes");
     assert_eq!(
@@ -414,6 +419,15 @@ async fn vote_and_cast(
         2,
         "both BBs accept the ballot"
     );
+    // §3.8.4 steps 8–17: confirm the cast-as-intended disclosure — only
+    // confirmed ballots are released at tally (§3.9 step 2).
+    let confirm: serde_json::Value = post_json(
+        client,
+        &format!("{base_url}/api/confirm"),
+        serde_json::json!({ "passphrase": passphrase }),
+    )
+    .await;
+    assert!(confirm["confirmed_at_ms"].as_u64().unwrap() > 0);
 }
 
 async fn enroll_voter(client: &reqwest::Client, base_url: &str, fiscal_id: &str) -> String {

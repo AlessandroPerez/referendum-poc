@@ -147,6 +147,12 @@ pub async fn gen_credentials(cfg: GenCredentialsConfig) -> Result<(), AdminError
     // Write enrollment packages for M5.
     let packages_path = cfg.output_dir.join("enrollment_packages.json");
     tokio::fs::write(&packages_path, serde_json::to_string_pretty(&packages)?).await?;
+    // Credential material for every voter: owner-readable only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&packages_path, std::fs::Permissions::from_mode(0o600)).await?;
+    }
 
     // Build the WBB data string and sign it.
     let data_string = build_acc_pub_key_data_string(&short_accs)?;

@@ -27,7 +27,7 @@ use crate::protocol::tally::{
 };
 use crate::protocol::tls::reqwest_client_trusting_ca;
 use crate::protocol::voting::{
-    ballot_digest, parse_wbb_data, BallotDigestEntry, ParsedWbbData, NO_BOT_MIN_BBS,
+    ballot_digest, parse_wbb_data, BallotDigestEntry, CaiEntry, ParsedWbbData, NO_BOT_MIN_BBS,
 };
 
 type G = RistrettoGroup;
@@ -402,6 +402,35 @@ fn audit_entries(
     let voting_digests: HashSet<crate::domain::BallotDigest> =
         accepted_by.keys().copied().collect();
 
+    // Confirmation evidence (§3.8.4 steps 13–15): which BBs published a
+    // self-signed `cast_intended_proof` for each digest, with the disclosure
+    // itself so it can be re-verified against the released ballot (§3.10
+    // 1(d)).
+    let mut confirmed_by: HashMap<crate::domain::BallotDigest, HashMap<u64, CaiEntry>> =
+        HashMap::new();
+    for entry in entries {
+        let Some(parsed) = &entry.parsed else {
+            continue;
+        };
+        if parsed.entry_type != "cast_intended_proof" {
+            continue;
+        }
+        let Ok(payload) = parsed.decode_payload::<CaiEntry>() else {
+            continue;
+        };
+        let expected_signer = format!("BB-{}", payload.bb_id);
+        if entry
+            .signers
+            .iter()
+            .any(|(id, _, _)| *id == expected_signer)
+        {
+            confirmed_by
+                .entry(payload.digest)
+                .or_default()
+                .insert(payload.bb_id, payload);
+        }
+    }
+
     let mut per_bb: BTreeMap<u64, Vec<BallotRecord<G>>> = BTreeMap::new();
     let mut released_by: HashMap<crate::domain::BallotDigest, HashSet<u64>> = HashMap::new();
     let mut release_problems = Vec::new();
@@ -468,6 +497,48 @@ fn audit_entries(
         return report;
     }
 
+    // ── §3.9 step 2 / §3.10 1(d): every released ballot must carry a valid,
+    //    published cast-as-intended disclosure from the BB that released it;
+    //    a BB releasing an unconfirmed ballot (or a disclosure that does not
+    //    verify against the released ballot) fails the audit ──────────────
+    let mut confirmation_problems = Vec::new();
+    let mut confirmed_releases = 0usize;
+    for (bb_id, records) in &per_bb {
+        for record in records {
+            let Ok(digest) = ballot_digest(&record.ballot) else {
+                continue; // already reported in ballot_release
+            };
+            match confirmed_by.get(&digest).and_then(|m| m.get(bb_id)) {
+                None => confirmation_problems.push(format!(
+                    "digest {digest} released by BB-{bb_id} without a published \
+                     cast-as-intended disclosure"
+                )),
+                Some(cai) => {
+                    if record
+                        .ballot
+                        .verify_cai_disclosure(&cai.disclosure, &context)
+                    {
+                        confirmed_releases += 1;
+                    } else {
+                        confirmation_problems.push(format!(
+                            "digest {digest}: cast-as-intended disclosure published by \
+                             BB-{bb_id} does not verify against the released ballot"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if confirmation_problems.is_empty() {
+        report.pass(
+            "cai_confirmation",
+            format!("{confirmed_releases} released records carry a verified cast-as-intended disclosure"),
+        );
+    } else {
+        report.fail("cai_confirmation", confirmation_problems.join("; "));
+        return report;
+    }
+
     let per_bb_lists: Vec<Vec<BallotRecord<G>>> = per_bb.into_values().collect();
     let records = match reconcile_ballots(&per_bb_lists) {
         Ok(records) => {
@@ -483,9 +554,11 @@ fn audit_entries(
         }
     };
 
-    // ── M1: release completeness — every ballot accepted during voting by
-    //    ≥ NO_BOT_MIN_BBS distinct BBs must survive release + reconciliation;
-    //    a coordinator or colluding BB omitting one must not pass the audit ──
+    // ── M1: release completeness — every ballot accepted AND confirmed during
+    //    voting by ≥ NO_BOT_MIN_BBS distinct BBs must survive release +
+    //    reconciliation; a coordinator or colluding BB omitting one must not
+    //    pass the audit.  Unconfirmed ballots are legitimately discarded
+    //    (§3.9 step 2), so they carry no completeness obligation ──────────
     let reconciled_digests: HashSet<crate::domain::BallotDigest> = records
         .iter()
         .filter_map(|r| ballot_digest(&r.ballot).ok())
@@ -493,25 +566,34 @@ fn audit_entries(
     let mut completeness_problems = Vec::new();
     let mut accepted_count = 0usize;
     for (digest, acceptors) in &accepted_by {
-        if acceptors.len() < NO_BOT_MIN_BBS {
-            continue; // ⊥ during voting; exclusion is the protocol outcome.
+        let confirmed: HashSet<u64> = confirmed_by
+            .get(digest)
+            .map(|m| {
+                m.keys()
+                    .copied()
+                    .filter(|bb| acceptors.contains(bb))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if confirmed.len() < NO_BOT_MIN_BBS {
+            continue; // ⊥ or unconfirmed during voting; exclusion is the protocol outcome.
         }
         accepted_count += 1;
         if !reconciled_digests.contains(digest) {
             completeness_problems.push(format!(
-                "digest {digest} accepted by {} BBs during voting but censored \
-                 from the tally release",
-                acceptors.len()
+                "digest {digest} accepted and confirmed by {} BBs during voting \
+                 but censored from the tally release",
+                confirmed.len()
             ));
         } else if released_by
             .get(digest)
-            .map_or(true, |r| r.len() < acceptors.len())
+            .map_or(true, |r| !confirmed.is_subset(r))
         {
             completeness_problems.push(format!(
-                "digest {digest} released by fewer BBs than accepted it \
+                "digest {digest} released by fewer BBs than confirmed it \
                  ({:?} vs {:?})",
                 released_by.get(digest),
-                acceptors
+                confirmed
             ));
         }
     }

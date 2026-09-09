@@ -6,6 +6,7 @@
 //!   t1  a censored `encrypted_ballot` release        → `release_completeness`
 //!   t2  a forged decryption share (ox pipeline)      → `ox_dedup`
 //!   t3  forged `tally_result` counts                 → `tally_result`
+//!   t5  a released ballot with its confirmation gone → `cai_confirmation`
 //!   t4  a flipped signature byte                     → `entry_signatures`
 
 use std::collections::HashMap;
@@ -184,6 +185,18 @@ async fn auditor_detects_tamper() {
     let report = audit_raw_entries(&cfg, cooked).await;
     assert!(!report.ok(), "forged counts must FAIL");
     assert_step_failed(&report, "tally_result");
+
+    // ── t5: drop one cast_intended_proof — a BB releasing a ballot without
+    //        its published confirmation violates §3.9 step 2 / §3.10 1(d) ──
+    let mut unconfirmed = raw.clone();
+    let cai_pos = unconfirmed
+        .iter()
+        .position(|(_, e)| entry_type_of(e).as_deref() == Some("cast_intended_proof"))
+        .expect("a cast_intended_proof entry");
+    unconfirmed.remove(cai_pos);
+    let report = audit_raw_entries(&cfg, unconfirmed).await;
+    assert!(!report.ok(), "release of an unconfirmed ballot must FAIL");
+    assert_step_failed(&report, "cai_confirmation");
 
     // ── t4: flip a signature byte (no insider keys involved) ──────────────
     let mut flipped = raw.clone();

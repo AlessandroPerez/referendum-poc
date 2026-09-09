@@ -119,8 +119,10 @@ cat <<EOF
  The TLS certificates are issued by the demo cluster CA, so the browser
  will warn on first visit - accept the exception (test-only PKI, D16).
 
- Try: log in with a fiscal id, enroll, wait for the PIN, vote, cast.
- Cast at least 3 ballots (the tally's verifiable mixes require it), then:
+ Try: log in with a fiscal id, enroll, wait for the PIN, vote, cast, and
+ press CONFIRM (the cast-as-intended disclosure - unconfirmed ballots are
+ discarded at tally, manuscript 3.9 step 2).
+ Cast+confirm at least 3 ballots (the verifiable mixes require it), then:
    ./target/debug/election-admin -c "$OUT" close-voting
    ./target/debug/election-admin -c "$OUT" tally
    ./target/debug/election-admin -c "$OUT" results

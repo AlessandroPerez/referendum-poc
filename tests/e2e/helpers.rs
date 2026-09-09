@@ -291,9 +291,28 @@ pub async fn cluster_guard() -> tokio::sync::MutexGuard<'static, ()> {
     CLUSTER_LOCK.lock().await
 }
 
+/// Allocate a port for a cluster service.
+///
+/// Ports are taken from a private range BELOW the kernel's ephemeral range
+/// (Linux default 32768–60999): a `bind(0)`-then-release port can be grabbed
+/// as the SOURCE port of any outgoing client connection before the server
+/// binds it (the §9.5 race, observed as `Address already in use` flakes), but
+/// ports outside the ephemeral range are never handed out that way.  The
+/// counter makes successive allocations distinct within a process; each
+/// candidate is still bind-probed so unrelated listeners are skipped.
 pub fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind free port");
-    listener.local_addr().unwrap().port()
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT: AtomicU16 = AtomicU16::new(20_000);
+    loop {
+        let candidate = NEXT.fetch_add(1, Ordering::SeqCst);
+        if candidate >= 30_000 {
+            NEXT.store(20_000, Ordering::SeqCst);
+            continue;
+        }
+        if TcpListener::bind(("127.0.0.1", candidate)).is_ok() {
+            return candidate;
+        }
+    }
 }
 
 pub fn entity_signing_key(master_seed: &[u8; 32], entity_id: &str) -> SigningKey {
@@ -682,9 +701,34 @@ impl ElectionCluster {
         .await
     }
 
-    /// Vote and cast to both BBs, asserting 2 receipts; returns the vote
-    /// response (digest, emoji).
+    /// Vote, cast to both BBs (asserting 2 receipts) and CONFIRM the
+    /// cast-as-intended disclosure (§3.8.4 steps 8–17) — the full voter
+    /// flow; only confirmed ballots are released at tally (§3.9 step 2).
+    /// Returns the vote response (digest, emoji).
     pub async fn vote_and_cast(&self, i: usize, option: &str, pin: u64) -> serde_json::Value {
+        let vote = self.vote_and_cast_unconfirmed(i, option, pin).await;
+        let confirm = self
+            .voter_post(
+                i,
+                "/api/confirm",
+                serde_json::json!({ "passphrase": self.passphrases[i] }),
+            )
+            .await;
+        assert!(
+            confirm["confirmed_at_ms"].as_u64().unwrap() > 0,
+            "cast-as-intended confirmation published"
+        );
+        vote
+    }
+
+    /// Vote and cast WITHOUT the cast-as-intended confirmation — such a
+    /// ballot is accepted by the BBs but must never be released or counted.
+    pub async fn vote_and_cast_unconfirmed(
+        &self,
+        i: usize,
+        option: &str,
+        pin: u64,
+    ) -> serde_json::Value {
         let vote = self.vote(i, option, pin).await;
         assert!(!vote["emoji"].as_array().unwrap().is_empty());
         let cast = self.cast(i).await;

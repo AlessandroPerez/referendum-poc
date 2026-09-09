@@ -13,7 +13,7 @@
 //! `InMemoryBB` uses wall-clock time, so the PoC keeps its own store built
 //! from the library's public `BallotRecord`/`Receipt` types.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -70,6 +70,37 @@ pub struct BbState {
     enc_counter: Arc<AtomicU64>,
     next_seq: Arc<AtomicU64>,
     ballots: Arc<Mutex<HashMap<BallotDigest, StoredBallot>>>,
+    /// Digests whose intake is in progress (reserved before token
+    /// verification, released on every exit path) so two concurrent casts of
+    /// the same ballot cannot both burn a token or double-publish (§12).
+    in_flight: Arc<Mutex<HashSet<BallotDigest>>>,
+}
+
+/// Drops the in-flight reservation for a digest on every exit path.
+struct InFlightGuard {
+    set: Arc<Mutex<HashSet<BallotDigest>>>,
+    digest: BallotDigest,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        let digest = self.digest;
+        // `Drop` cannot await; the tokio mutex offers a non-blocking path and
+        // a spawned task covers the (rare) contended case.
+        let released = match self.set.try_lock() {
+            Ok(mut guard) => {
+                guard.remove(&digest);
+                true
+            }
+            Err(_) => false,
+        };
+        if !released {
+            let set = self.set.clone();
+            tokio::spawn(async move {
+                set.lock().await.remove(&digest);
+            });
+        }
+    }
 }
 
 impl std::fmt::Debug for BbState {
@@ -151,14 +182,27 @@ async fn cast_handler(
     let digest = ballot_digest(&req.ballot).map_err(|e| BbError::Internal(e.to_string()))?;
 
     // Idempotent replay: the same ballot (same digest) returns the stored
-    // receipt without consuming another token (§12).
-    if let Some(stored) = state.ballots.lock().await.get(&digest) {
-        return Ok(Json(CastResponse {
+    // receipt without consuming another token (§12).  The in-flight
+    // reservation is taken under the same lock so a concurrent duplicate
+    // cannot slip past the lookup and double-burn a token.
+    let _in_flight = {
+        let ballots = state.ballots.lock().await;
+        if let Some(stored) = ballots.get(&digest) {
+            return Ok(Json(CastResponse {
+                digest,
+                receipt: stored.record.receipt,
+                emoji: stored.emoji.clone(),
+            }));
+        }
+        let mut in_flight = state.in_flight.lock().await;
+        if !in_flight.insert(digest) {
+            return Err(BbError::Conflict);
+        }
+        InFlightGuard {
+            set: state.in_flight.clone(),
             digest,
-            receipt: stored.record.receipt,
-            emoji: stored.emoji.clone(),
-        }));
-    }
+        }
+    };
 
     // Recompute commB from the submitted ballot + randomness and verify the
     // casting token with the ER (single use, commB binding, anonymous).
@@ -167,12 +211,16 @@ async fn cast_handler(
         .try_into()
         .map_err(|_| BbError::BadRequest("rndcomm must be 32 bytes".into()))?;
     let commitment = comm_b(&req.ballot, &rndcomm).map_err(|e| BbError::Internal(e.to_string()))?;
+    // Checked (not consumed) here; the single-use consumption happens only
+    // after the digest is published, so a refused or failed cast does not
+    // strand the voter with a burnt token (the commB binding + the in-flight
+    // reservation make a double spend of the un-consumed token impossible).
     let verification = state
         .er_client
         .verify_token_with_comm_b(
             &req.casting_token,
             Some("casting"),
-            true,
+            false,
             &commitment,
             &state.internal_token,
         )
@@ -245,8 +293,38 @@ async fn cast_handler(
         .map_err(|e| BbError::Internal(e.to_string()))?;
     let metadata_data = wbb_data_string("voting", "BB", "ballot_metadata", 1, &metadata_entry)
         .map_err(|e| BbError::Internal(e.to_string()))?;
-    state.publish(&digest_data).await?;
-    state.publish(&metadata_data).await?;
+    // A ballot is accepted only if its digest is published (§3.8.4 steps
+    // 2–6): if the WBB refuses — the voting window is closed, or the log is
+    // unreachable — the stored ballot is rolled back so nothing unpublished
+    // can ever be released at tally.
+    let published = match state.publish(&digest_data).await {
+        Ok(()) => state.publish(&metadata_data).await,
+        Err(e) => Err(e),
+    };
+    if let Err(e) = published {
+        state.ballots.lock().await.remove(&digest);
+        return Err(BbError::NotAccepted(format!(
+            "digest publication refused by the WBB ({e})"
+        )));
+    }
+
+    // Ballot accepted and published: now consume the single-use token.  A
+    // failure here (ER unreachable, token consumed meanwhile) does not undo
+    // the accepted ballot — the binding already guarantees it cannot be
+    // reused for a different one.
+    if let Err(e) = state
+        .er_client
+        .verify_token_with_comm_b(
+            &req.casting_token,
+            Some("casting"),
+            true,
+            &commitment,
+            &state.internal_token,
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "casting token consumption after acceptance failed");
+    }
 
     Ok(Json(CastResponse {
         digest,
@@ -376,13 +454,21 @@ async fn receipt_handler(
 }
 
 /// Ballot release for the tally driver (§3.9 step 2; auth: service token).
+///
+/// Per §3.9 step 2 the BB "discards all the ballots for which no valid
+/// cast-as-intended disclosure has been received": only ballots whose CAI
+/// disclosure was verified and published (`cai_handler`) are released.
 async fn ballots_handler(
     Extension(state): Extension<Arc<BbState>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<BallotRecord<G>>>, BbError> {
     require_bearer(&headers, &state.service_token)?;
     let ballots = state.ballots.lock().await;
-    let mut records: Vec<BallotRecord<G>> = ballots.values().map(|s| s.record.clone()).collect();
+    let mut records: Vec<BallotRecord<G>> = ballots
+        .values()
+        .filter(|s| s.cai.is_some())
+        .map(|s| s.record.clone())
+        .collect();
     records.sort_by_key(|r| r.receipt.seq_no);
     Ok(Json(records))
 }
@@ -411,6 +497,15 @@ enum BbError {
     NotFound,
     #[error("bad request: {0}")]
     BadRequest(String),
+    /// A cast of the same ballot is already in progress; retry to get the
+    /// idempotent replay once it completes.
+    #[error("cast in progress for this ballot, retry")]
+    Conflict,
+    /// The ballot could not be accepted because its digest could not be
+    /// published on the WBB (e.g. the voting window is closed); nothing was
+    /// stored.
+    #[error("ballot not accepted: {0}")]
+    NotAccepted(String),
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -421,6 +516,8 @@ impl IntoResponse for BbError {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
             Self::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            Self::Conflict => (StatusCode::CONFLICT, self.to_string()),
+            Self::NotAccepted(_) => (StatusCode::FORBIDDEN, self.to_string()),
             // Internal failures are logged but not leaked (style guide §03).
             Self::Internal(_) => {
                 tracing::error!(error = %self, "bb-server internal error");
@@ -503,6 +600,7 @@ pub async fn build_service(
         enc_counter: Arc::new(AtomicU64::new(0)),
         next_seq: Arc::new(AtomicU64::new(0)),
         ballots: Arc::new(Mutex::new(HashMap::new())),
+        in_flight: Arc::new(Mutex::new(HashSet::new())),
     });
 
     let addr: SocketAddr = format!("{}:{}", settings.service.host, settings.service.port)

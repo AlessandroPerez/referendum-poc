@@ -73,7 +73,7 @@
       "🔋"
     ]
   ],
-  "checkpoint_root": "JngPhDFS7FtGz1a14uhCmEkdVT2QC4dXLMK8Wn36VQo=",
+  "checkpoint_root": "2JTjqawaE1nfGrPMxZVfjyk1seDTUusxK4PQ9DmWuCQ=",
   "election_context_sha256": "d6138a4693510f6635d666ea7e04ea47ecd76487ccebd9f91913331100d94aca",
   "entries": [
     {
@@ -122,7 +122,17 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "d0e2a1b5d920864ff96b9ca55d739b379c66243a13b7cc625430d68c57299c88",
+      "data_sha256": "457f9cf9aef2b8b389b78d2f099bf250d0d45240c8041fd64c8512bb465bd54b",
+      "entry_type": "cast_intended_proof",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "e6c87c82953a05b782729b9d3a18aa9e99a726b65497abee859f96958c5e12fc",
+      "entry_type": "cast_intended_proof",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "6038940384fa4f4d7884a786db0643ac355561e015c2cccdb45f07ede18da6c2",
       "entry_type": "ballot_digest",
       "phase": "voting"
     },
@@ -132,7 +142,7 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "c818e73e44a513ef7ec6601cfffabe4b195e7c709812d06025221fef4acfb6ca",
+      "data_sha256": "68b05025e3064fb3b00fc12f6e300694b6311e5e34f2102c30d689358248d588",
       "entry_type": "ballot_digest",
       "phase": "voting"
     },
@@ -142,7 +152,17 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "9c8c5e21a8aafb4b6fd313974ce705a56db5f8756babf3c2037822a358c083d9",
+      "data_sha256": "f4033be40b2074e080a663d10e4e86d52b5bef2bc33113271b06dbc26eb0261f",
+      "entry_type": "cast_intended_proof",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "3b344ba9043ab8de24a244a9acaa69863ce92e195bbd59430659f1f5d7290fc4",
+      "entry_type": "cast_intended_proof",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "37e11cb95c6ae615d7869d1c726d8a0fb5a842bcec48605513fc025502169a34",
       "entry_type": "ballot_digest",
       "phase": "voting"
     },
@@ -152,7 +172,7 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "bb7413941444de93cc9537716dee55c57995bbb1c514d4da9fb355e4cb2408ab",
+      "data_sha256": "1906cb4c329f552928f7007c45e9b72a1ae77680b75c79105ca9e31d7281d69a",
       "entry_type": "ballot_digest",
       "phase": "voting"
     },
@@ -162,7 +182,17 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "72593e2b05166ff8c5292acacbb4e74c986c23161fcedb3df2499b9aa45693ee",
+      "data_sha256": "517c392acf052087ffeaf5a2d9571d09705b3aa27e05acdc1a1d53f9d56af86f",
+      "entry_type": "cast_intended_proof",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "1df165a4fa53bfde850e6d8a6cae5f59ef3caf4e692a827a1710467162b0a1a2",
+      "entry_type": "cast_intended_proof",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "343e6527f7dce6ac2f4dff765b4177516a0f2cba283aa3e54d1f6372d6cf5d58",
       "entry_type": "ballot_digest",
       "phase": "voting"
     },
@@ -172,7 +202,7 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "5210898d17726e4be97a04c011592b1b32bd0626c82cf9bd9c73587e0c2e8f62",
+      "data_sha256": "cf3e110c85bb98e87d5586f79690341155f6d6492eb02fc8fb7d36fc045fcbc0",
       "entry_type": "ballot_digest",
       "phase": "voting"
     },
@@ -182,7 +212,17 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "655ad8b8c3935496b5a4a567d544d2037a54f27f95e37d8db1b11e2b1b902c88",
+      "data_sha256": "0d557149ad9880835b66f49f66099646d1570a9364782fbf39cc09dbd38b9fc0",
+      "entry_type": "cast_intended_proof",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "8bb0e54477530d12bc96df85e4872b770b13eab1da12abab82cdd6e01d0c0c11",
+      "entry_type": "cast_intended_proof",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "ce50245eed7dab0665809a6bad894e534bf06c74e0927962c22f46375b7317d0",
       "entry_type": "ballot_digest",
       "phase": "voting"
     },
@@ -192,7 +232,7 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "daff6b38847a90e483eeee67055ead3c14083aa33d12cc2d44cfb404f70829be",
+      "data_sha256": "917cebb3cf5016f54d99929ca4d353bdabe08cb529500659e9f4ed3c801844ea",
       "entry_type": "ballot_digest",
       "phase": "voting"
     },
@@ -202,7 +242,17 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "b920153be24b5b3c2f257363aba5df66fa3672c1d63759dca652fa8406bcf16a",
+      "data_sha256": "ec60d2aea8098ffb887544dedb442ba0064ff533f8782a586b3cf3148bbbf900",
+      "entry_type": "cast_intended_proof",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "3165502c003b933247e41f4d3b2f74cb3faed61b42b64c352ee135fbb9378fee",
+      "entry_type": "cast_intended_proof",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "13ea08d7c7ee4175a51d717823de075a8a98eaa54dc9f353c3484a40e02ce9db",
       "entry_type": "ballot_digest",
       "phase": "voting"
     },
@@ -212,7 +262,7 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "00bae452b2bcb9474a5b612c93be40168c856fad3491ec7a3b9520dbd1cab057",
+      "data_sha256": "6ec235f16330ba22e2c0d805beb30e1a2bc39782a95b29b735dbca3eacfea400",
       "entry_type": "ballot_digest",
       "phase": "voting"
     },
@@ -222,7 +272,17 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "1840656103c61532ffaf8b33b18676f578707a4e4aecd5d83c6abeb7659c36ff",
+      "data_sha256": "e277592c0ec2e7a7f51177b76c36cc125cdd70b0d02871fff165184e51afc160",
+      "entry_type": "cast_intended_proof",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "96a6223acd2a3eb9f10b3a6b3536a2d0e0363df11c8a3b7b3ea68cb549113ba0",
+      "entry_type": "cast_intended_proof",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "17b545db886b800ef546b2b8dd53ba14d2e403d92463c7bc9b66057c1cbcc239",
       "entry_type": "ballot_digest",
       "phase": "voting"
     },
@@ -232,7 +292,7 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "50c7318148ad68e535aeb7584bb82ca710b43ac23df77a04d189198d2a243bf8",
+      "data_sha256": "ddf84124f6d7078211a8aeb6025b81a9b9e1192baa35e6acf68f9bbae6cdef39",
       "entry_type": "ballot_digest",
       "phase": "voting"
     },
@@ -242,7 +302,17 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "0ed3954c3ebc44369f91525ae8894f2fd72048c0d54d34f585d7c81b0f7ab312",
+      "data_sha256": "8707f5c36cd7f37a9bd2a172150ba750a8840d635a1ffd7e21114832cd4129c9",
+      "entry_type": "cast_intended_proof",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "fde6009a403d6d97cd11850fd52697b6f863a334ae138a666f8104b2d0dd0129",
+      "entry_type": "cast_intended_proof",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "84bc589f47c4e471b8b7a6da485b4b93ecc18ef7ea74d81b54e7debd9e01de9a",
       "entry_type": "ballot_digest",
       "phase": "voting"
     },
@@ -252,7 +322,7 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "b49987cec97c1e0059b6d77201507ea776d7a6058fb0b560928797c28c886eb7",
+      "data_sha256": "b6567d25e2f2bc215bc4656e112a49868f681937e22bbaa3832d831ff9b72efc",
       "entry_type": "ballot_digest",
       "phase": "voting"
     },
@@ -262,7 +332,17 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "0e9273c0dc3c9534898a0d9a34a171b2f90b42082c452f6d6ced9a238fa64c58",
+      "data_sha256": "7172a89e6e34e41b074de6135e74e9f5a9fe2077340c94aa0fbfccd5603b695d",
+      "entry_type": "cast_intended_proof",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "a734f8e50e76a654adffe77cea51630ed9f17ca1e9d4831c17e11ce0e4eecac6",
+      "entry_type": "cast_intended_proof",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "e27ec121633eaded3f4b1575f6b0d42d59635e04425cf8bbdbf118482631bf9b",
       "entry_type": "ballot_digest",
       "phase": "voting"
     },
@@ -272,13 +352,23 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "e0f5772e91a0f1f26d57611d10867ff6048f2f78f9da6a8f5b74a69c17cba9a6",
+      "data_sha256": "50e7c1707b0edc859198e46825dd86e85bd1ed8a19f501a70a7cd536c2caac25",
       "entry_type": "ballot_digest",
       "phase": "voting"
     },
     {
       "data_sha256": "253812846a529949d3a40e0ade33c3391126cb31e6611e715ac9a4b659c9fa78",
       "entry_type": "ballot_metadata",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "9f288aa634a6f3c7709b51ba060a8b11e65662b149400a843150c8f417ce77ee",
+      "entry_type": "cast_intended_proof",
+      "phase": "voting"
+    },
+    {
+      "data_sha256": "473d75a7cef569a3c2c8844886ca1fd1357c7b253e666bd739a38d9d81befd30",
+      "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
     {
@@ -297,42 +387,42 @@
       "phase": "tallying"
     },
     {
-      "data_sha256": "735792b284fc1ad5f2327118042aceb24bc567fb39eabc612af7fc21d6596703",
+      "data_sha256": "8fc27aad6d94ab0378a26b6aee90494090282393625c4ccfd7abbc58cc36aff4",
       "entry_type": "encrypted_ballot",
       "phase": "tallying"
     },
     {
-      "data_sha256": "645aef350aaa4966bb7237eb5ce040bba67e5fcf03ed0b2c6e20da034f8deaa8",
+      "data_sha256": "dbae948fc109232abf72ba069a5b6bcf8231329c9449fadf81903c92f3f45dfb",
       "entry_type": "encrypted_ballot",
       "phase": "tallying"
     },
     {
-      "data_sha256": "6453b046a61a65b936653c7772e625f7c0c17d055efc8af2c60294a53fe42942",
+      "data_sha256": "7bcd8a3c70626c923ca7f21310cfdec759552299e6b5cc741dc498090702162e",
       "entry_type": "encrypted_ballot",
       "phase": "tallying"
     },
     {
-      "data_sha256": "2c2250d1ffa68ee4aec0439188d0818652ca5d1fe4beb292a5ab3f1698ad2d16",
+      "data_sha256": "235d3d47c3f10af2d77e02f927529d75bebe0a4c5c80dc69807038dbea13144a",
       "entry_type": "encrypted_ballot",
       "phase": "tallying"
     },
     {
-      "data_sha256": "daaaf3402dee1e03cc0e747793e0a590e783b6cacba0cce49021b69b81ddab37",
+      "data_sha256": "17fc19918f1b427e3332df4ea2abe4900bdf3ee8e3bbe20bd71efa4dde7cc7c5",
       "entry_type": "encrypted_ballot",
       "phase": "tallying"
     },
     {
-      "data_sha256": "fe7032f2646c2ae9b3fd5bf4f63504efdb2262ecf8ef5ea83d76ee427534cd24",
+      "data_sha256": "e91ffa29aeed8dbc43e12313f918b9b6c981d7db4ba4b5ebef2a1d15129fe653",
       "entry_type": "encrypted_ballot",
       "phase": "tallying"
     },
     {
-      "data_sha256": "00c5e3893d8750dcaeaefda40477f74c20d891e6dc6fab7af5acbfbe334cd856",
+      "data_sha256": "14f2b4b6eb7cd5b2f33682d846967a0209e4f1662484a1e8f470e9d1b436b117",
       "entry_type": "encrypted_ballot",
       "phase": "tallying"
     },
     {
-      "data_sha256": "ca69e0423f745553bf300e429890724f545602003662e1026e49c1100081955f",
+      "data_sha256": "89b16bf14224f0d09e23b0138b896c0238c86a96b6692df693549c162278a1d3",
       "entry_type": "encrypted_ballot",
       "phase": "tallying"
     },
@@ -342,42 +432,42 @@
       "phase": "tallying"
     },
     {
-      "data_sha256": "41dd4eb1bf37337d3f8969bfd838ca42881160c56a5c985302384cfdf960cb98",
+      "data_sha256": "d83664b386ee553311a59b9a3f48e8bfa8a4875c4e9be8822f6e0f1578251afb",
       "entry_type": "encrypted_ballot",
       "phase": "tallying"
     },
     {
-      "data_sha256": "f1f4a065acdbd472374b12e47820b9f7a32d4ff41beabb656e59c42f22e940b1",
+      "data_sha256": "43b1c5053bbbfa7594b08af6fda4d73f742bf93e1b630670704e0d40ef247a8b",
       "entry_type": "encrypted_ballot",
       "phase": "tallying"
     },
     {
-      "data_sha256": "c3648da6cfbd4aab117d495360e1c8db6494dd3834b81a8e63da63ae1df1e20b",
+      "data_sha256": "ad8d99c13bd62d5f51d7bc448e40ccc975b09c54ced30227641105fef1c440af",
       "entry_type": "encrypted_ballot",
       "phase": "tallying"
     },
     {
-      "data_sha256": "3ce627873def051af3ae24aac3ad91890b3ae1a85033bea5ed400b9e6519bb8a",
+      "data_sha256": "68fb602bc555583346dd0c633935474bf3b5ed0ed3cf8b5ea6c90341544c7332",
       "entry_type": "encrypted_ballot",
       "phase": "tallying"
     },
     {
-      "data_sha256": "c87d9c8518392beb1b22eb4a63f689a326cf2f266f8ef212b352abd883dc8342",
+      "data_sha256": "e103a14b50f3c8293ffa93ec2b77ec138c78e16bd47b9620f97eafb4b4fd9684",
       "entry_type": "encrypted_ballot",
       "phase": "tallying"
     },
     {
-      "data_sha256": "4c04a260c7f38fc0270e5b9b2747499988dcc43bafc6632bb8d47c598c695726",
+      "data_sha256": "0f4c7fd71b99c7a06bb2fdc61eeae8924f7ef90cc471dfe523d96971e9c28bf3",
       "entry_type": "encrypted_ballot",
       "phase": "tallying"
     },
     {
-      "data_sha256": "16a9b3e1d9c8a1a6c7ea8ae44db035b71f69d6934a21110e31678e66dc453744",
+      "data_sha256": "ffa16ad0fd771bc06b6c1edea4fcdefc84ca4f2a78baef54e2063699b385efe0",
       "entry_type": "encrypted_ballot",
       "phase": "tallying"
     },
     {
-      "data_sha256": "d95312485f960fc6185f32e9a27fde3b37feb7820d3d074917f34e367ad9eac4",
+      "data_sha256": "998168d47dba70a45a580a723936499682e0b3c2860b299272001a744e01e685",
       "entry_type": "encrypted_ballot",
       "phase": "tallying"
     },
@@ -387,7 +477,7 @@
       "phase": "tallying"
     },
     {
-      "data_sha256": "eceb89767b6b66f328701622ec6ed21ee9bb1f3103422b5a4aeaacbbbd61f85c",
+      "data_sha256": "43c0c7293f620c887dbe3307384eaab5cc50134cab7500ee2286a3e42cd70b15",
       "entry_type": "mixed_ballots",
       "phase": "tallying"
     },
@@ -428,5 +518,5 @@
     "no": 3,
     "si": 4
   },
-  "wbb_tree_size": 69
+  "wbb_tree_size": 87
 }

@@ -195,9 +195,12 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     let ruse_pin = ruse["ruse_pin"].as_u64().expect("ruse pin");
     assert_ne!(ruse_pin, pin1, "ruse PIN must differ from the real PIN");
 
+    // §3.7.3: the ruse DVNIZKP substitutes the original, so only the ruse
+    // PIN verifies locally from now on; the valid PIN keeps its ability to
+    // cast a counted vote (asserted in M8/M9).
     for (pin, expected) in [
         (ruse_pin, true),
-        (pin1, true),
+        (pin1, false),
         ((pin1 + 7) % 100_000_000, false),
     ] {
         let verify: serde_json::Value = post_json(
@@ -296,17 +299,21 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
         ruse_pin,
         "PIN display shows the active ruse PIN after recovery"
     );
-    // … while the REAL credential is fully restored (§3.7.4).
-    let verify: serde_json::Value = post_json(
-        &client,
-        &format!("{v3}/api/pin/verify"),
-        serde_json::json!({ "passphrase": p1, "pin": pin1 }),
-    )
-    .await;
-    assert_eq!(
-        verify["valid"], true,
-        "recovery restores the real credential on the new device"
-    );
+    // … and, the ruse substitution having been restored with it (§3.7.3),
+    // only the ruse PIN verifies locally on the recovered device; the real
+    // credential is restored too (its counted cast is asserted in M8/M9).
+    for (pin, expected) in [(ruse_pin, true), (pin1, false)] {
+        let verify: serde_json::Value = post_json(
+            &client,
+            &format!("{v3}/api/pin/verify"),
+            serde_json::json!({ "passphrase": p1, "pin": pin }),
+        )
+        .await;
+        assert_eq!(
+            verify["valid"], expected,
+            "recovered device verify_pin({pin})"
+        );
+    }
 
     // ── 8. V9 revocation: spare vid, WBB commitment, new PIN ──────────────
     let revoked: serde_json::Value = post_json(

@@ -80,6 +80,14 @@ function renderResults() {
       .join(", ")} — co-signed by the tabulation tellers and verifiable with <code>referendum-auditor</code>.</p>`;
 }
 
+// The published disclosure reveals which cast-as-intended slot (code or
+// sum) was opened for the list-level (l1) value (§3.8.5 1(b)).
+function describeDisclosure(disclosure) {
+  if (!disclosure || !disclosure.l1) return "n/a";
+  const slot = Object.keys(disclosure.l1)[0];
+  return slot === "Code" ? "l1 control code" : slot === "Sum" ? "l1 control sum" : slot;
+}
+
 function renderSearch(digest) {
   const container = $("search-result");
   container.innerHTML = "";
@@ -103,8 +111,11 @@ function renderSearch(digest) {
       ? "✔ accepted by at least 2 ballot boxes (no ⊥)."
       : "⚠ fewer than 2 ballot boxes published this digest (⊥).") +
     (cai.length > 0
-      ? ` ✔ cast-as-intended proof published (confirmed at ${cai[0].payload.confirmed_at_ms}).`
-      : " No cast-as-intended proof yet.");
+      ? ` ✔ cast-as-intended disclosure published by BB ${cai
+          .map((r) => r.payload.bb_id)
+          .sort()
+          .join(", ")} (confirmed at ${cai[0].payload.confirmed_at_ms}; disclosed slot: ${describeDisclosure(cai[0].payload.disclosure)}). Only confirmed ballots are counted.`
+      : " ⚠ No cast-as-intended disclosure yet — an unconfirmed ballot is NOT counted at tally.");
   container.appendChild(summary);
 
   for (const row of digests) {
