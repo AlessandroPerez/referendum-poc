@@ -1,13 +1,13 @@
-//! Registration Teller (RT) server (M4).
+//! Registration Teller (RT) server.
 //!
-//! Implements the endpoints required for milestone M4:
-//!   - `POST /sign`       — Ed25519-sign a WBB data string.
-//!   - `POST /decoy`      — generate a decoy credential builder + ruse PIN.
-//!   - `GET  /status`     — readiness + entity id.
+//! Implements:
+//!   - `POST /sign`       - Ed25519-sign a WBB data string.
+//!   - `POST /decoy`      - generate a decoy credential builder + ruse PIN.
+//!   - `GET  /status`     - readiness + entity id.
 //!
 //! The service loads its DKG share and reconstructs its
 //! `ThresholdRegistrationTeller` in memory; no network is needed for the
-//! threshold math at this milestone.
+//! threshold math.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,17 +62,17 @@ pub struct RtState {
     /// absent when the service is booted without those peers configured.
     er_client: Option<crate::clients::er::ErClient>,
     ns_client: Option<crate::clients::ns::NsClient>,
-    /// Recorded PIN requests, keyed by vid (§5.3.1.3).
+    /// Recorded PIN requests, keyed by vid (Sec. 5.3.1.3).
     pending: Arc<Mutex<HashMap<Vid, PendingCredentialRequest>>>,
     /// DVNIZKP sessions established at `/credentials/deliver`, keyed by the
     /// (already consumed) retrieval token.  Entries are removed when round 2
     /// completes.
     dv_sessions: Arc<Mutex<HashMap<TokenValue, Vid>>>,
     round1_sessions: Arc<Mutex<HashMap<TokenValue, Round1Session>>>,
-    /// Shared internal-API token for the ER `/tokens/verify` call (§6.1).
+    /// Shared internal-API token for the ER `/tokens/verify` call .
     internal_token: SecretString,
     /// Open credential-control session between `/controls/round1` and
-    /// `/round2` (M8, design lock (e)); the serial tally driver runs one at a
+    /// `/round2`; the serial tally driver runs one at a
     /// time, so a single slot suffices.
     controls_session: Arc<Mutex<Option<ControlsSession>>>,
 }
@@ -98,7 +98,7 @@ impl std::fmt::Debug for RtState {
 #[derive(Debug, Clone)]
 struct PendingCredentialRequest {
     rid: String,
-    /// τ delay in logical-clock ticks, sampled from {2..5} (§5.3.1.3, §9.4).
+    /// tau delay in logical-clock ticks, sampled from {2..5} (Sec. 5.3.1.3).
     #[allow(dead_code)]
     tau_ticks: u64,
 }
@@ -316,22 +316,22 @@ async fn status_handler(Extension(state): Extension<Arc<RtState>>) -> Json<Statu
 
 #[derive(Debug, Deserialize)]
 struct CredentialsRequestReq {
-    /// ER-issued single-use PIN-request token (§5.3.1.2).
+    /// ER-issued single-use PIN-request token (Sec. 5.3.1.2).
     token: TokenValue,
     rid: String,
 }
 
 #[derive(Debug, Serialize)]
 struct CredentialsRequestResp {
-    /// Sampled τ delay in logical-clock ticks (§5.3.1.3).
+    /// Sampled tau delay in logical-clock ticks (Sec. 5.3.1.3).
     tau_ticks: u64,
 }
 
-/// `POST /credentials/request` — record a PIN request (§5.3.1.3).
+/// `POST /credentials/request` - record a PIN request (Sec. 5.3.1.3).
 ///
 /// The RT verifies and consumes the ER-issued PIN-request token, records the
-/// `(vid, rid)` pair, samples τ ∈ {2..5} ticks with its seeded RNG, and
-/// notifies the NS on the logical clock (no wall-clock wait, roadmap §9.4).
+/// `(vid, rid)` pair, samples tau in {2..5} ticks with its seeded RNG, and
+/// notifies the NS on the logical clock (no wall-clock wait).
 async fn credentials_request_handler(
     Extension(state): Extension<Arc<RtState>>,
     Json(req): Json<CredentialsRequestReq>,
@@ -371,12 +371,12 @@ async fn credentials_request_handler(
 
 #[derive(Debug, Deserialize)]
 struct CredentialsDeliverReq {
-    /// ER-issued single-use retrieval token (§5.3.1.4).
+    /// ER-issued single-use retrieval token (Sec. 5.3.1.4).
     token: TokenValue,
 }
 
-/// `POST /credentials/deliver` — hand this RT's `AccShareBroadcast` to the
-/// voter (§5.3.1.5, §3.6.3) and open a DVNIZKP session for the same token.
+/// `POST /credentials/deliver` - hand this RT's `AccShareBroadcast` to the
+/// voter (Sec. 5.3.1.5, Sec. 3.6.3) and open a DVNIZKP session for the same token.
 async fn credentials_deliver_handler(
     Extension(state): Extension<Arc<RtState>>,
     Json(req): Json<CredentialsDeliverReq>,
@@ -399,7 +399,7 @@ async fn credentials_deliver_handler(
     }
     drop(pending);
 
-    // Credential index is fixed by the vid assignment (vid i ↔ package i-1).
+    // Credential index is fixed by the vid assignment (vid i <-> package i-1).
     let share = state.my_share_broadcast((vid.value() - 1) as usize)?;
     state.dv_sessions.lock().await.insert(req.token, vid);
     Ok(Json(share))
@@ -474,7 +474,7 @@ async fn dvnizkp_round2_handler(
         .await
         .remove(&req.token)
         .ok_or(RtError::Unauthorized)?;
-    // The DVNIZKP session is complete after round 2 — drop it so rounds
+    // The DVNIZKP session is complete after round 2 - drop it so rounds
     // cannot be replayed with the consumed retrieval token.
     state.dv_sessions.lock().await.remove(&req.token);
     let teller = state.build_teller()?;
@@ -488,7 +488,7 @@ async fn dvnizkp_round2_handler(
     Ok(Json(DvnizkpRound2Resp { z1 }))
 }
 
-// ── Credential controls (M8, §3.9 step 11 / §6.2) ───────────────────────────
+// -- Credential controls (Sec. 3.9 steps 14-19) ---------------------------
 
 #[derive(Debug, Deserialize)]
 #[serde(bound = "")]
@@ -526,7 +526,7 @@ pub struct ControlsRound2Request {
     pub all_ids: Vec<usize>,
 }
 
-/// Round 2: derive the Fiat–Shamir challenge and respond over the cached
+/// Round 2: derive the Fiat-Shamir challenge and respond over the cached
 /// round-1 vote list; consumes the session.
 async fn controls_round2_handler(
     Extension(state): Extension<Arc<RtState>>,
@@ -567,7 +567,7 @@ impl IntoResponse for RtError {
             Self::Json(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            // Internal failures are logged but not leaked (style guide §03).
+            // Internal failures are logged but not leaked.
             Self::Internal(_) => {
                 tracing::error!(error = %self, "rt-server internal error");
                 (
@@ -621,7 +621,7 @@ pub async fn build_service(
         .unwrap_or_default();
     let clock = LogicalClock::new(settings.clock.base_ms, settings.clock.tick_ms);
 
-    // Peer clients are optional: an RT booted without ER/NS peers (e.g. the M4
+    // Peer clients are optional: an RT booted without ER/NS peers (e.g. the
     // signing test) simply rejects credential-request traffic.
     let http_client = build_client(&settings).await?;
     let er_client = parse_peer_url(&settings.er.base_url)?
@@ -719,7 +719,7 @@ async fn load_enrollment_packages(settings: &Settings) -> anyhow::Result<Vec<Enr
         .map_err(|e| anyhow::anyhow!("failed to parse enrollment packages: {e}"))
 }
 
-/// Load this service's dedicated operation seed (`{name}-seed.bin`, §9.2).
+/// Load this service's dedicated operation seed (`{name}-seed.bin`).
 async fn load_actor_seed(settings: &Settings) -> anyhow::Result<ActorSeed> {
     let context_path = std::path::PathBuf::from(&settings._ceremony.election_context);
     let base_dir = context_path

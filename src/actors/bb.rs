@@ -1,15 +1,15 @@
-//! Ballot Box (BB) server (M6, §3.8.4 / roadmap §6.4).
+//! Ballot Box (BB) server (Sec. 3.8.4).
 //!
 //! Endpoints:
-//!   - `POST /ballots`          — CAT-authorized ballot intake: verifies the
+//!   - `POST /ballots`          - CAT-authorized ballot intake: verifies the
 //!     casting token with the ER (commB binding, single use), verifies the
 //!     ballot proofs, stores it idempotently by digest, publishes
 //!     `ballot_digest` + `ballot_metadata` to the WBB, returns a `Receipt`.
-//!   - `POST /cai`              — CAI disclosure verification + publication.
-//!   - `GET  /receipts/{digest}`— public receipt lookup.
-//!   - `GET  /ballots`          — ballot release for the tally driver (M8).
+//!   - `POST /cai`              - CAI disclosure verification + publication.
+//!   - `GET  /receipts/{digest}`- public receipt lookup.
+//!   - `GET  /ballots`          - ballot release for the tally driver.
 //!
-//! Receipts are minted on the logical clock (§9.4) — the library's
+//! Receipts are minted on the logical clock - the library's
 //! `InMemoryBB` uses wall-clock time, so the PoC keeps its own store built
 //! from the library's public `BallotRecord`/`Receipt` types.
 
@@ -72,7 +72,7 @@ pub struct BbState {
     ballots: Arc<Mutex<HashMap<BallotDigest, StoredBallot>>>,
     /// Digests whose intake is in progress (reserved before token
     /// verification, released on every exit path) so two concurrent casts of
-    /// the same ballot cannot both burn a token or double-publish (§12).
+    /// the same ballot cannot both burn a token or double-publish.
     in_flight: Arc<Mutex<HashSet<BallotDigest>>>,
 }
 
@@ -147,12 +147,12 @@ impl BbState {
     }
 }
 
-// ── Handlers ────────────────────────────────────────────────────────────────
+// -- Handlers ----------------------------------------------------------------
 
 #[derive(Deserialize)]
 struct CastRequest {
     ballot: Ballot<G>,
-    /// Hex-encoded 32-byte commitment randomness (§5.3.1.6).
+    /// Hex-encoded 32-byte commitment randomness (Sec. 5.3.1.6).
     rndcomm: String,
     casting_token: TokenValue,
 }
@@ -173,7 +173,7 @@ struct CastResponse {
     emoji: Vec<String>,
 }
 
-/// V12: ballot intake (§3.8.4, style guide §12 idempotency).
+/// V12: ballot intake (Sec. 3.8.4, idempotent intake).
 #[tracing::instrument(skip(state, req))]
 async fn cast_handler(
     Extension(state): Extension<Arc<BbState>>,
@@ -182,7 +182,7 @@ async fn cast_handler(
     let digest = ballot_digest(&req.ballot).map_err(|e| BbError::Internal(e.to_string()))?;
 
     // Idempotent replay: the same ballot (same digest) returns the stored
-    // receipt without consuming another token (§12).  The in-flight
+    // receipt without consuming another token.  The in-flight
     // reservation is taken under the same lock so a concurrent duplicate
     // cannot slip past the lookup and double-burn a token.
     let _in_flight = {
@@ -230,7 +230,7 @@ async fn cast_handler(
         return Err(BbError::Unauthorized);
     }
 
-    // Verify the ballot proofs against the election context (§3.8.4 step 5).
+    // Verify the ballot proofs against the election context (Sec. 3.8.4 step 5).
     let ctx = state.election_context.clone();
     let ballot = req.ballot.clone();
     tokio::task::spawn_blocking(move || ballot.verify(&ctx))
@@ -257,7 +257,7 @@ async fn cast_handler(
         .map(|s| s.to_string())
         .collect();
 
-    // E_pk_TT[g1^{2^bb_id}] (§3.8.4) with a seeded RNG (§9.2).
+    // E_pk_TT[g1^{2^bb_id}] (Sec. 3.8.4) with a seeded RNG.
     let bb_id_enc = {
         let counter = state.enc_counter.fetch_add(1, Ordering::SeqCst);
         let mut rng = operation_rng(&state.actor_seed, "bb-id-enc", counter);
@@ -278,7 +278,7 @@ async fn cast_handler(
         },
     );
 
-    // Publish digest + metadata to the WBB (roadmap §4.4).
+    // Publish digest + metadata to the WBB (Sec. 3.4.2 write policy).
     let digest_entry = BallotDigestEntry {
         digest,
         emoji: emoji.clone(),
@@ -293,9 +293,9 @@ async fn cast_handler(
         .map_err(|e| BbError::Internal(e.to_string()))?;
     let metadata_data = wbb_data_string("voting", "BB", "ballot_metadata", 1, &metadata_entry)
         .map_err(|e| BbError::Internal(e.to_string()))?;
-    // A ballot is accepted only if its digest is published (§3.8.4 steps
-    // 2–6): if the WBB refuses — the voting window is closed, or the log is
-    // unreachable — the stored ballot is rolled back so nothing unpublished
+    // A ballot is accepted only if its digest is published (Sec. 3.8.4 steps
+    // 2-6): if the WBB refuses - the voting window is closed, or the log is
+    // unreachable - the stored ballot is rolled back so nothing unpublished
     // can ever be released at tally.
     let published = match state.publish(&digest_data).await {
         Ok(()) => state.publish(&metadata_data).await,
@@ -310,7 +310,7 @@ async fn cast_handler(
 
     // Ballot accepted and published: now consume the single-use token.  A
     // failure here (ER unreachable, token consumed meanwhile) does not undo
-    // the accepted ballot — the binding already guarantees it cannot be
+    // the accepted ballot - the binding already guarantees it cannot be
     // reused for a different one.
     if let Err(e) = state
         .er_client
@@ -346,7 +346,7 @@ struct CaiResponse {
 }
 
 /// V13: CAI disclosure verification + `cast_intended_proof` publication
-/// (§3.8.4 steps 11–16).
+/// (Sec. 3.8.4 steps 11-16).
 #[tracing::instrument(skip(state, req))]
 async fn cai_handler(
     Extension(state): Extension<Arc<BbState>>,
@@ -453,9 +453,9 @@ async fn receipt_handler(
     }))
 }
 
-/// Ballot release for the tally driver (§3.9 step 2; auth: service token).
+/// Ballot release for the tally driver (Sec. 3.9 step 2; auth: service token).
 ///
-/// Per §3.9 step 2 the BB "discards all the ballots for which no valid
+/// Per Sec. 3.9 step 2 the BB "discards all the ballots for which no valid
 /// cast-as-intended disclosure has been received": only ballots whose CAI
 /// disclosure was verified and published (`cai_handler`) are released.
 async fn ballots_handler(
@@ -487,7 +487,7 @@ fn require_bearer(headers: &HeaderMap, expected: &SecretString) -> Result<(), Bb
     Ok(())
 }
 
-// ── Errors ──────────────────────────────────────────────────────────────────
+// -- Errors ------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
 enum BbError {
@@ -518,7 +518,7 @@ impl IntoResponse for BbError {
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             Self::Conflict => (StatusCode::CONFLICT, self.to_string()),
             Self::NotAccepted(_) => (StatusCode::FORBIDDEN, self.to_string()),
-            // Internal failures are logged but not leaked (style guide §03).
+            // Internal failures are logged but not leaked.
             Self::Internal(_) => {
                 tracing::error!(error = %self, "bb-server internal error");
                 (
@@ -531,7 +531,7 @@ impl IntoResponse for BbError {
     }
 }
 
-// ── Router / startup ────────────────────────────────────────────────────────
+// -- Router / startup --------------------------------------------------------
 
 pub fn router(state: Arc<BbState>) -> Router {
     with_state(
@@ -651,7 +651,7 @@ async fn load_secret_file(path: &std::path::Path) -> anyhow::Result<SecretString
     Ok(SecretString::new(token))
 }
 
-/// Load this service's dedicated operation seed (`{name}-seed.bin`, §9.2).
+/// Load this service's dedicated operation seed (`{name}-seed.bin`).
 async fn load_actor_seed(settings: &Settings) -> anyhow::Result<ActorSeed> {
     let path = ceremony_dir(settings).join(format!("{}-seed.bin", settings.service.name));
     let bytes = tokio::fs::read(&path)

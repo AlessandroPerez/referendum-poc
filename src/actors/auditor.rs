@@ -1,12 +1,12 @@
-//! Universal-verification auditor (M8, §3.10 / roadmap §8.6).
+//! Universal-verification auditor (Sec. 3.10).
 //!
 //! Fetches everything from the WBB read API and re-runs the public pipeline:
 //! entry signatures, phase transitions, ballot-release reconciliation (the
-//! §3.8.5 ⊥ filter), ox re-vote dedup, ballot/mix/ACC-check/credential
+//! Sec. 3.8.5 bot filter), ox re-vote dedup, ballot/mix/ACC-check/credential
 //! verification, filter recomputation, the homomorphic sum, and the tally
 //! decryption proofs. Every step yields OK/FAIL; the CLI exits nonzero on any
 //! FAIL. Only the entity verifying keys and the cluster CA come from local
-//! configuration — all election data is read from the log itself.
+//! configuration - all election data is read from the log itself.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -32,25 +32,25 @@ use crate::protocol::voting::{
 
 type G = RistrettoGroup;
 
-/// Configuration for a §3.10 audit run.
+/// Configuration for a Sec. 3.10 audit run.
 #[derive(Clone)]
 pub struct AuditConfig {
     /// WBB log base URL.
     pub wbb_url: Url,
     /// Cluster CA PEM for TLS.
     pub ca_pem: String,
-    /// Entity Ed25519 verifying keys, id → key (PM/ER/RT/TT/BB).
+    /// Entity Ed25519 verifying keys, id -> key (PM/ER/RT/TT/BB).
     pub entity_keys: Vec<(String, VerifyingKey)>,
-    /// Number of TT parties and reconstruction threshold — bounds for the
+    /// Number of TT parties and reconstruction threshold - bounds for the
     /// master-key binding check on every published threshold decryption
-    /// (M8 round-1 finding M2).
+    /// (share-forgery defense).
     pub n_tt: usize,
     pub t_tt: usize,
 }
 
-/// Required staging role and threshold per entry type — the fixed §4.4/write-
+/// Required staging role and threshold per entry type - the fixed Sec. 3.4.2 write-
 /// policy table. The auditor must not trust the attacker-authored threshold
-/// field inside the entry data (M8 round-1 finding L2).
+/// field inside the entry data.
 fn required_signing(entry_type: &str) -> Option<(&'static str, usize)> {
     Some(match entry_type {
         "election_pub_key"
@@ -76,7 +76,7 @@ pub struct AuditStep {
     pub detail: String,
 }
 
-/// Full per-step audit report (§8.6).
+/// Full per-step audit report (Sec. 3.10).
 #[derive(Debug, Clone, Default)]
 pub struct AuditReport {
     pub steps: Vec<AuditStep>,
@@ -138,7 +138,7 @@ struct AuditedEntry {
     signers: Vec<(String, i64, Vec<u8>)>,
 }
 
-/// Run the full §3.10 audit against a WBB log.
+/// Run the full Sec. 3.10 audit against a WBB log.
 pub async fn run_audit(cfg: AuditConfig) -> Result<AuditReport, AuditError> {
     let http = reqwest_client_trusting_ca(&cfg.ca_pem)?;
     let wbb = WbbClient::new(http, cfg.wbb_url.clone());
@@ -154,7 +154,7 @@ pub async fn run_audit(cfg: AuditConfig) -> Result<AuditReport, AuditError> {
 /// Audit a snapshot of raw log entries `(leaf_index, entry_json)`.
 ///
 /// This is the same verification path `run_audit` uses after fetching; it is
-/// public so the §13 `auditor_detects_tamper` test can replay TAMPERED copies
+/// public so the `auditor_detects_tamper` test can replay TAMPERED copies
 /// of a fetched log and assert the failing step.
 pub async fn audit_raw_entries(
     cfg: &AuditConfig,
@@ -244,8 +244,8 @@ fn audit_entries(
 ) -> AuditReport {
     let mut report = AuditReport::default();
 
-    // ── Step 1: every entry signature verifies against a known entity key,
-    //    with the role/threshold requirements of the FIXED §4.4 table (L2) ──
+    // -- Step 1: every entry signature verifies against a known entity key,
+    //    with the role/threshold requirements of the FIXED Sec. 3.4.2 write-policy table --
     let mut bad_signatures = Vec::new();
     for entry in entries {
         if let Some(parsed) = &entry.parsed {
@@ -257,8 +257,8 @@ fn audit_entries(
                             entry.leaf_index, parsed.entry_type, parsed.role
                         ));
                     }
-                    // N1: only signers of the REQUIRED role count towards the
-                    // threshold — the auditor must not delegate that check to
+                    // Only signers of the REQUIRED role count towards the
+                    // threshold - the auditor must not delegate that check to
                     // the WBB's own policy enforcement.
                     let role_prefix = format!("{role}-");
                     let distinct: HashSet<&String> = entry
@@ -317,7 +317,7 @@ fn audit_entries(
         report.fail("entry_signatures", bad_signatures.join("; "));
     }
 
-    // ── Step 2: phase transitions form setup → voting → tallying ──────────
+    // -- Step 2: phase transitions form setup -> voting -> tallying ----------
     let transitions: Vec<(&str, &str)> = entries
         .iter()
         .filter_map(|e| e.parsed.as_ref())
@@ -325,7 +325,7 @@ fn audit_entries(
         .map(|p| (p.phase.as_str(), p.content.as_str()))
         .collect();
     if transitions == vec![("setup", "voting"), ("voting", "tallying")] {
-        report.pass("phase_transitions", "setup → voting → tallying");
+        report.pass("phase_transitions", "setup -> voting -> tallying");
     } else {
         report.fail(
             "phase_transitions",
@@ -333,7 +333,7 @@ fn audit_entries(
         );
     }
 
-    // ── Step 3: parse the election context and public parameters ──────────
+    // -- Step 3: parse the election context and public parameters ----------
     let Some(context) =
         decode_single::<ElectionContext<G>>(entries, "election_pub_key", &mut report)
     else {
@@ -373,9 +373,9 @@ fn audit_entries(
         return report;
     };
 
-    // ── Step 4: ballot release — signer/bb linkage + digest linkage ───────
+    // -- Step 4: ballot release - signer/bb linkage + digest linkage -------
     // Acceptance evidence from the voting phase: which distinct BBs signed a
-    // `ballot_digest` entry for each digest (basis of the M1 censorship
+    // `ballot_digest` entry for each digest (basis of the censorship
     // check).  A payload whose `receipt.bb_id` is not backed by that BB's own
     // signature on the entry does not count as acceptance evidence.
     let mut accepted_by: HashMap<crate::domain::BallotDigest, HashSet<u64>> = HashMap::new();
@@ -402,9 +402,9 @@ fn audit_entries(
     let voting_digests: HashSet<crate::domain::BallotDigest> =
         accepted_by.keys().copied().collect();
 
-    // Confirmation evidence (§3.8.4 steps 13–15): which BBs published a
+    // Confirmation evidence (Sec. 3.8.4 steps 13-15): which BBs published a
     // self-signed `cast_intended_proof` for each digest, with the disclosure
-    // itself so it can be re-verified against the released ballot (§3.10
+    // itself so it can be re-verified against the released ballot (Sec. 3.10
     // 1(d)).
     let mut confirmed_by: HashMap<crate::domain::BallotDigest, HashMap<u64, CaiEntry>> =
         HashMap::new();
@@ -497,10 +497,10 @@ fn audit_entries(
         return report;
     }
 
-    // ── §3.9 step 2 / §3.10 1(d): every released ballot must carry a valid,
+    // -- Sec. 3.9 step 2 / Sec. 3.10 1(d): every released ballot must carry a valid,
     //    published cast-as-intended disclosure from the BB that released it;
     //    a BB releasing an unconfirmed ballot (or a disclosure that does not
-    //    verify against the released ballot) fails the audit ──────────────
+    //    verify against the released ballot) fails the audit --------------
     let mut confirmation_problems = Vec::new();
     let mut confirmed_releases = 0usize;
     for (bb_id, records) in &per_bb {
@@ -544,7 +544,7 @@ fn audit_entries(
         Ok(records) => {
             report.pass(
                 "ballot_reconciliation",
-                format!("{} ballots after the ⊥ filter", records.len()),
+                format!("{} ballots after the bot filter", records.len()),
             );
             records
         }
@@ -554,11 +554,11 @@ fn audit_entries(
         }
     };
 
-    // ── M1: release completeness — every ballot accepted AND confirmed during
-    //    voting by ≥ NO_BOT_MIN_BBS distinct BBs must survive release +
+    // -- Release completeness - every ballot accepted AND confirmed during
+    //    voting by >= NO_BOT_MIN_BBS distinct BBs must survive release +
     //    reconciliation; a coordinator or colluding BB omitting one must not
     //    pass the audit.  Unconfirmed ballots are legitimately discarded
-    //    (§3.9 step 2), so they carry no completeness obligation ──────────
+    //    (Sec. 3.9 step 2), so they carry no completeness obligation ----------
     let reconciled_digests: HashSet<crate::domain::BallotDigest> = records
         .iter()
         .filter_map(|r| ballot_digest(&r.ballot).ok())
@@ -576,7 +576,7 @@ fn audit_entries(
             })
             .unwrap_or_default();
         if confirmed.len() < NO_BOT_MIN_BBS {
-            continue; // ⊥ or unconfirmed during voting; exclusion is the protocol outcome.
+            continue; // bot or unconfirmed during voting; exclusion is the protocol outcome.
         }
         accepted_count += 1;
         if !reconciled_digests.contains(digest) {
@@ -607,7 +607,7 @@ fn audit_entries(
         return report;
     }
 
-    // ── Step 5: strict artifact inventory (L2), then ox dedup ─────────────
+    // -- Step 5: strict artifact inventory, then ox dedup -------------
     // Exactly one proof entry per pipeline stage and one mix artifact per
     // kind; a malformed or duplicate artifact of a known type is a FAIL, not
     // something to skip past.
@@ -691,8 +691,8 @@ fn audit_entries(
         unreachable!("inventory guarantees the ox slot holds the ox variant");
     };
     let params = &context.pk.params.elgamal;
-    // M2: every published threshold decryption must verify AND its embedded
-    // partial public-key shares must interpolate to the election master key —
+    // Every published threshold decryption must verify AND its embedded
+    // partial public-key shares must interpolate to the election master key -
     // otherwise colluding signers can fabricate self-consistent decryptions.
     let master_h = context.pk.params.tally.h;
     let check_decs = |decs: &[ThresholdDecOk<G>]| -> Result<(), String> {
@@ -723,7 +723,7 @@ fn audit_entries(
         }
     };
 
-    // ── Step 6: ballot proofs + vote mix ──────────────────────────────────
+    // -- Step 6: ballot proofs + vote mix ----------------------------------
     let originals = match pipeline.verify_ballots(&deduped) {
         Ok(originals) => {
             report.pass(
@@ -755,7 +755,7 @@ fn audit_entries(
         }
     }
 
-    // ── Step 7: controls + ACC checks + invalid-vote filter ───────────────
+    // -- Step 7: controls + ACC checks + invalid-vote filter ---------------
     let Some(ReEncryptionProofEntry::Controls { controls }) = controls_entry else {
         unreachable!("inventory guarantees the controls slot holds the controls variant");
     };
@@ -784,7 +784,7 @@ fn audit_entries(
         }
     };
 
-    // ── Step 8: credential mix over the eligible list ─────────────────────
+    // -- Step 8: credential mix over the eligible list ---------------------
     let mut eligible_shorts = Vec::with_capacity(eligible.len());
     for vid in &eligible {
         match short_accs.get((vid.value() - 1) as usize) {
@@ -815,7 +815,7 @@ fn audit_entries(
         }
     }
 
-    // ── Step 9: credential fingerprints + illicit/keep-last filter ────────
+    // -- Step 9: credential fingerprints + illicit/keep-last filter --------
     let Some(ReEncryptionProofEntry::CredentialFingerprints { fps: fps2, bundle }) = cred_fps
     else {
         unreachable!("inventory guarantees the fps slot holds the fingerprints variant");
@@ -848,7 +848,7 @@ fn audit_entries(
         }
     };
 
-    // ── Step 10: homomorphic sum + tally decryption + counts ──────────────
+    // -- Step 10: homomorphic sum + tally decryption + counts --------------
     let Some(tally_proof) = decode_single::<TallyProofEntry>(entries, "tally_proof", &mut report)
     else {
         return report;
@@ -867,7 +867,7 @@ fn audit_entries(
             return report;
         }
     }
-    // M2 for the tally itself: the `DecryptedTally` internals are private to
+    // The same binding for the tally itself: the `DecryptedTally` internals are private to
     // the library, so extract its `ThresholdDecOk` lists via the same serde
     // round-trip used for counts and bind them to the master key too.
     match tally_dec_oks(&tally_proof.decrypted) {
@@ -900,7 +900,7 @@ fn audit_entries(
         ),
         Ok(counts) => report.fail(
             "tally_result",
-            format!("recomputed {counts:?} ≠ published {published_counts:?}"),
+            format!("recomputed {counts:?} != published {published_counts:?}"),
         ),
         Err(e) => report.fail("tally_result", e.to_string()),
     }
@@ -908,7 +908,7 @@ fn audit_entries(
     report
 }
 
-/// Lagrange basis coefficient λ_i(0) over `participants` in the scalar field.
+/// Lagrange basis coefficient lambda_i(0) over `participants` in the scalar field.
 fn lagrange_basis_at_zero(i: usize, participants: &[usize]) -> <G as GroupScalar>::Scalar {
     let mut num = <G as GroupScalar>::Scalar::from(1u64);
     let mut den = <G as GroupScalar>::Scalar::from(1u64);
@@ -923,13 +923,13 @@ fn lagrange_basis_at_zero(i: usize, participants: &[usize]) -> <G as GroupScalar
     num * G::scalar_inv(den)
 }
 
-/// M2 fix: bind a published threshold decryption to the election master key.
+/// Bind a published threshold decryption to the election master key.
 ///
 /// `ThresholdDecOk::verify` only proves each partial is consistent with the
 /// `public_key_share` H_i *embedded in the partial itself*. Here the auditor
-/// additionally requires ≥ `t_tt` partials from distinct in-range signer ids
+/// additionally requires >= `t_tt` partials from distinct in-range signer ids
 /// whose H_i interpolate at 0 to the master M-ElGamal public key from the
-/// published election context — making fabricated self-consistent share sets
+/// published election context - making fabricated self-consistent share sets
 /// detectable.
 fn verify_master_key_binding(
     dec: &ThresholdDecOk<G>,
@@ -960,7 +960,7 @@ fn verify_master_key_binding(
 }
 
 /// Extract every `ThresholdDecOk` inside a `DecryptedTally` (l1_d + flattened
-/// l2_d) via a serde round-trip — the fields are private to the library.
+/// l2_d) via a serde round-trip - the fields are private to the library.
 fn tally_dec_oks(
     decrypted: &evoting::api::prelude::DecryptedTally<G>,
 ) -> Result<Vec<ThresholdDecOk<G>>, String> {

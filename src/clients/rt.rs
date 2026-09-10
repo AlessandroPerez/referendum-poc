@@ -1,4 +1,4 @@
-//! Typed HTTP client for the Registration Teller (RT) service (M4).
+//! Typed HTTP client for the Registration Teller (RT) service.
 
 use std::time::Duration;
 
@@ -69,7 +69,7 @@ impl RtClient {
         format!("Bearer {}", self.token.expose_secret())
     }
 
-    /// `POST /sign` — ask the RT to sign a WBB data string.
+    /// `POST /sign` - ask the RT to sign a WBB data string.
     pub async fn sign(&self, data: &str, timestamp: i64) -> Result<SignResponse, RtError> {
         let url = self.base_url.join("sign")?;
         let response = self
@@ -114,7 +114,7 @@ impl RtClient {
         })
     }
 
-    /// `POST /decoy` — request a decoy credential builder and ruse PIN.
+    /// `POST /decoy` - request a decoy credential builder and ruse PIN.
     pub async fn decoy(&self) -> Result<DecoyResponse, RtError> {
         let url = self.base_url.join("decoy")?;
         let response = self
@@ -153,9 +153,9 @@ impl RtClient {
         }
     }
 
-    /// `POST /credentials/request` — record a PIN request for `rid`, authorized
-    /// by an ER-issued single-use PIN-request token (§5.3.1.3).
-    /// Returns the sampled τ delay in logical-clock ticks.
+    /// `POST /credentials/request` - record a PIN request for `rid`, authorized
+    /// by an ER-issued single-use PIN-request token (Sec. 5.3.1.3).
+    /// Returns the sampled tau delay in logical-clock ticks.
     pub async fn credentials_request(&self, token: &TokenValue, rid: &str) -> Result<u64, RtError> {
         let url = self.base_url.join("credentials/request")?;
         #[derive(Serialize)]
@@ -188,7 +188,7 @@ impl RtClient {
         }
     }
 
-    /// `POST /credentials/deliver` — retrieve this RT's `AccShareBroadcast`.
+    /// `POST /credentials/deliver` - retrieve this RT's `AccShareBroadcast`.
     pub async fn credentials_deliver(
         &self,
         token: &TokenValue,
@@ -217,7 +217,7 @@ impl RtClient {
         }
     }
 
-    /// `POST /dvnizkp/round1` — start the DVNIZKP protocol.
+    /// `POST /dvnizkp/round1` - start the DVNIZKP protocol.
     pub async fn dvnizkp_round1(
         &self,
         token: &TokenValue,
@@ -250,7 +250,7 @@ impl RtClient {
         }
     }
 
-    /// `POST /dvnizkp/round2` — obtain the round-2 scalar share.
+    /// `POST /dvnizkp/round2` - obtain the round-2 scalar share.
     pub async fn dvnizkp_round2(
         &self,
         token: &TokenValue,
@@ -292,8 +292,8 @@ impl RtClient {
         }
     }
 
-    /// `POST /controls/round1` — open a credential-control session over the
-    /// shuffled votes (M8, §3.9 step 11).
+    /// `POST /controls/round1` - open a credential-control session over the
+    /// shuffled votes (Sec. 3.9 steps 14-19).
     pub async fn controls_round1(
         &self,
         votes: &[evoting::api::prelude::Vote<RistrettoGroup>],
@@ -322,7 +322,7 @@ impl RtClient {
         }
     }
 
-    /// `POST /controls/round2` — obtain this RT's control response; consumes
+    /// `POST /controls/round2` - obtain this RT's control response; consumes
     /// the session.
     pub async fn controls_round2(
         &self,

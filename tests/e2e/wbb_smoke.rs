@@ -1,4 +1,4 @@
-//! M2 harness smoke test: spawn the WBB over HTTPS and verify a threshold
+//! WBB harness smoke test: spawn the WBB over HTTPS and verify a threshold
 //! entry is published with a deterministic checkpoint root hash.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -16,8 +16,8 @@ const MASTER_SEED: [u8; 32] = [0xabu8; 32];
 async fn wbb_threshold_entry_and_deterministic_checkpoint() {
     helpers::init();
     // This test spawns WBB processes on bind-then-released ports twice, so it
-    // participates in the same §9.5 port race as the cluster tests — it must
-    // hold the shared guard too (M8 validation L1; the likely cause of the
+    // participates in the same port race as the cluster tests - it must
+    // hold the shared guard too (the likely cause of the
     // historical one-off suite flake).
     let _cluster = helpers::cluster_guard().await;
     let root1 = run_once().await;
@@ -76,7 +76,7 @@ async fn run_once() -> String {
     let entries = wbb.client.entries().await.expect("entries");
     assert_eq!(entries.entries.len(), 1, "expected a single published leaf");
 
-    // D16 negative check: a client without the cluster CA must fail the TLS
+    // Negative check: a client without the cluster CA must fail the TLS
     // handshake against the WBB.
     let untrusting = reqwest::Client::builder()
         .tls_built_in_root_certs(false)

@@ -1,4 +1,4 @@
-//! Typed HTTP client for the Ballot Box (BB) service (M6).
+//! Typed HTTP client for the Ballot Box (BB) service.
 
 use std::time::Duration;
 
@@ -54,7 +54,7 @@ impl BbClient {
         Self { client, base_url }
     }
 
-    /// `POST /ballots` — cast a ballot with a CAT casting token (§3.8.4).
+    /// `POST /ballots` - cast a ballot with a CAT casting token (Sec. 3.8.4).
     pub async fn cast(
         &self,
         ballot: &Ballot<G>,
@@ -90,7 +90,7 @@ impl BbClient {
         }
     }
 
-    /// `POST /cai` — submit the CAI disclosure for a cast ballot (§3.8.4).
+    /// `POST /cai` - submit the CAI disclosure for a cast ballot (Sec. 3.8.4).
     pub async fn cai(
         &self,
         digest: &BallotDigest,
@@ -123,7 +123,7 @@ impl BbClient {
         }
     }
 
-    /// `GET /receipts/{digest}` — public receipt lookup.
+    /// `GET /receipts/{digest}` - public receipt lookup.
     pub async fn receipt(&self, digest: &BallotDigest) -> Result<ReceiptResponse, BbError> {
         let url = self.base_url.join(&format!("receipts/{digest}"))?;
         let response = self
@@ -142,7 +142,7 @@ impl BbClient {
         }
     }
 
-    /// `GET /ballots` — release stored ballots (tally driver, service token).
+    /// `GET /ballots` - release stored ballots (tally driver, service token).
     pub async fn ballots(
         &self,
         service_token: &SecretString,

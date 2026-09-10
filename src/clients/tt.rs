@@ -1,5 +1,4 @@
-//! Typed HTTP client for the Tabulation Teller (TT) service (M4 signing,
-//! M8 threshold tally).
+//! Typed HTTP client for the Tabulation Teller (TT) service (signing, threshold tally).
 
 use std::time::Duration;
 
@@ -66,7 +65,7 @@ impl TtClient {
         format!("Bearer {}", self.token.expose_secret())
     }
 
-    /// `POST /sign` — ask the TT to sign a WBB data string.
+    /// `POST /sign` - ask the TT to sign a WBB data string.
     pub async fn sign(&self, data: &str, timestamp: i64) -> Result<SignResponse, TtError> {
         let url = self.base_url.join("sign")?;
         let response = self
@@ -111,7 +110,7 @@ impl TtClient {
         })
     }
 
-    /// Shared plumbing for the authenticated JSON POST endpoints (M8).
+    /// Shared plumbing for the authenticated JSON POST endpoints.
     async fn post_json<B: Serialize, R: DeserializeOwned>(
         &self,
         path: &str,
@@ -136,7 +135,7 @@ impl TtClient {
         }
     }
 
-    /// `POST /vss/zeta/round1` — open a ζ VSS session (§3.9 step 6).
+    /// `POST /vss/zeta/round1` - open a zeta VSS session (Sec. 3.9 step 6).
     pub async fn zeta_round1(&self, session: &str) -> Result<ZetaVssBroadcast<G>, TtError> {
         self.post_json(
             "vss/zeta/round1",
@@ -145,8 +144,8 @@ impl TtClient {
         .await
     }
 
-    /// `POST /vss/zeta/combine` — combine broadcasts into this party's
-    /// sub-share (§3.9 step 6); consumes the session.
+    /// `POST /vss/zeta/combine` - combine broadcasts into this party's
+    /// sub-share (Sec. 3.9 step 6); consumes the session.
     pub async fn zeta_combine(
         &self,
         session: &str,
@@ -176,7 +175,7 @@ impl TtClient {
         Ok((response.id, response.sub_share))
     }
 
-    /// `POST /decrypt/ox` — per-party ox-fingerprint decryptions.
+    /// `POST /decrypt/ox` - per-party ox-fingerprint decryptions.
     pub async fn decrypt_ox(
         &self,
         fps: &VerifiableFingerprints<G>,
@@ -185,7 +184,7 @@ impl TtClient {
             .await
     }
 
-    /// `POST /decrypt/acc-checks` — per-party ACC-check decryptions.
+    /// `POST /decrypt/acc-checks` - per-party ACC-check decryptions.
     pub async fn decrypt_acc_checks(
         &self,
         votes: &[Vote<G>],
@@ -211,7 +210,7 @@ impl TtClient {
         .await
     }
 
-    /// `POST /decrypt/fps` — per-party credential-fingerprint decryptions.
+    /// `POST /decrypt/fps` - per-party credential-fingerprint decryptions.
     pub async fn decrypt_fps(
         &self,
         fps: &VerifiableFingerprints<G>,
@@ -234,7 +233,7 @@ impl TtClient {
         Ok((response.pub_fps, response.vote_fps))
     }
 
-    /// `POST /decrypt/tally` — per-party tally decryptions.
+    /// `POST /decrypt/tally` - per-party tally decryptions.
     #[allow(clippy::type_complexity)]
     pub async fn decrypt_tally(
         &self,

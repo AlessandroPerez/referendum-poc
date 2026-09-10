@@ -1,4 +1,4 @@
-//! Election administration CLI: phase transitions (PM), ACC generation, tally (M4/M8).
+//! Election administration CLI: phase transitions (PM), ACC generation, tally .
 
 use std::path::PathBuf;
 
@@ -42,21 +42,21 @@ enum Command {
         rt_urls: Vec<Url>,
     },
 
-    /// Publish the PM phase transition `setup → voting` (§3.4.2, A4).
+    /// Publish the PM phase transition `setup -> voting` (Sec. 3.4.2, A4).
     OpenVoting {
         /// WBB log base URL (overrides configuration).
         #[arg(long)]
         wbb_url: Option<Url>,
     },
 
-    /// Publish the PM phase transition `voting → tallying` (§3.4.2, A4).
+    /// Publish the PM phase transition `voting -> tallying` (Sec. 3.4.2, A4).
     CloseVoting {
         /// WBB log base URL (overrides configuration).
         #[arg(long)]
         wbb_url: Option<Url>,
     },
 
-    /// Run the full §3.9 tally pipeline over HTTP and publish all artifacts (A5).
+    /// Run the full Sec. 3.9 tally pipeline over HTTP and publish all artifacts (A5).
     Tally {
         /// WBB log base URL (overrides configuration).
         #[arg(long)]

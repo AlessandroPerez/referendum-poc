@@ -1,4 +1,4 @@
-//! Deterministic Merkle root over voter (id, vid) pairs (roadmap §3.5 / M3.4).
+//! Deterministic Merkle root over voter (id, vid) pairs (Sec. 3.5).
 //!
 //! The root binds the eligible electorate to the election context. It is
 //! computed over **sorted** `(id, vid)` pairs so the result is independent of

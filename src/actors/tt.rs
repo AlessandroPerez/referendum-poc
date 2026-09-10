@@ -1,25 +1,25 @@
-//! Tabulation Teller (TT) server (M4 signing + M8 threshold tally, §6.3).
+//! Tabulation Teller (TT) server (Sec. 3.9 threshold tally).
 //!
 //! Endpoints:
-//!   - `POST /sign`               — Ed25519-sign a WBB data string.
-//!   - `GET  /status`             — readiness + entity id.
-//!   - `POST /vss/zeta/round1`    — start a threshold ζ VSS session (§3.9).
-//!   - `POST /vss/zeta/combine`   — combine ζ VSS broadcasts → sub-share.
-//!   - `POST /decrypt/ox`         — partial ox-fingerprint decryptions.
-//!   - `POST /decrypt/acc-checks` — partial ACC-check decryptions.
-//!   - `POST /decrypt/fps`        — partial credential-fp decryptions.
-//!   - `POST /decrypt/tally`      — partial tally decryptions.
+//!   - `POST /sign`               - Ed25519-sign a WBB data string.
+//!   - `GET  /status`             - readiness + entity id.
+//!   - `POST /vss/zeta/round1`    - start a threshold zeta VSS session (Sec. 3.9).
+//!   - `POST /vss/zeta/combine`   - combine zeta VSS broadcasts -> sub-share.
+//!   - `POST /decrypt/ox`         - partial ox-fingerprint decryptions.
+//!   - `POST /decrypt/acc-checks` - partial ACC-check decryptions.
+//!   - `POST /decrypt/fps`        - partial credential-fp decryptions.
+//!   - `POST /decrypt/tally`      - partial tally decryptions.
 //!
 //! The service loads its DKG share (`tt-{i}-share.json`) per request (RT
-//! precedent) and keeps the opaque ζ VSS state between round 1 and combine in
-//! a session keyed by the driver-chosen label (design lock (e)).  All tally
+//! precedent) and keeps the opaque zeta VSS state between round 1 and combine in
+//! a session keyed by the driver-chosen label.  All tally
 //! endpoints require the service bearer token, and all crypto runs in
 //! `tokio::task::spawn_blocking`.
 //!
-//! Trust assumption (§6.3, documented per M8 validation L5): the `/decrypt/*`
-//! endpoints partially decrypt whatever ciphertexts the request carries — a
+//! Trust assumption (README deviation 14): the `/decrypt/*`
+//! endpoints partially decrypt whatever ciphertexts the request carries - a
 //! TT cannot distinguish pipeline ciphertexts from others, so a coordinator
-//! holding ≥ t_TT service tokens is a decryption oracle for arbitrary
+//! holding >= t_TT service tokens is a decryption oracle for arbitrary
 //! ciphertexts.  This matches the endpoint catalog and the library `partial_*`
 //! API; the mitigations are the per-service bearer tokens and the public
 //! audit trail (every decryption the tally *uses* must be published and is
@@ -62,7 +62,7 @@ use crate::protocol::tls::rustls_config_for_service;
 
 type G = RistrettoGroup;
 
-/// Upper bound on concurrently open ζ VSS sessions (the serial tally driver
+/// Upper bound on concurrently open zeta VSS sessions (the serial tally driver
 /// needs 2; anything near this cap indicates driver misbehaviour).
 const MAX_ZETA_SESSIONS: usize = 8;
 
@@ -73,17 +73,17 @@ pub struct TtState {
     signing_key_seed: SecretString,
     service_token: SecretString,
     clock: LogicalClock,
-    /// Election context for context-bound tally operations (M8).
+    /// Election context for context-bound tally operations.
     election_context: ElectionContext<G>,
     /// Path to this party's `tt-{i}-share.json` DKG share.
     share_path: std::path::PathBuf,
-    /// Dedicated operation seed (`tt-{i}-seed.bin`, §9.2) for proof nonces.
+    /// Dedicated operation seed (`tt-{i}-seed.bin`) for proof nonces.
     actor_seed: ActorSeed,
     /// Number of TT parties / reconstruction threshold (from configuration).
     n_tt: usize,
     t_tt: usize,
     op_counter: Arc<AtomicU64>,
-    /// Open ζ VSS sessions, keyed by the driver-chosen label (design lock (e)).
+    /// Open zeta VSS sessions, keyed by the driver-chosen label.
     zeta_sessions: Arc<Mutex<HashMap<String, ZetaVssState<G>>>>,
 }
 
@@ -193,7 +193,7 @@ async fn status_handler(Extension(state): Extension<Arc<TtState>>) -> Json<Statu
     })
 }
 
-// ── ζ VSS (§3.9 steps 6–7, design lock (e)) ─────────────────────────────────
+// -- zeta VSS (Sec. 3.9 steps 6-7) ---------------------------------
 
 #[derive(Debug, Deserialize)]
 pub struct ZetaRound1Request {
@@ -201,7 +201,7 @@ pub struct ZetaRound1Request {
     pub session: String,
 }
 
-/// Start a ζ VSS session: Feldman-share a fresh local ζ_i over `g1`.
+/// Start a zeta VSS session: Feldman-share a fresh local zeta_i over `g1`.
 async fn zeta_round1_handler(
     Extension(state): Extension<Arc<TtState>>,
     headers: HeaderMap,
@@ -224,7 +224,7 @@ async fn zeta_round1_handler(
         let mut sessions = state.zeta_sessions.lock().await;
         if sessions.len() >= MAX_ZETA_SESSIONS && !sessions.contains_key(&req.session) {
             return Err(TtError::BadRequest(format!(
-                "too many open ζ VSS sessions (max {MAX_ZETA_SESSIONS})"
+                "too many open zeta VSS sessions (max {MAX_ZETA_SESSIONS})"
             )));
         }
         sessions.insert(req.session, vss_state);
@@ -245,7 +245,7 @@ pub struct ZetaCombineResponse {
     pub sub_share: <G as GroupScalar>::Scalar,
 }
 
-/// Combine ζ VSS broadcasts into this party's sub-share; consumes the session.
+/// Combine zeta VSS broadcasts into this party's sub-share; consumes the session.
 async fn zeta_combine_handler(
     Extension(state): Extension<Arc<TtState>>,
     headers: HeaderMap,
@@ -254,14 +254,14 @@ async fn zeta_combine_handler(
     state.require_bearer(&headers)?;
     // Shape validation before the library call: `combine_zeta_vss` indexes
     // `shares_for_others[id-1]` unchecked, so a short broadcast would panic
-    // (→ 500) instead of failing the request.
+    // (-> 500) instead of failing the request.
     if req.broadcasts.is_empty() {
-        return Err(TtError::BadRequest("ζ VSS broadcasts missing".into()));
+        return Err(TtError::BadRequest("zeta VSS broadcasts missing".into()));
     }
     for broadcast in &req.broadcasts {
         if broadcast.from_id == 0 || broadcast.from_id > state.n_tt {
             return Err(TtError::BadRequest(format!(
-                "ζ VSS broadcast from_id {} out of range 1..={}",
+                "zeta VSS broadcast from_id {} out of range 1..={}",
                 broadcast.from_id, state.n_tt
             )));
         }
@@ -269,7 +269,7 @@ async fn zeta_combine_handler(
             || broadcast.commitments.len() != state.t_tt
         {
             return Err(TtError::BadRequest(format!(
-                "ζ VSS broadcast from party {} has wrong shape",
+                "zeta VSS broadcast from party {} has wrong shape",
                 broadcast.from_id
             )));
         }
@@ -279,18 +279,18 @@ async fn zeta_combine_handler(
         .lock()
         .await
         .remove(&req.session)
-        .ok_or_else(|| TtError::BadRequest("unknown ζ VSS session".into()))?;
+        .ok_or_else(|| TtError::BadRequest("unknown zeta VSS session".into()))?;
     let broadcasts = req.broadcasts;
     let (id, sub_share) = tokio::task::spawn_blocking(move || {
         ThresholdTabulationTeller::<G>::combine_zeta_vss(&vss_state, &broadcasts)
     })
     .await
     .map_err(|e| TtError::Internal(e.to_string()))?
-    .map_err(|e| TtError::BadRequest(format!("ζ VSS combine failed: {e}")))?;
+    .map_err(|e| TtError::BadRequest(format!("zeta VSS combine failed: {e}")))?;
     Ok(Json(ZetaCombineResponse { id, sub_share }))
 }
 
-// ── Partial decryptions (§3.9, design lock (b)) ─────────────────────────────
+// -- Partial decryptions (Sec. 3.9) -----------------------------
 
 #[derive(Debug, Deserialize)]
 #[serde(bound = "")]
@@ -298,7 +298,7 @@ pub struct DecryptOxRequest {
     pub fps: VerifiableFingerprints<G>,
 }
 
-/// Per-party ox-fingerprint decryptions (§3.9 steps 8–9).
+/// Per-party ox-fingerprint decryptions (Sec. 3.9 steps 8-9).
 async fn decrypt_ox_handler(
     Extension(state): Extension<Arc<TtState>>,
     headers: HeaderMap,
@@ -326,7 +326,7 @@ pub struct AccChecksRequest {
     pub zeta: <G as GroupScalar>::Scalar,
 }
 
-/// Per-party ACC-check decryptions over the shuffled votes (§3.9 steps 12–14).
+/// Per-party ACC-check decryptions over the shuffled votes (Sec. 3.9 steps 12-14).
 async fn decrypt_acc_checks_handler(
     Extension(state): Extension<Arc<TtState>>,
     headers: HeaderMap,
@@ -358,7 +358,7 @@ pub struct DecryptFpsResponse {
     pub vote_fps: Vec<VerifiablePartialDecryption<G>>,
 }
 
-/// Per-party credential-fingerprint decryptions (§3.9 steps 20–24).
+/// Per-party credential-fingerprint decryptions (Sec. 3.9 steps 20-24).
 async fn decrypt_fps_handler(
     Extension(state): Extension<Arc<TtState>>,
     headers: HeaderMap,
@@ -389,7 +389,7 @@ pub struct DecryptTallyResponse {
     pub l2: Vec<Vec<VerifiablePartialDecryption<G>>>,
 }
 
-/// Per-party tally decryptions over the homomorphic sum (§3.9 steps 26–29).
+/// Per-party tally decryptions over the homomorphic sum (Sec. 3.9 steps 26-29).
 async fn decrypt_tally_handler(
     Extension(state): Extension<Arc<TtState>>,
     headers: HeaderMap,
@@ -425,7 +425,7 @@ impl IntoResponse for TtError {
             Self::Json(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            // Internal failures are logged but not leaked (style guide §03).
+            // Internal failures are logged but not leaked.
             Self::Internal(_) => {
                 tracing::error!(error = %self, "tt-server internal error");
                 (
@@ -535,7 +535,7 @@ async fn load_election_context(settings: &Settings) -> anyhow::Result<ElectionCo
         .map_err(|e| anyhow::anyhow!("failed to parse election context: {e}"))
 }
 
-/// Load this service's dedicated operation seed (`{name}-seed.bin`, §9.2).
+/// Load this service's dedicated operation seed (`{name}-seed.bin`).
 async fn load_actor_seed(settings: &Settings) -> anyhow::Result<ActorSeed> {
     let path = ceremony_dir(settings).join(format!("{}-seed.bin", settings.service.name));
     let bytes = tokio::fs::read(&path)

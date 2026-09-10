@@ -1,8 +1,8 @@
-//! Domain newtypes (style guide §10: parse, don't validate).
+//! Domain newtypes (parse, don't validate).
 //!
 //! Every raw value crossing an HTTP/CLI boundary is parsed once into a type
 //! that guarantees its invariant; validation never scatters to use sites.
-//! Unit tests are co-located (§10).
+//! Unit tests are co-located.
 
 use std::{fmt, str::FromStr};
 
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 // region: ---Vid
 
-/// Pseudonymous voter identifier (§3.5.3: a random positive integer,
+/// Pseudonymous voter identifier (Sec. 3.5.3: a random positive integer,
 /// distinct per voter; 0 is reserved as "unassigned").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "u64", into = "u64")]
@@ -74,14 +74,14 @@ impl FromStr for Vid {
 /// The voting PIN (library constraint `MAX_PIN = 10^8`: at most 8 decimal
 /// digits, leading zeros allowed).
 ///
-/// The PIN is a secret: `Debug` is redacted. `Display` reveals it — that is
-/// the deliberate voter-facing "show PIN" path (§3.6.3), never used in logs.
+/// The PIN is a secret: `Debug` is redacted. `Display` reveals it - that is
+/// the deliberate voter-facing "show PIN" path (Sec. 3.6.3), never used in logs.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "u32", into = "u32")]
 pub struct PinCode(u32);
 
 impl PinCode {
-    /// 10^8 — mirrors `evoting::constants::MAX_PIN`.
+    /// 10^8 - mirrors `evoting::constants::MAX_PIN`.
     pub const MAX: u32 = 100_000_000;
 
     pub fn new(value: u32) -> Result<Self, String> {
@@ -205,18 +205,18 @@ macro_rules! hash_newtype {
 
 hash_newtype!(
     CommB,
-    "Ballot commitment `commB = H(B, rndcomm)` used by the casting token (§5.3.1.6)."
+    "Ballot commitment `commB = H(B, rndcomm)` used by the casting token (Sec. 5.3.1.6)."
 );
 hash_newtype!(
     BallotDigest,
-    "Ballot digest `H(B)` published on the WBB during the voting phase (§3.8.4)."
+    "Ballot digest `H(B)` published on the WBB during the voting phase (Sec. 3.8.4)."
 );
 
 // endregion: ---Hash newtypes
 
 // region: ---TokenValue
 
-/// Opaque single-use authorization token (§5.3 simplified, D3).
+/// Opaque single-use authorization token (Sec. 5.3 simplified).
 /// `Debug` is redacted; `Display` emits base64url for transport.
 /// Deliberately not `Copy`: tokens must not be duplicated implicitly.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -385,7 +385,7 @@ impl From<EntityId> for String {
 
 // region: ---ReferendumOption
 
-/// The three options of a referendum ballot (§3.11): blank, approve, reject.
+/// The three options of a referendum ballot (Sec. 3.11): blank, approve, reject.
 /// Indices match `Choice::new(index, vec![0], params)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -420,7 +420,7 @@ impl ReferendumOption {
     pub fn label(self) -> &'static str {
         match self {
             Self::Blank => "Scheda bianca",
-            Self::Approve => "Sì",
+            Self::Approve => "Si",
             Self::Reject => "No",
         }
     }

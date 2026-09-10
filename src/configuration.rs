@@ -1,4 +1,4 @@
-//! Hierarchical configuration (style guide §07).
+//! Hierarchical configuration.
 //!
 //! Sources, in increasing priority: `configuration/base.yaml`,
 //! `configuration/{environment}.yaml` (optional), `APP_*` environment
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_aux::field_attributes::deserialize_number_from_string;
 
 /// Root settings, shared shape for every service (per-service extras are
-/// added by later milestones as their actors land).
+/// added per actor).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Settings {
     pub service: ServiceSettings,
@@ -54,7 +54,7 @@ pub struct ServiceSettings {
     pub port: u16,
 }
 
-/// TLS material locations (D16: rustls everywhere, cluster test CA).
+/// TLS material locations (rustls everywhere, cluster test CA).
 #[derive(Debug, Clone, Deserialize)]
 pub struct TlsSettings {
     pub cert_pem: String,
@@ -65,12 +65,12 @@ pub struct TlsSettings {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SeedSettings {
     /// Hex-encoded 32-byte master seed. The value committed in
-    /// `configuration/base.yaml` is the public **test-only** seed (D4);
+    /// `configuration/base.yaml` is the public **test-only** seed;
     /// real deployments override via `APP_SEEDS__MASTER_SEED`.
     pub master_seed: Secret<String>,
 }
 
-/// Deterministic logical clock (D4/§9). Timestamps in artifacts are
+/// Deterministic logical clock . Timestamps in artifacts are
 /// `base_ms + tick * tick_ms`; never wall-clock.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClockSettings {
@@ -165,7 +165,7 @@ pub struct ElectionSettings {
     pub n_voters: usize,
     #[serde(deserialize_with = "deserialize_number_from_string")]
     pub n_acc: usize,
-    /// Inner RT threshold `t'_RT` used by the ACC generator (D11).
+    /// Inner RT threshold `t'_RT` used by the ACC generator.
     #[serde(deserialize_with = "deserialize_number_from_string")]
     pub t_prime: usize,
     #[serde(deserialize_with = "deserialize_number_from_string")]
@@ -221,9 +221,9 @@ pub fn get_configuration(base_dir: &Path) -> Result<Settings, config::ConfigErro
         .try_deserialize()
 }
 
-/// Serializes every test that touches `get_configuration` — it reads
+/// Serializes every test that touches `get_configuration` - it reads
 /// process env (`APP_ENVIRONMENT`), so parallel env-mutating tests would
-/// otherwise race (§9: tests must be deterministic on repeated runs).
+/// otherwise race (tests must be deterministic on repeated runs).
 /// `pub(crate)` so every test in the crate that loads settings shares it.
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

@@ -1,14 +1,14 @@
-//! §13 flow tests over the full HTTPS cluster: coercion (ruse PIN),
+//! Protocol flow tests over the full HTTPS cluster: coercion (ruse PIN),
 //! wrong PIN, re-vote last-wins, revocation with tally filtering,
 //! new-device recovery, PIN re-send, CAT/rate-limit negatives, idempotent
 //! casting, and the public wbb-ui smoke.
 //!
-//! `wbb_policy_enforcement` (§13) lives in `m6_integration.rs`.
+//! `wbb_policy_enforcement` lives in `voting.rs`.
 
 use super::helpers::{get_json, ElectionCluster, ElectionOpts};
 
-/// V7: the ruse-PIN ballot is accepted by both BBs — indistinguishable from
-/// a real cast — and silently filtered by the tally ACC check; the valid-PIN
+/// V7: the ruse-PIN ballot is accepted by both BBs - indistinguishable from
+/// a real cast - and silently filtered by the tally ACC check; the valid-PIN
 /// ballot is counted.
 #[tokio::test]
 async fn coercion_ruse_pin() {
@@ -49,7 +49,7 @@ async fn coercion_ruse_pin() {
     assert_eq!(
         cluster.entry_type_count("cast_intended_proof").await,
         4,
-        "the coerced voter confirms the ruse ballot too — indistinguishable"
+        "the coerced voter confirms the ruse ballot too - indistinguishable"
     );
 
     let pin1 = cluster.pin(1).await;
@@ -57,7 +57,7 @@ async fn coercion_ruse_pin() {
 
     cluster.close_voting().await;
     let outcome = cluster.tally().await;
-    assert_eq!(outcome.released, 6, "3 casts × 2 BBs");
+    assert_eq!(outcome.released, 6, "3 casts x 2 BBs");
     assert_eq!(outcome.reconciled, 3);
     assert_eq!(outcome.deduped, 3, "ruse and real ballots do not merge");
     assert_eq!(outcome.valid, 2, "the ruse ballot dies at the ACC check");
@@ -91,7 +91,7 @@ async fn wrong_pin() {
 
     cluster.close_voting().await;
     let outcome = cluster.tally().await;
-    assert_eq!(outcome.released, 8, "4 casts × 2 BBs");
+    assert_eq!(outcome.released, 8, "4 casts x 2 BBs");
     assert_eq!(outcome.reconciled, 4);
     assert_eq!(
         outcome.deduped, 4,
@@ -106,7 +106,7 @@ async fn wrong_pin() {
     );
 }
 
-/// §3.9 step 10: two valid ballots from the same credential — only the
+/// Sec. 3.9 step 10: two valid ballots from the same credential - only the
 /// last-cast one survives the ox fingerprint dedup.
 #[tokio::test]
 async fn revote_last_wins() {
@@ -124,7 +124,7 @@ async fn revote_last_wins() {
 
     cluster.close_voting().await;
     let outcome = cluster.tally().await;
-    assert_eq!(outcome.released, 8, "4 casts × 2 BBs");
+    assert_eq!(outcome.released, 8, "4 casts x 2 BBs");
     assert_eq!(outcome.reconciled, 4);
     assert_eq!(
         outcome.deduped, 3,
@@ -159,11 +159,11 @@ async fn revocation() {
         )
         .await;
     let new_vid = revoked["vid"].as_u64().unwrap();
-    assert_eq!(new_vid, 9, "first spare vid is n_voters + 1 (D12)");
+    assert_eq!(new_vid, 9, "first spare vid is n_voters + 1 ");
     assert_eq!(
         cluster.entry_type_count("revocation_commitment").await,
         1,
-        "revocation commitment published (§3.7.5)"
+        "revocation commitment published (Sec. 3.7.5)"
     );
 
     // The re-issued credential delivers a fresh PIN and votes.
@@ -199,7 +199,7 @@ async fn revocation() {
     assert!(!vids.contains(&1), "revoked vid must not be eligible");
     assert!(vids.contains(&9), "spare vid must be eligible");
 
-    assert_eq!(outcome.released, 6, "3 casts × 2 BBs");
+    assert_eq!(outcome.released, 6, "3 casts x 2 BBs");
     assert_eq!(outcome.reconciled, 3);
     assert_eq!(outcome.deduped, 3, "old and spare credentials do not merge");
     assert_eq!(outcome.valid, 3, "all three ballots pass the ACC check");
@@ -289,7 +289,7 @@ async fn pin_resend() {
     assert_eq!(
         resent["pin"].as_u64().unwrap(),
         pin,
-        "re-delivered PIN equals the original (§3.7.2)"
+        "re-delivered PIN equals the original (Sec. 3.7.2)"
     );
     let verify = cluster
         .voter_post(
@@ -318,7 +318,7 @@ async fn rate_limit_and_cat() {
     cluster.open_voting().await;
     let pin = cluster.pin(0).await;
 
-    // Cast before vote: no held ballot → 400.
+    // Cast before vote: no held ballot -> 400.
     let no_ballot = cluster
         .client
         .post(format!("{}/api/cast", cluster.voter_urls[0]))
@@ -378,11 +378,11 @@ async fn rate_limit_and_cat() {
         malformed.status()
     );
 
-    // ── commB binding + single-use, at the ER enforcement point (§13).
-    //    Mint REAL casting tokens with a test-owned device: DIP assertion →
-    //    ER login → device registration with our own AtSK → /tokens/casting.
+    // -- commB binding + single-use, at the ER enforcement point.
+    //    Mint REAL casting tokens with a test-owned device: DIP assertion ->
+    //    ER login -> device registration with our own AtSK -> /tokens/casting.
     //    (BB intake calls this same /tokens/verify and maps `valid: false`
-    //    to 401 Unauthorized — asserted in M6.) ──────────────────────────────
+    //    to 401 Unauthorized - asserted in the voting tests.) ------------------------------
     use base64::Engine as _;
     use ed25519_dalek::Signer as _;
     let b64 = &base64::engine::general_purpose::STANDARD;
@@ -476,10 +476,10 @@ async fn rate_limit_and_cat() {
         "a consumed casting token must not be reusable"
     );
 
-    // ── The same two negatives observed at the BB intake itself (§13:
+    // -- The same two negatives observed at the BB intake itself (
     //    both map to 401). A released ballot with two inner elements
     //    swapped deserializes fine but has a fresh digest, so the intake
-    //    proceeds past the idempotency lookup to token verification. ──────
+    //    proceeds past the idempotency lookup to token verification. ------
     let bb_token = std::fs::read_to_string(cluster.ceremony_dir().join("bb-1-service-token.txt"))
         .unwrap()
         .trim()
@@ -516,14 +516,14 @@ async fn rate_limit_and_cat() {
             .unwrap()
             .status()
     };
-    // The recomputed commB cannot match token2's binding → 401.
+    // The recomputed commB cannot match token2's binding -> 401.
     assert_eq!(cast_at_bb().await, 401, "commB mismatch is a BB-level 401");
-    // token2 was NOT consumed by the mismatch; consume it legitimately…
+    // token2 was NOT consumed by the mismatch; consume it legitimately...
     assert!(
         verify(token2.to_string(), comm_b, true).await,
         "a mismatched attempt must not consume the token"
     );
-    // …and the consumed token is now refused at the BB too.
+    // ...and the consumed token is now refused at the BB too.
     assert_eq!(
         cast_at_bb().await,
         401,
@@ -531,7 +531,7 @@ async fn rate_limit_and_cat() {
     );
 }
 
-/// §3.9 step 2 / §3.10 1(d): a ballot that was cast but never confirmed
+/// Sec. 3.9 step 2 / Sec. 3.10 1(d): a ballot that was cast but never confirmed
 /// (no cast-as-intended disclosure) is accepted by the BBs yet discarded at
 /// release, never counted, and its absence is not a censorship finding.
 #[tokio::test]
@@ -561,7 +561,7 @@ async fn unconfirmed_ballot_excluded() {
     assert_eq!(
         cluster.entry_type_count("ballot_digest").await,
         8,
-        "4 casts × 2 BBs"
+        "4 casts x 2 BBs"
     );
     assert_eq!(
         cluster.entry_type_count("cast_intended_proof").await,
@@ -613,7 +613,7 @@ async fn unconfirmed_ballot_excluded() {
 
 /// A4 seam: a ballot cast after `close-voting` is refused by the BBs (its
 /// digest can no longer be published), leaves no stored state, and is not
-/// counted — the election stays auditable.
+/// counted - the election stays auditable.
 #[tokio::test]
 async fn late_cast_rejected() {
     let mut cluster = ElectionCluster::start(4, ElectionOpts::default()).await;
@@ -667,7 +667,7 @@ async fn late_cast_rejected() {
 }
 
 /// Swap the first pair of adjacent, distinct elements found in any array of
-/// the document — turns a released ballot into one that still deserializes
+/// the document - turns a released ballot into one that still deserializes
 /// but has a fresh digest.
 fn swap_first_distinct_array_pair(value: &mut serde_json::Value) -> bool {
     match value {
@@ -685,7 +685,7 @@ fn swap_first_distinct_array_pair(value: &mut serde_json::Value) -> bool {
     }
 }
 
-/// §12: re-casting the same held ballot is idempotent — same receipts, no
+/// Idempotent intake: re-casting the same held ballot is idempotent - same receipts, no
 /// duplicate WBB entries.
 #[tokio::test]
 async fn idempotent_casting() {
@@ -704,12 +704,12 @@ async fn idempotent_casting() {
     assert_eq!(
         cluster.entry_type_count("ballot_digest").await,
         2,
-        "one digest entry per BB — no duplicates from the replay"
+        "one digest entry per BB - no duplicates from the replay"
     );
     assert_eq!(cluster.entry_type_count("ballot_metadata").await, 2);
 }
 
-/// §13 `wbb_ui_smoke`: the public page and its proxy endpoints respond and
+/// `wbb_ui_smoke`: the public page and its proxy endpoints respond and
 /// a cast ballot's digest is findable.
 #[tokio::test]
 async fn wbb_ui_smoke() {

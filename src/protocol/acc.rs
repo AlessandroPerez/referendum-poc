@@ -1,6 +1,6 @@
-//! Anonymous credential (ACC) generation for the registration tellers (M4).
+//! Anonymous credential (ACC) generation for the registration tellers (Sec. 3.5.4).
 //!
-//! This module drives the distributed ACC protocol from §3.5.4 of the
+//! This module drives the distributed ACC protocol from Sec. 3.5.4 of the
 //! manuscript.  It is framework-free: all crypto runs synchronously and the
 //! caller decides whether to wrap it in `spawn_blocking`.
 
@@ -84,7 +84,7 @@ impl From<SerializableExtendedCiphertext> for ExtendedCiphertext<G> {
 }
 
 /// Per-credential enrollment material stored by the ER for the voter
-/// enrollment phase (M5).
+/// enrollment phase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollmentPackage {
     /// The credential point `A` recovered by threshold decryption.
@@ -122,8 +122,8 @@ impl EnrollmentPackage {
 /// The part of an enrollment package the voter receives from the ER at login.
 ///
 /// The per-RT `AccShareBroadcast`s are deliberately absent: the voter fetches
-/// those over HTTPS from ≥ t_RT registration tellers (`/credentials/deliver`),
-/// per roadmap Deviation 5 and §3.6.3.
+/// those over HTTPS from >= t_RT registration tellers (`/credentials/deliver`),
+/// per README deviation 5 and Sec. 3.6.3.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialPackage {
     /// The credential point `A` recovered by threshold decryption.
@@ -196,7 +196,7 @@ pub fn generate_credentials(
             vss_broadcasts.push(bcast);
         }
 
-        // Round 2: process VSS broadcasts and compute δ_i / share broadcasts.
+        // Round 2: process VSS broadcasts and compute delta_i / share broadcasts.
         let mut delta_broadcasts = Vec::with_capacity(n);
         let mut share_broadcasts = Vec::with_capacity(n);
         for (teller, gen) in tellers.iter_mut().zip(generators.iter_mut()) {
@@ -246,7 +246,7 @@ pub fn generate_credentials(
         )?;
 
         // Build the public ACC so we can publish the short form.  The voter
-        // will rerun `voter_build_acc` during enrollment (M5) with the same
+        // will rerun `voter_build_acc` during enrollment with the same
         // material; the public list only needs the encrypted credential.
         let (_builder, _pin, public_acc) = voter_build_acc(
             &election_context.pk,
@@ -265,12 +265,12 @@ pub fn generate_credentials(
     Ok((packages, short_accs))
 }
 
-/// WBB staging threshold for RT-role entries (D11; matches the fork's
-/// hardcoded `setup,RT,acc_pub_key,t≥2` policy row).  Distinct from the
-/// crypto thresholds `t_rt`/`t′`, which they merely happen to equal.
+/// WBB staging threshold for RT-role entries (matches the fork's
+/// hardcoded `setup,RT,acc_pub_key,t>=2` policy row).  Distinct from the
+/// crypto thresholds `t_rt`/`t'`, which they merely happen to equal.
 pub const WBB_RT_STAGING_THRESHOLD: usize = 2;
 
-/// Build the WBB data string for the `setup,RT,acc_pub_key,2,…` entry.
+/// Build the WBB data string for the `setup,RT,acc_pub_key,2,...` entry.
 ///
 /// The content (the JSON-encoded `ShortPublicACC` list) is base64-encoded so
 /// the CSV payload does not contain commas.
@@ -284,7 +284,7 @@ pub fn build_acc_pub_key_data_string(short_accs: &[ShortPublicACC<G>]) -> Result
 }
 
 /// Derive a deterministic ACC-generation RNG from the RT operation seeds
-/// (`rt-{i}-seed.bin`, §9.2).
+/// (`rt-{i}-seed.bin`).
 ///
 /// Hashing the three dedicated operation seeds together yields a seed that is
 /// available to the admin driver without requiring the master seed, and keeps

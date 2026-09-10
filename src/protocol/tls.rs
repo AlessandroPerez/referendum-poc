@@ -1,8 +1,8 @@
-//! Deterministic cluster PKI for in-app TLS (roadmap §9 / D16).
+//! Deterministic cluster PKI for in-app TLS .
 //!
 //! Generates a single cluster test CA and per-service leaf certificates from
 //! seeded bytes. All certificates use P-256 ECDSA, have a fixed validity window
-//! (2026-01-01 → 2028-01-01), and carry SANs for `localhost` and `127.0.0.1`.
+//! (2026-01-01 -> 2028-01-01), and carry SANs for `localhost` and `127.0.0.1`.
 
 use p256::{pkcs8::EncodePrivateKey, SecretKey};
 use rcgen::{
@@ -168,7 +168,7 @@ pub fn issue_service_cert(
     })
 }
 
-/// Build a `reqwest::Client` that trusts only the cluster CA (D16).
+/// Build a `reqwest::Client` that trusts only the cluster CA.
 ///
 /// The built-in webpki root store is explicitly disabled so the cluster CA is
 /// the sole trust anchor.

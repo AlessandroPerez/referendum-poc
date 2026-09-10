@@ -1,8 +1,8 @@
-//! Error types (style guide §03).
+//! Error types.
 //!
 //! `thiserror` enum for failures the caller (or the HTTP boundary) must handle
 //! differently per variant; `anyhow` for unexpected errors that are only
-//! reported. Errors are logged exactly once — where they are handled
+//! reported. Errors are logged exactly once - where they are handled
 //! (`IntoResponse`), never before propagation.
 
 use axum::{
@@ -14,27 +14,27 @@ use axum::{
 /// Crate-wide error type.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// Caller-fixable validation failure → 400.
+    /// Caller-fixable validation failure -> 400.
     #[error("{0}")]
     Validation(String),
 
-    /// Missing or invalid credentials → 401.
+    /// Missing or invalid credentials -> 401.
     #[error("unauthorized")]
     Unauthorized,
 
-    /// Authenticated but not allowed → 403.
+    /// Authenticated but not allowed -> 403.
     #[error("forbidden: {0}")]
     Forbidden(String),
 
-    /// Missing resource → 404.
+    /// Missing resource -> 404.
     #[error("not found: {0}")]
     NotFound(String),
 
-    /// Duplicate or conflicting operation → 409.
+    /// Duplicate or conflicting operation -> 409.
     #[error("conflict: {0}")]
     Conflict(String),
 
-    /// Unexpected internal failure → 500. Cause chain preserved via `anyhow`.
+    /// Unexpected internal failure -> 500. Cause chain preserved via `anyhow`.
     #[error(transparent)]
     Unexpected(#[from] anyhow::Error),
 }
@@ -72,7 +72,7 @@ impl IntoResponse for Error {
             Self::Forbidden(m) => (StatusCode::FORBIDDEN, m.clone()),
             Self::NotFound(m) => (StatusCode::NOT_FOUND, m.clone()),
             Self::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
-            // Logged here, at the handling boundary — and nowhere else (§03).
+            // Logged here, at the handling boundary - and nowhere else (Sec. 03).
             Self::Unexpected(e) => {
                 tracing::error!(error = ?e, "unexpected internal error");
                 (

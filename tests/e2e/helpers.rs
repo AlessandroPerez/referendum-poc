@@ -1,5 +1,5 @@
 //! Shared e2e harness (spawn cluster, seeded determinism, WBB process).
-//! Grows per roadmap milestones M2+.
+//! Shared by every end-to-end test.
 
 use std::{
     net::TcpListener,
@@ -284,7 +284,7 @@ fn init_checkpoints_db(path: &Path) -> anyhow::Result<()> {
 /// Serializes the full-cluster e2e tests.  Each spawns ~a dozen servers on
 /// ports found by bind-then-release (`free_port`), and two clusters booting
 /// concurrently in one process can steal each other's just-released ports
-/// (the documented §9.5 race).  Holding this guard for the duration of a
+/// (the documented port race).  Holding this guard for the duration of a
 /// cluster test removes the intra-process race entirely.
 pub async fn cluster_guard() -> tokio::sync::MutexGuard<'static, ()> {
     static CLUSTER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -294,9 +294,9 @@ pub async fn cluster_guard() -> tokio::sync::MutexGuard<'static, ()> {
 /// Allocate a port for a cluster service.
 ///
 /// Ports are taken from a private range BELOW the kernel's ephemeral range
-/// (Linux default 32768–60999): a `bind(0)`-then-release port can be grabbed
+/// (Linux default 32768-60999): a `bind(0)`-then-release port can be grabbed
 /// as the SOURCE port of any outgoing client connection before the server
-/// binds it (the §9.5 race, observed as `Address already in use` flakes), but
+/// binds it (the port race, observed as `Address already in use` flakes), but
 /// ports outside the ephemeral range are never handed out that way.  The
 /// counter makes successive allocations distinct within a process; each
 /// candidate is still bind-probed so unrelated listeners are skipped.
@@ -337,14 +337,14 @@ impl Drop for WbbProcess {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// M9 full-election harness (§13 suite, style guide §05 `spawn_cluster()`).
+// ===========================================================================
+// Full-election harness (`spawn_cluster()`).
 //
-// Boots the whole system — ceremony, WBB, DIP/NS/ER, RT×3, BB×2, TT×3,
-// wbb-ui, N voter-servers — and exposes the voter/admin actions the §13
+// Boots the whole system - ceremony, WBB, DIP/NS/ER, RTx3, BBx2, TTx3,
+// wbb-ui, N voter-servers - and exposes the voter/admin actions the protocol
 // tests drive. Holds the cluster guard for its lifetime, so tests using it
 // are serialized automatically.
-// ═══════════════════════════════════════════════════════════════════════════
+// ===========================================================================
 
 /// Tunables for a harness cluster.
 pub struct ElectionOpts {
@@ -563,7 +563,7 @@ impl ElectionCluster {
 
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        // ER publishes the setup entries (A2) — the auditor and tally read
+        // ER publishes the setup entries (A2) - the auditor and tally read
         // the election context from the log itself.
         let setup = cluster
             .client
@@ -618,7 +618,7 @@ impl ElectionCluster {
         read_admin_token(self.temp.path())
     }
 
-    /// Enroll voter `i` (0-based) through V1–V4 and store the passphrase.
+    /// Enroll voter `i` (0-based) through V1-V4 and store the passphrase.
     pub async fn enroll(&mut self, i: usize) -> String {
         let base_url = self.voter_urls[i].clone();
         let fiscal_id = format!("VOTER-{:03}", i + 1);
@@ -679,7 +679,7 @@ impl ElectionCluster {
         ruse["ruse_pin"].as_u64().expect("ruse pin")
     }
 
-    /// `POST /api/vote` — returns the full response (digest, emoji).
+    /// `POST /api/vote` - returns the full response (digest, emoji).
     pub async fn vote(&self, i: usize, option: &str, pin: u64) -> serde_json::Value {
         self.voter_post(
             i,
@@ -691,7 +691,7 @@ impl ElectionCluster {
         .await
     }
 
-    /// `POST /api/cast` — returns the full response (receipts).
+    /// `POST /api/cast` - returns the full response (receipts).
     pub async fn cast(&self, i: usize) -> serde_json::Value {
         self.voter_post(
             i,
@@ -702,8 +702,8 @@ impl ElectionCluster {
     }
 
     /// Vote, cast to both BBs (asserting 2 receipts) and CONFIRM the
-    /// cast-as-intended disclosure (§3.8.4 steps 8–17) — the full voter
-    /// flow; only confirmed ballots are released at tally (§3.9 step 2).
+    /// cast-as-intended disclosure (Sec. 3.8.4 steps 8-17) - the full voter
+    /// flow; only confirmed ballots are released at tally (Sec. 3.9 step 2).
     /// Returns the vote response (digest, emoji).
     pub async fn vote_and_cast(&self, i: usize, option: &str, pin: u64) -> serde_json::Value {
         let vote = self.vote_and_cast_unconfirmed(i, option, pin).await;
@@ -721,7 +721,7 @@ impl ElectionCluster {
         vote
     }
 
-    /// Vote and cast WITHOUT the cast-as-intended confirmation — such a
+    /// Vote and cast WITHOUT the cast-as-intended confirmation - such a
     /// ballot is accepted by the BBs but must never be released or counted.
     pub async fn vote_and_cast_unconfirmed(
         &self,
@@ -749,7 +749,7 @@ impl ElectionCluster {
         post_json(&self.client, &format!("{}{path}", self.voter_urls[i]), body).await
     }
 
-    /// Run the full §3.9 tally driver over HTTPS.
+    /// Run the full Sec. 3.9 tally driver over HTTPS.
     pub async fn tally(&self) -> TallyOutcome {
         let url = |p: &u16| Url::parse(&format!("https://127.0.0.1:{p}/")).unwrap();
         run_tally(TallyConfig {
@@ -803,12 +803,12 @@ impl ElectionCluster {
         }
     }
 
-    /// §3.10 universal verification from the log alone.
+    /// Sec. 3.10 universal verification from the log alone.
     pub async fn audit(&self) -> AuditReport {
         run_audit(self.audit_config()).await.expect("audit run")
     }
 
-    /// Count WBB entries of one §4.4 type.
+    /// Count WBB entries of one entry type.
     pub async fn entry_type_count(&self, wanted: &str) -> usize {
         let entries = self.wbb.client.entries().await.expect("wbb entries");
         entries
@@ -844,7 +844,7 @@ fn read_admin_token(ceremony_dir: &Path) -> String {
         .to_string()
 }
 
-/// V1–V4: login, enroll, wait for PIN readiness, retrieve the PIN.
+/// V1-V4: login, enroll, wait for PIN readiness, retrieve the PIN.
 async fn enroll_on(client: &reqwest::Client, base_url: &str, fiscal_id: &str) -> String {
     let login = post_json(
         client,
@@ -872,7 +872,7 @@ async fn enroll_on(client: &reqwest::Client, base_url: &str, fiscal_id: &str) ->
     passphrase
 }
 
-/// Poll `/api/status` until the NS reports ≥ t_RT shares ready.
+/// Poll `/api/status` until the NS reports >= t_RT shares ready.
 pub async fn wait_pin_ready(client: &reqwest::Client, base_url: &str, passphrase: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {

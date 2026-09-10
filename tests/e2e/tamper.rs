@@ -1,13 +1,13 @@
-//! §13 `auditor_detects_tamper`: the auditor FAILs — identifying the step —
+//! `auditor_detects_tamper`: the auditor FAILs - identifying the step -
 //! on tampered copies of the log. Three insider-grade tampers (re-signed
 //! with the REAL ceremony keys, so only the cryptographic checks can catch
 //! them) plus a plain signature flip:
 //!
-//!   t1  a censored `encrypted_ballot` release        → `release_completeness`
-//!   t2  a forged decryption share (ox pipeline)      → `ox_dedup`
-//!   t3  forged `tally_result` counts                 → `tally_result`
-//!   t5  a released ballot with its confirmation gone → `cai_confirmation`
-//!   t4  a flipped signature byte                     → `entry_signatures`
+//!   t1  a censored `encrypted_ballot` release        -> `release_completeness`
+//!   t2  a forged decryption share (ox pipeline)      -> `ox_dedup`
+//!   t3  forged `tally_result` counts                 -> `tally_result`
+//!   t5  a released ballot with its confirmation gone -> `cai_confirmation`
+//!   t4  a flipped signature byte                     -> `entry_signatures`
 
 use std::collections::HashMap;
 
@@ -58,7 +58,7 @@ async fn auditor_detects_tamper() {
     .map(|(id, name)| (id.to_string(), cluster.signing_key(name)))
     .collect();
 
-    // ── t1: censor one encrypted_ballot release (coordinator/BB collusion) ─
+    // -- t1: censor one encrypted_ballot release (coordinator/BB collusion) -
     let mut censored = raw.clone();
     let victim = censored
         .iter()
@@ -69,9 +69,9 @@ async fn auditor_detects_tamper() {
     assert!(!report.ok(), "censored release must FAIL");
     assert_step_failed(&report, "release_completeness");
 
-    // ── t2: forge a decryption share in the ox pipeline, re-signed by all
-    //        three TTs — caught by the per-partial proof check against the
-    //        embedded H_i and/or the master-key binding ────────────────────
+    // -- t2: forge a decryption share in the ox pipeline, re-signed by all
+    //        three TTs - caught by the per-partial proof check against the
+    //        embedded H_i and/or the master-key binding --------------------
     let mut forged = raw.clone();
     let ox_pos = forged
         .iter()
@@ -93,10 +93,10 @@ async fn auditor_detects_tamper() {
     assert!(!report.ok(), "forged decryption share must FAIL");
     assert_step_failed(&report, "ox_dedup");
 
-    // ── t2b: swap the `from_id` labels of two partials. The per-partial
+    // -- t2b: swap the `from_id` labels of two partials. The per-partial
     //        NIZKs ignore `from_id`, but the Lagrange aggregation inside
     //        `ThresholdDecOk::verify` (and the master-key binding behind it)
-    //        depends on the labels, so the decryption check fails ──────────
+    //        depends on the labels, so the decryption check fails ----------
     let mut mislabeled = raw.clone();
     {
         let entry = &mut mislabeled[ox_pos].1;
@@ -109,13 +109,13 @@ async fn auditor_detects_tamper() {
     assert!(!report.ok(), "mislabeled decryption shares must FAIL");
     assert_step_failed(&report, "ox_dedup");
 
-    // ── t2c: the pure M8-M2 attack — replace the ox decryptions with a
+    // -- t2c: the pure share-forgery attack - replace the ox decryptions with a
     //        COMPLETE fake-DKG set. Three fabricated TT shares produce
     //        partials whose NIZKs are all honest w.r.t. their own embedded
     //        H_i and whose aggregation is self-consistent, so
     //        `ThresholdDecOk::verify` passes; ONLY the auditor's master-key
     //        binding (interpolating the H_i against the ceremony master
-    //        key) can catch it ──────────────────────────────────────────────
+    //        key) can catch it ----------------------------------------------
     let mut fake_dkg = raw.clone();
     {
         use dlog_group::group::GroupScalar as _;
@@ -169,7 +169,7 @@ async fn auditor_detects_tamper() {
         step.detail
     );
 
-    // ── t3: forge the announced counts, re-signed by all three TTs ────────
+    // -- t3: forge the announced counts, re-signed by all three TTs --------
     let mut cooked = raw.clone();
     let result_pos = cooked
         .iter()
@@ -186,8 +186,8 @@ async fn auditor_detects_tamper() {
     assert!(!report.ok(), "forged counts must FAIL");
     assert_step_failed(&report, "tally_result");
 
-    // ── t5: drop one cast_intended_proof — a BB releasing a ballot without
-    //        its published confirmation violates §3.9 step 2 / §3.10 1(d) ──
+    // -- t5: drop one cast_intended_proof - a BB releasing a ballot without
+    //        its published confirmation violates Sec. 3.9 step 2 / Sec. 3.10 1(d) --
     let mut unconfirmed = raw.clone();
     let cai_pos = unconfirmed
         .iter()
@@ -198,7 +198,7 @@ async fn auditor_detects_tamper() {
     assert!(!report.ok(), "release of an unconfirmed ballot must FAIL");
     assert_step_failed(&report, "cai_confirmation");
 
-    // ── t4: flip a signature byte (no insider keys involved) ──────────────
+    // -- t4: flip a signature byte (no insider keys involved) --------------
     let mut flipped = raw.clone();
     let sig_pos = flipped
         .iter()
@@ -224,7 +224,7 @@ fn assert_step_failed(report: &referendum_poc::actors::auditor::AuditReport, ste
     );
 }
 
-/// The §4.4 entry type of a raw log entry, if its data decodes.
+/// The entry type of a raw log entry, if its data decodes.
 fn entry_type_of(entry: &serde_json::Value) -> Option<String> {
     let data = BASE64.decode(entry.get("data")?.as_str()?).ok()?;
     Some(parse_wbb_data(&data)?.entry_type)
@@ -239,7 +239,7 @@ fn payload_of(entry: &serde_json::Value) -> Option<serde_json::Value> {
 }
 
 /// Swap the first two DISTINCT values found under `key` anywhere in the
-/// document — structure-agnostic share forgery.
+/// document - structure-agnostic share forgery.
 fn swap_two_values_of_key(value: &mut serde_json::Value, key: &str) -> bool {
     fn collect(v: &serde_json::Value, key: &str, path: &str, out: &mut Vec<String>) {
         match v {

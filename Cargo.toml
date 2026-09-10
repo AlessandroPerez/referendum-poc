@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
-description = "Referendum proof-of-concept of the Vote App protocol (PhD thesis ch. 3 + §3.11) on evoting-rs"
+description = "Referendum proof-of-concept of the Vote App protocol (PhD thesis ch. 3 + Sec. 3.11) on evoting-rs"
 
-# Style guide §01: slim binaries, fat library. All logic lives in the lib;
+# Slim binaries, fat library. All logic lives in the lib;
 # every binary below is a thin entrypoint delegating to `referendum_poc`.
 [lib]
 name = "referendum_poc"
@@ -62,7 +62,7 @@ evoting = { path = "../resources/evoting-rs" }
 dlog-group = { path = "../resources/evoting-rs/pet-crypto-primitives-rs/crates/dlog-group" }
 dlog-sigma-primitives = { path = "../resources/evoting-rs/pet-crypto-primitives-rs/crates/dlog-sigma-primitives" }
 
-# Web framework + async runtime (style guide §06)
+# Web framework + async runtime
 axum = { version = "0.7", features = ["macros"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
@@ -77,18 +77,18 @@ serde_cbor = "0.10"
 serde-aux = "4"
 serde_yaml = "0.9"
 
-# Error handling (style guide §03)
+# Error handling
 thiserror = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 
-# Telemetry (style guide §04)
+# Telemetry
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["registry", "env-filter"] }
 tracing-bunyan-formatter = "0.3"
 tracing-log = "0.2"
 
-# Configuration & secrets (style guide §07/§09)
+# Configuration & secrets
 config = "0.14"
 secrecy = { version = "0.8", features = ["serde"] }
 time = "0.3"

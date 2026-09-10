@@ -1,4 +1,4 @@
-//! Deterministic election setup ceremony (roadmap M3.5).
+//! Deterministic election setup ceremony .
 //!
 //! Runs the TT and RT distributed key generations, assembles the election
 //! public key, and builds the `ElectionContext`. All randomness is drawn from

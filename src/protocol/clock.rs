@@ -1,8 +1,8 @@
-//! Logical clock for deterministic timestamps (roadmap §9).
+//! Logical clock for deterministic timestamps .
 //!
 //! The PoC avoids wall-clock time in artifact paths. Instead, every timestamp
 //! is derived from a fixed base plus a tick counter that the driver advances.
-//! This makes WBB checkpoints, receipts, and τ delays reproducible across runs.
+//! This makes WBB checkpoints, receipts, and tau delays reproducible across runs.
 
 use rand::Rng;
 
@@ -47,9 +47,9 @@ impl LogicalClock {
         self.tick
     }
 
-    /// Sample a τ delay (in ticks) from `{min..=max}` using the provided RNG.
+    /// Sample a tau delay (in ticks) from `{min..=max}` using the provided RNG.
     ///
-    /// Roadmap §9: τ is drawn from {2..5} ticks for PIN-request notifications.
+    /// tau is drawn from {2..5} ticks for PIN-request notifications.
     pub fn sample_tau<R: Rng>(&self, rng: &mut R, min: u64, max: u64) -> u64 {
         assert!(min <= max, "tau range must be non-empty");
         rng.gen_range(min..=max)

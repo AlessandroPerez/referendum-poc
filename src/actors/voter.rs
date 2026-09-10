@@ -1,18 +1,18 @@
-//! Voter-facing server (M5, roadmap §6.6 / §8.3).
+//! Voter-facing server (Sec. 3.6, 3.7, 3.8, 5.3.1).
 //!
 //! Serves the enrollment SPA from `static_dir` and exposes a JSON API gated by
 //! the voter's generated passphrase (V2).  Per-voter state is persisted as one
 //! ChaCha20-Poly1305-encrypted file per vid; the passphrase is the only way to
 //! unlock it.
 //!
-//! Enrollment flow (V1–V5):
-//! 1. `POST /api/login`    — DIP assertion → ER `/login` → vid + registration token
-//! 2. `POST /api/enroll`   — passphrase + app key, device registration, PIN
-//!    request tokens → RT `/credentials/request` (τ, NS notify), NS registration
-//! 3. `POST /api/status`   — NS poll: PIN ready when ≥ t_RT notifications
-//! 4. `POST /api/pin/retrieve` — re-login → retrieval tokens → RT share
-//!    delivery → `voter_build_acc` → threshold DVNIZKP → `Voter` + PIN
-//! 5. `POST /api/pin`, `POST /api/pin/verify` — display / local check (§3.7.1)
+//! Enrollment flow (V1-V5):
+//! 1. `POST /api/login`    - DIP assertion -> ER `/login` -> vid + registration token
+//! 2. `POST /api/enroll`   - passphrase + app key, device registration, PIN
+//!    request tokens -> RT `/credentials/request` (tau, NS notify), NS registration
+//! 3. `POST /api/status`   - NS poll: PIN ready when >= t_RT notifications
+//! 4. `POST /api/pin/retrieve` - re-login -> retrieval tokens -> RT share
+//!    delivery -> `voter_build_acc` -> threshold DVNIZKP -> `Voter` + PIN
+//! 5. `POST /api/pin`, `POST /api/pin/verify` - display / local check (Sec. 3.7.1)
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -73,7 +73,7 @@ pub struct VoterState {
     bb_names: Vec<String>,
     /// Read-only WBB access for publication checks (V14).
     wbb_client: WbbClient,
-    /// Deterministic per-voter operation RNG (§9.2); short critical sections
+    /// Deterministic per-voter operation RNG; short critical sections
     /// only, so a sync mutex is fine.
     rng: std::sync::Mutex<ActorRng>,
     /// Login state awaiting `/api/enroll`, keyed by fiscal id.
@@ -105,22 +105,22 @@ struct VoterSession {
     vid: Vid,
     registration_token: TokenValue,
     credential_package: CredentialPackage,
-    /// App-key (AtSK) seed, hex-encoded (used for CAT signing from M6 on).
+    /// App-key (AtSK) seed, hex-encoded (used for CAT signing).
     at_sk_seed: String,
     rid: Option<String>,
     ns_token: Option<TokenValue>,
     pin: Option<PinCode>,
     voter: Option<Voter<G>>,
-    /// Ballot built by `/api/vote`, awaiting cast/confirmation (§3.8).
+    /// Ballot built by `/api/vote`, awaiting cast/confirmation (Sec. 3.8).
     held: Option<HeldVote>,
     /// Cast history (receipts per BB, confirmation state).
     casts: Vec<CastRecord>,
-    /// Ruse PIN + simulated voter (V7, §3.7.3 / Deviation 4).
+    /// Ruse PIN + simulated voter (V7, Sec. 3.7.3 / Deviation 4).
     #[serde(default)]
     ruse_pin: Option<PinCode>,
     #[serde(default)]
     ruse_voter: Option<Voter<G>>,
-    /// Trusted authority selection (V10, §3.12).  `None` = all configured.
+    /// Trusted authority selection (V10, Sec. 3.12).  `None` = all configured.
     #[serde(default)]
     trusted: Option<TrustedSettings>,
 }
@@ -132,14 +132,14 @@ struct TrustedSettings {
     bbs: Vec<String>,
 }
 
-/// A built-but-not-yet-confirmed ballot with its CAI disclosure (§3.8.4).
+/// A built-but-not-yet-confirmed ballot with its CAI disclosure (Sec. 3.8.4).
 /// Never derives `Debug`: the disclosure reveals the vote.
 #[derive(Clone, Serialize, Deserialize)]
 struct HeldVote {
     ballot: Ballot<G>,
     disclosure: DiscloseCAI<G>,
     digest: BallotDigest,
-    /// Hex-encoded commitment randomness (§5.3.1.6).
+    /// Hex-encoded commitment randomness (Sec. 5.3.1.6).
     rndcomm: String,
     emoji: Vec<String>,
 }
@@ -245,9 +245,9 @@ impl VoterState {
         }
     }
 
-    /// V3: request PIN delivery — fresh pin-request tokens under a new rid,
+    /// V3: request PIN delivery - fresh pin-request tokens under a new rid,
     /// NS registration, and RT `/credentials/request` on the trusted tellers
-    /// (§5.3.1.2/.3).  Updates `session.rid`/`ns_token`.
+    /// (Sec. 5.3.1.2/.3).  Updates `session.rid`/`ns_token`.
     async fn run_pin_request(&self, session: &mut VoterSession) -> Result<(), VoterError> {
         let tokens = self
             .er_client
@@ -269,17 +269,17 @@ impl VoterState {
     }
 
     /// V4: retrieval-token share delivery + threshold DVNIZKP against the
-    /// trusted tellers, finalizing the `Voter` (§5.3.1.4/.5, §3.6.2/.3).
+    /// trusted tellers, finalizing the `Voter` (Sec. 5.3.1.4/.5, Sec. 3.6.2/.3).
     async fn run_retrieval(&self, session: &mut VoterSession) -> Result<PinCode, VoterError> {
         let rid = session.rid.clone().ok_or(VoterError::PinNotReady)?;
 
-        // Gate on NS readiness (≥ t_RT notifications, §5.3.1.4).
+        // Gate on NS readiness (>= t_RT notifications, Sec. 5.3.1.4).
         let notifications = self.ns_client.notifications(session.vid, &rid).await?;
         if notifications.notifications.len() < self.t_rt {
             return Err(VoterError::PinNotReady);
         }
 
-        // Re-login for retrieval tokens (§5.3.1.4).
+        // Re-login for retrieval tokens (Sec. 5.3.1.4).
         let auth = self
             .dip_client
             .authenticate(&session.fiscal_id)
@@ -300,7 +300,7 @@ impl VoterState {
             ));
         }
 
-        // Fetch this voter's AccShareBroadcast from t_RT tellers (§3.6.3,
+        // Fetch this voter's AccShareBroadcast from t_RT tellers (Sec. 3.6.3,
         // Deviation 5: shares travel over HTTPS from the RTs, not the ER).
         let delivery: Vec<(&RtClient, TokenValue)> = trusted
             .into_iter()
@@ -311,7 +311,7 @@ impl VoterState {
             share_broadcasts.push(rt.credentials_deliver(token).await?);
         }
 
-        // Rebuild the credential builder + PIN locally (§8.3 step 4-5).
+        // Rebuild the credential builder + PIN locally (Sec. 3.6.3).
         let election_context = self.election_context.clone();
         let rt_pk = self.rt_pk.clone();
         let package = session.credential_package.clone();
@@ -341,14 +341,14 @@ impl VoterState {
             .await
             .map_err(|e| VoterError::Protocol(e.to_string()))?;
 
-        // DVNIZKP round 1 with the RTs holding our delivery sessions (§3.6.2).
+        // DVNIZKP round 1 with the RTs holding our delivery sessions (Sec. 3.6.2).
         let mut round1 = Vec::with_capacity(delivery.len());
         for (rt, token) in &delivery {
             round1.push(rt.dvnizkp_round1(token, &a_point).await?);
         }
         let all_ids: Vec<usize> = round1.iter().map(|b| b.from_id).collect();
 
-        // Combiner step: the voter derives the S1 challenge (§3.6.2).
+        // Combiner step: the voter derives the S1 challenge (Sec. 3.6.2).
         let dv_pk = voter_builder.voter_pk();
         let election_pk = self.election_context.pk.clone();
         let mut combine_rng = self.next_rng("dvnizkp-combine");
@@ -372,7 +372,7 @@ impl VoterState {
             z1_shares.push(rt.dvnizkp_round2(token, &c1, &all_ids).await?);
         }
 
-        // Assemble, finalize, and locally verify the PIN (§3.7.1).
+        // Assemble, finalize, and locally verify the PIN (Sec. 3.7.1).
         let voter = tokio::task::spawn_blocking(move || {
             let proof =
                 ThresholdRegistrationTeller::dvnizkp_assemble(&round1, i0, c0, z0, c1, &z1_shares);
@@ -421,7 +421,7 @@ impl VoterState {
     }
 }
 
-// ── Handlers ────────────────────────────────────────────────────────────────
+// -- Handlers ----------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 struct LoginRequest {
@@ -433,7 +433,7 @@ struct LoginResponse {
     vid: Vid,
 }
 
-/// V1: eID login via DIP, then ER `/login` (§5.3.1.1).
+/// V1: eID login via DIP, then ER `/login` (Sec. 5.3.1.1).
 #[tracing::instrument(skip(state, req))]
 async fn login_handler(
     Extension(state): Extension<Arc<VoterState>>,
@@ -484,7 +484,7 @@ impl std::fmt::Debug for EnrollResponse {
 }
 
 /// V2 + V3: passphrase & app key generation, device registration, PIN request
-/// to all RTs, NS registration (§3.6.1, §5.3.1.2/.3).
+/// to all RTs, NS registration (Sec. 3.6.1, Sec. 5.3.1.2/.3).
 #[tracing::instrument(skip(state, req))]
 async fn enroll_handler(
     Extension(state): Extension<Arc<VoterState>>,
@@ -504,7 +504,7 @@ async fn enroll_handler(
         return Err(VoterError::AlreadyEnrolled);
     }
 
-    // 6-word passphrase (V2) and the EdDSA app key (§3.13), both from the
+    // 6-word passphrase (V2) and the EdDSA app key (Sec. 3.13), both from the
     // deterministic per-voter RNG.
     let passphrase = {
         let mut rng = state.next_rng("passphrase");
@@ -522,9 +522,9 @@ async fn enroll_handler(
             .to_bytes(),
     );
 
-    // Device registration (§8.3 step 2c).  pkDV does not exist yet — the DV
-    // key pair is generated by `VoterBuilder::new` at PIN retrieval (§8.3
-    // ordering note) — so the PoC registers the app key only.
+    // Device registration (Sec. 5.3.1.1).  pkDV does not exist yet - the DV
+    // key pair is generated by `VoterBuilder::new` at PIN retrieval (Sec. 3.6.1
+    // ordering note) - so the PoC registers the app key only.
     state
         .er_client
         .register_device(&pending.registration_token, "", &at_pk, None)
@@ -546,7 +546,7 @@ async fn enroll_handler(
         ruse_voter: None,
         trusted: None,
     };
-    // PIN request (§5.3.1.2/.3): tokens + NS registration + RT requests.
+    // PIN request (Sec. 5.3.1.2/.3): tokens + NS registration + RT requests.
     state.run_pin_request(&mut session).await?;
     state.save_session(&passphrase, &session).await?;
     // Seed the recovery blob (V8, Deviation 6).
@@ -579,8 +579,8 @@ struct StatusResponse {
     pin_set: bool,
 }
 
-/// Poll enrollment status: the PIN is ready once ≥ t_RT notifications arrived
-/// at the NS for the current rid (§5.3.1.4).
+/// Poll enrollment status: the PIN is ready once >= t_RT notifications arrived
+/// at the NS for the current rid (Sec. 5.3.1.4).
 #[tracing::instrument(skip(state, req))]
 async fn status_handler(
     Extension(state): Extension<Arc<VoterState>>,
@@ -618,11 +618,11 @@ impl std::fmt::Debug for PinResponse {
     }
 }
 
-/// V4: PIN delivery (§5.3.1.4/.5, §3.6.3, §3.6.2).
+/// V4: PIN delivery (Sec. 5.3.1.4/.5, Sec. 3.6.3, Sec. 3.6.2).
 ///
-/// Re-login → retrieval tokens → `AccShareBroadcast` delivery from t_RT RTs →
-/// `voter_build_acc` → `VoterBuilder::new` (DV keys) → threshold DVNIZKP with
-/// the same RTs → `build_with_dvnizkp` → `finalize` → `verify_pin`.
+/// Re-login -> retrieval tokens -> `AccShareBroadcast` delivery from t_RT RTs ->
+/// `voter_build_acc` -> `VoterBuilder::new` (DV keys) -> threshold DVNIZKP with
+/// the same RTs -> `build_with_dvnizkp` -> `finalize` -> `verify_pin`.
 #[tracing::instrument(skip(state, req))]
 async fn pin_retrieve_handler(
     Extension(state): Extension<Arc<VoterState>>,
@@ -630,8 +630,8 @@ async fn pin_retrieve_handler(
 ) -> Result<Json<PinResponse>, VoterError> {
     let mut session = state.session_for(&req.passphrase).await?;
 
-    // Idempotent: a second retrieval re-displays the stored PIN — or the
-    // ruse PIN while one is active (§3.7.3 cover story, see pin_show).
+    // Idempotent: a second retrieval re-displays the stored PIN - or the
+    // ruse PIN while one is active (Sec. 3.7.3 cover story, see pin_show).
     if let Some(pin) = session.pin {
         return Ok(Json(PinResponse {
             vid: session.vid,
@@ -654,7 +654,7 @@ async fn pin_retrieve_handler(
 
 /// Show the stored PIN (post-retrieval display).
 ///
-/// While a ruse PIN is active it is shown INSTEAD of the real one (§3.7.3
+/// While a ruse PIN is active it is shown INSTEAD of the real one (Sec. 3.7.3
 /// cover story): a coercer inspecting the device sees only the decoy; the
 /// real PIN lives in the voter's memory and stays fully usable.
 #[tracing::instrument(skip(state, req))]
@@ -693,7 +693,7 @@ struct VerifyPinResponse {
     valid: bool,
 }
 
-/// V5: local, unlimited PIN verification (§3.7.1) — no network round-trips.
+/// V5: local, unlimited PIN verification (Sec. 3.7.1) - no network round-trips.
 #[tracing::instrument(skip(state, req))]
 async fn pin_verify_handler(
     Extension(state): Extension<Arc<VoterState>>,
@@ -703,9 +703,9 @@ async fn pin_verify_handler(
     let voter = session.voter.ok_or(VoterError::PinNotRetrieved)?;
     let ruse = session.ruse_voter.clone();
     let pin = req.pin.value() as usize;
-    // §3.7.3: a ruse request SUBSTITUTES the DVNIZKP, so once a ruse PIN is
-    // active only the ruse PIN verifies locally — "PIN^valid will no longer
-    // verify … Vote App will consider PIN^ruse as correct".  The valid PIN
+    // Sec. 3.7.3: a ruse request SUBSTITUTES the DVNIZKP, so once a ruse PIN is
+    // active only the ruse PIN verifies locally - "PIN^valid will no longer
+    // verify ... Vote App will consider PIN^ruse as correct".  The valid PIN
     // keeps its ability to cast a counted vote (`vote_handler` dispatch).
     let valid = tokio::task::spawn_blocking(move || match ruse {
         Some(ruse) => ruse.verify_pin(pin).is_ok(),
@@ -748,7 +748,7 @@ struct ResultsResponse {
     tally_entries: Vec<i64>,
 }
 
-/// V15: results viewing — final counts + links to the WBB tally entries.
+/// V15: results viewing - final counts + links to the WBB tally entries.
 /// Results are public, so no passphrase is required.
 #[tracing::instrument(skip(state))]
 async fn results_handler(
@@ -805,7 +805,7 @@ struct VoteRequest {
     option: ReferendumOption,
     /// The PIN the voter types.  Deliberately NOT checked against the stored
     /// credential here: a wrong (or ruse) PIN builds a ballot that verifies
-    /// at the BB but is filtered at tally time (§3.8.2 coercion resistance).
+    /// at the BB but is filtered at tally time (Sec. 3.8.2 coercion resistance).
     pin: PinCode,
 }
 
@@ -825,7 +825,7 @@ struct VoteResponse {
     emoji: Vec<String>,
 }
 
-/// V11: build the ballot + CAI disclosure and hold it for casting (§3.8.2).
+/// V11: build the ballot + CAI disclosure and hold it for casting (Sec. 3.8.2).
 #[tracing::instrument(skip(state, req))]
 async fn vote_handler(
     Extension(state): Extension<Arc<VoterState>>,
@@ -834,7 +834,7 @@ async fn vote_handler(
     let mut session = state.session_for(&req.passphrase).await?;
     // V7 dispatch: the ruse PIN routes to the simulated voter whose forged DV
     // proof verifies locally but whose ballots are filtered at tally
-    // (§3.7.3).  Any other PIN uses the real credential.
+    // (Sec. 3.7.3).  Any other PIN uses the real credential.
     let voter = if session.ruse_pin.is_some() && session.ruse_pin == Some(req.pin) {
         session
             .ruse_voter
@@ -851,7 +851,7 @@ async fn vote_handler(
     let (ballot, disclosure) = tokio::task::spawn_blocking(move || {
         let choice = referendum_choice(option, &params)?;
         let builder = evoting::api::client::BallotBuilder::new(choice);
-        // D13: disclose the l1 code slot; l2 is trivial for a referendum.
+        // Referendum simplification (Sec. 3.11): disclose the l1 code slot; l2 is trivial for a referendum.
         Ok::<_, crate::protocol::voting::VotingError>(voter.vote_with_disclosure(
             &builder,
             pin,
@@ -892,8 +892,8 @@ struct CastResultResponse {
     emoji: Vec<String>,
 }
 
-/// V12: cast the held ballot with CAT tokens to every trusted BB (§5.3.1.6,
-/// §3.8.4 steps 1–7).
+/// V12: cast the held ballot with CAT tokens to every trusted BB (Sec. 5.3.1.6,
+/// Sec. 3.8.4 steps 1-7).
 #[tracing::instrument(skip(state, req))]
 async fn cast_handler(
     Extension(state): Extension<Arc<VoterState>>,
@@ -958,7 +958,7 @@ struct BallotStatusResponse {
     digest: BallotDigest,
     /// BB ids whose `ballot_digest` entry is on the WBB.
     published_bb_ids: Vec<u64>,
-    /// True when ≥ 2 BBs published the digest (no ⊥, §3.8.5).
+    /// True when >= 2 BBs published the digest (no bot, Sec. 3.8.5).
     no_bot: bool,
     confirmed_at_ms: Option<u64>,
 }
@@ -1024,7 +1024,7 @@ struct ConfirmResponse {
     confirmed_at_ms: u64,
 }
 
-/// V13: send the held CAI disclosure to the BBs (§3.8.4 steps 8–17).
+/// V13: send the held CAI disclosure to the BBs (Sec. 3.8.4 steps 8-17).
 #[tracing::instrument(skip(state, req))]
 async fn confirm_handler(
     Extension(state): Extension<Arc<VoterState>>,
@@ -1071,7 +1071,7 @@ impl std::fmt::Debug for RusePinResponse {
     }
 }
 
-/// V7: obtain a ruse PIN (§3.7.3, Deviation 4).  Unlimited; each call
+/// V7: obtain a ruse PIN (Sec. 3.7.3, Deviation 4).  Unlimited; each call
 /// replaces the previous ruse credential.
 #[tracing::instrument(skip(state, req))]
 async fn pin_ruse_handler(
@@ -1082,7 +1082,7 @@ async fn pin_ruse_handler(
     let voter = session.voter.clone().ok_or(VoterError::PinNotRetrieved)?;
     let real_pin = session.pin.ok_or(VoterError::PinNotRetrieved)?;
 
-    // Draw an 8-digit ruse PIN ≠ the real PIN from the operation RNG.
+    // Draw an 8-digit ruse PIN != the real PIN from the operation RNG.
     let ruse_pin = {
         let mut rng = state.next_rng("ruse-pin");
         loop {
@@ -1112,7 +1112,7 @@ async fn pin_ruse_handler(
     Ok(Json(RusePinResponse { ruse_pin }))
 }
 
-/// V6: PIN re-sending (§3.7.2) — a fresh rid′ + RT requests + retrieval.
+/// V6: PIN re-sending (Sec. 3.7.2) - a fresh rid' + RT requests + retrieval.
 /// The re-derived PIN must equal the stored one.
 #[tracing::instrument(skip(state, req))]
 async fn pin_resend_handler(
@@ -1163,7 +1163,7 @@ struct RecoverResponse {
     pin_set: bool,
 }
 
-/// V8: new-device recovery (§3.7.4, Deviation 6).  A fresh DIP login fetches
+/// V8: new-device recovery (Sec. 3.7.4, Deviation 6).  A fresh DIP login fetches
 /// the encrypted blob; only the correct passphrase decrypts it.
 #[tracing::instrument(skip(state, req))]
 async fn device_recover_handler(
@@ -1199,11 +1199,11 @@ async fn device_recover_handler(
 
 #[derive(Debug, Serialize)]
 struct RevokeResponse {
-    /// The freshly assigned spare vid (§3.7.5).
+    /// The freshly assigned spare vid (Sec. 3.7.5).
     vid: Vid,
 }
 
-/// V9: revoke the credential and start over on a spare vid (§3.7.5).
+/// V9: revoke the credential and start over on a spare vid (Sec. 3.7.5).
 #[tracing::instrument(skip(state, req))]
 async fn revoke_handler(
     Extension(state): Extension<Arc<VoterState>>,
@@ -1267,7 +1267,7 @@ struct TrustedResponse {
     bbs: Vec<String>,
 }
 
-/// V10: read the trusted authority selection (§3.12).
+/// V10: read the trusted authority selection (Sec. 3.12).
 #[tracing::instrument(skip(state, req))]
 async fn trusted_get_handler(
     Extension(state): Extension<Arc<VoterState>>,
@@ -1298,7 +1298,7 @@ impl std::fmt::Debug for TrustedPutRequest {
     }
 }
 
-/// V10: update the trusted authority selection (§3.12).  Bounds: at least
+/// V10: update the trusted authority selection (Sec. 3.12).  Bounds: at least
 /// t_RT registration tellers and at least NO_BOT_MIN_BBS ballot boxes.
 #[tracing::instrument(skip(state, req))]
 async fn trusted_put_handler(
@@ -1342,7 +1342,7 @@ async fn trusted_put_handler(
     }))
 }
 
-// ── Errors ──────────────────────────────────────────────────────────────────
+// -- Errors ------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
 enum VoterError {
@@ -1356,7 +1356,7 @@ enum VoterError {
     PinNotReady,
     #[error("PIN has not been retrieved yet")]
     PinNotRetrieved,
-    #[error("no ballot to operate on — vote (and cast) first")]
+    #[error("no ballot to operate on - vote (and cast) first")]
     NoHeldBallot,
     #[error("invalid trusted-authority selection: {0}")]
     BadSelection(String),
@@ -1388,7 +1388,7 @@ impl IntoResponse for VoterError {
             Self::PinNotRetrieved => (StatusCode::BAD_REQUEST, self.to_string()),
             Self::NoHeldBallot => (StatusCode::BAD_REQUEST, self.to_string()),
             Self::BadSelection(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            // Internal failures are logged but not leaked (style guide §03).
+            // Internal failures are logged but not leaked.
             _ => {
                 tracing::error!(error = %self, "voter-server internal error");
                 (
@@ -1401,7 +1401,7 @@ impl IntoResponse for VoterError {
     }
 }
 
-// ── Router / startup ────────────────────────────────────────────────────────
+// -- Router / startup --------------------------------------------------------
 
 pub fn router(state: Arc<VoterState>) -> Router {
     Router::new()
@@ -1580,7 +1580,7 @@ async fn load_actor_seed(settings: &Settings) -> anyhow::Result<ActorSeed> {
     Ok(ActorSeed::from_bytes(seed))
 }
 
-// ── ChaCha20-Poly1305 encryption for persisted voter state ─────────────────
+// -- ChaCha20-Poly1305 encryption for persisted voter state -----------------
 
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
@@ -1600,8 +1600,8 @@ fn encrypt_state(plaintext: &[u8], passphrase: &str) -> Result<Vec<u8>, VoterErr
     // SIV-style determinism: the salt is derived from the plaintext, so every
     // distinct plaintext gets a distinct key, making the fixed all-zero nonce
     // safe under nonce-uniqueness (one message per key).  Re-encrypting the
-    // same state yields the identical ciphertext — no randomness, so a server
-    // restart cannot cause key+nonce reuse across different plaintexts (§9).
+    // same state yields the identical ciphertext - no randomness, so a server
+    // restart cannot cause key+nonce reuse across different plaintexts.
     let mut salt_hasher = Sha3_256::new();
     salt_hasher.update(b"referendum-poc-state-salt");
     salt_hasher.update(plaintext);
@@ -1690,11 +1690,11 @@ mod tests {
     #[test]
     fn encryption_is_deterministic_and_plaintext_bound() {
         let passphrase = "correct-horse-battery-staple-mule-crank";
-        // Same plaintext → identical ciphertext (restart-safe, §9).
+        // Same plaintext -> identical ciphertext (restart-safe, deterministic).
         let c1 = encrypt_state(b"state-v1", passphrase).unwrap();
         let c2 = encrypt_state(b"state-v1", passphrase).unwrap();
         assert_eq!(c1, c2);
-        // Different plaintext → different salt, hence a different key under
+        // Different plaintext -> different salt, hence a different key under
         // the fixed nonce (no key+nonce pair ever encrypts two plaintexts).
         let c3 = encrypt_state(b"state-v2", passphrase).unwrap();
         assert_ne!(&c1[..SALT_LEN], &c3[..SALT_LEN]);

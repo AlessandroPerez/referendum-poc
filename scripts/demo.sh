@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# referendum-poc demo (roadmap M9.5): boots the whole cluster locally for a
-# manual browser demo — ceremony, WBB (Go sunlight fork), DIP/NS/ER, RT x3,
+# referendum-poc demo : boots the whole cluster locally for a
+# manual browser demo - ceremony, WBB (Go sunlight fork), DIP/NS/ER, RT x3,
 # TT x3, BB x2, one voter-server, and the public wbb-ui.
 #
 # Prerequisites: Rust stable, Go >= 1.24, sqlite3, and the sibling
@@ -117,7 +117,7 @@ cat <<EOF
    WBB log (raw):         https://127.0.0.1:8090/wbb/entries
 
  The TLS certificates are issued by the demo cluster CA, so the browser
- will warn on first visit - accept the exception (test-only PKI, D16).
+ will warn on first visit - accept the exception (test-only PKI).
 
  Try: log in with a fiscal id, enroll, wait for the PIN, vote, cast, and
  press CONFIRM (the cast-as-intended disclosure - unconfirmed ballots are

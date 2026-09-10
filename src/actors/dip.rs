@@ -1,4 +1,4 @@
-//! Digital Identity Provider (DIP) stub service (M3.1).
+//! Digital Identity Provider (DIP) stub service.
 //!
 //! DIP authenticates voters and returns a signed assertion that the ER consumes
 //! during login/device registration. The PoC uses a registry of 8 test voters

@@ -1,5 +1,5 @@
-//! M6 integration tests: CAT casting + BB intake + CAI + wbb-ui (roadmap M6.5)
-//! and WBB write-policy enforcement (§3.4.2).
+//! Voting integration tests: CAT casting + BB intake + CAI + wbb-ui
+//! and WBB write-policy enforcement (Sec. 3.4.2).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -44,7 +44,7 @@ async fn three_voters_cast_with_cat_and_cai() {
     helpers::init();
     let _cluster = helpers::cluster_guard().await;
 
-    // ── 1. Ceremony + WBB (entities incl. BBs and the phase manager) ──────
+    // -- 1. Ceremony + WBB (entities incl. BBs and the phase manager) ------
     let temp = tempfile::tempdir().expect("tempdir");
     let ceremony_dir = temp.path();
     let mut base = base_settings();
@@ -91,7 +91,7 @@ async fn three_voters_cast_with_cat_and_cai() {
     .await
     .expect("spawn wbb");
 
-    // ── 2. Credentials (setup phase) ──────────────────────────────────────
+    // -- 2. Credentials (setup phase) --------------------------------------
     let wbb_url = Url::parse(&format!("https://127.0.0.1:{}/wbb/", ports.wbb)).unwrap();
     gen_credentials(GenCredentialsConfig {
         ceremony_dir: ceremony_dir.to_path_buf(),
@@ -108,7 +108,7 @@ async fn three_voters_cast_with_cat_and_cai() {
     .await
     .expect("gen credentials");
 
-    // ── 3. Boot the cluster ───────────────────────────────────────────────
+    // -- 3. Boot the cluster -----------------------------------------------
     let mk = |name: &str, port: u16| cluster_settings(ceremony_dir, name, port, &ports, &base);
 
     tokio::spawn(dip::run(
@@ -194,13 +194,13 @@ async fn three_voters_cast_with_cat_and_cai() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let client = reqwest_client_trusting_ca(ca.cert_pem()).unwrap();
 
-    // ── 4. Enroll the three voters (M5 flow) ──────────────────────────────
+    // -- 4. Enroll the three voters ------------------------------
     let mut passphrases = Vec::new();
     for (i, base_url) in voter_urls.iter().enumerate() {
         passphrases.push(enroll_voter(&client, base_url, &format!("VOTER-00{}", i + 1)).await);
     }
 
-    // ── 5. Open the voting phase (A4) ─────────────────────────────────────
+    // -- 5. Open the voting phase (A4) -------------------------------------
     transition_phase(
         PhaseTransitionConfig {
             ceremony_dir: ceremony_dir.to_path_buf(),
@@ -218,7 +218,7 @@ async fn three_voters_cast_with_cat_and_cai() {
     let phase: serde_json::Value = get_json(&client, &format!("{ui_base}/api/phase")).await;
     assert_eq!(phase["phase"], "voting");
 
-    // ── 6. Voter 1: vote → cast → publication check → CAI confirm ─────────
+    // -- 6. Voter 1: vote -> cast -> publication check -> CAI confirm ---------
     let v1 = &voter_urls[0];
     let p1 = &passphrases[0];
     let vote1: serde_json::Value = post_json(
@@ -244,7 +244,10 @@ async fn three_voters_cast_with_cat_and_cai() {
         serde_json::json!({ "passphrase": p1 }),
     )
     .await;
-    assert_eq!(status1["no_bot"], true, "digest published by ≥2 BBs (no ⊥)");
+    assert_eq!(
+        status1["no_bot"], true,
+        "digest published by >=2 BBs (no bot)"
+    );
     assert_eq!(status1["published_bb_ids"], serde_json::json!([1, 2]));
 
     let confirm1: serde_json::Value = post_json(
@@ -255,7 +258,7 @@ async fn three_voters_cast_with_cat_and_cai() {
     .await;
     assert!(confirm1["confirmed_at_ms"].as_u64().unwrap() > 0);
 
-    // ── 7. Voter 2: cast, then re-vote (last-wins resolved at tally) ──────
+    // -- 7. Voter 2: cast, then re-vote (last-wins resolved at tally) ------
     let v2 = &voter_urls[1];
     let p2 = &passphrases[1];
     let pin2 = pin_of(&client, v2, p2).await;
@@ -288,7 +291,7 @@ async fn three_voters_cast_with_cat_and_cai() {
     )
     .await;
 
-    // Idempotent casting (§12): re-casting the same held ballot replays the
+    // Idempotent casting: re-casting the same held ballot replays the
     // stored receipts (a fresh CAT issuance, same BB state).
     let recast: serde_json::Value = post_json(
         &client,
@@ -330,7 +333,7 @@ async fn three_voters_cast_with_cat_and_cai() {
         "4th distinct ballot commitment must be rate-limited"
     );
 
-    // ── 8. Voter 3: cast-before-vote is rejected, then a real cast ────────
+    // -- 8. Voter 3: cast-before-vote is rejected, then a real cast --------
     let v3 = &voter_urls[2];
     let p3 = &passphrases[2];
     let no_ballot = client
@@ -356,7 +359,7 @@ async fn three_voters_cast_with_cat_and_cai() {
     .await;
     assert_eq!(cast3["receipts"].as_array().unwrap().len(), 2);
 
-    // ── 9. wbb-ui: page + decoded entries (V14) ───────────────────────────
+    // -- 9. wbb-ui: page + decoded entries (V14) ---------------------------
     let page = client
         .get(format!("{ui_base}/"))
         .send()
@@ -373,7 +376,7 @@ async fn three_voters_cast_with_cat_and_cai() {
         .iter()
         .filter(|r| r["entry_type"] == "ballot_digest")
         .collect();
-    // 5 cast ballots (voter1 ×1, voter2 ×3 incl. re-votes, voter3 ×1) ×2 BBs.
+    // 5 cast ballots (voter1 x1, voter2 x3 incl. re-votes, voter3 x1) x2 BBs.
     assert_eq!(digest_rows.len(), 10, "expected 10 ballot_digest entries");
     assert!(
         digest_rows
@@ -392,7 +395,7 @@ async fn three_voters_cast_with_cat_and_cai() {
         .count();
     assert_eq!(metadata_rows, 10, "one metadata entry per digest entry");
 
-    // ── 10. Negative: a CAI disclosure for the WRONG ballot is rejected ───
+    // -- 10. Negative: a CAI disclosure for the WRONG ballot is rejected ---
     // Scrape voter 1's published disclosure from the WBB and replay it
     // against voter 2's (different) ballot digest at BB-1.
     let disclosure = cai_rows[0]["payload"]["disclosure"].clone();
@@ -497,7 +500,7 @@ async fn wbb_policy_enforcement() {
         "non-PM phase transition",
     );
 
-    // (d) Legitimate PM transition setup → voting succeeds.
+    // (d) Legitimate PM transition setup -> voting succeeds.
     submit(
         "setup,PM,phase_transition,1,voting".into(),
         pm_key.clone(),
@@ -519,7 +522,7 @@ async fn wbb_policy_enforcement() {
         "setup entry after transition",
     );
 
-    // (f) Insufficient threshold: tally_result requires t ≥ 3.
+    // (f) Insufficient threshold: tally_result requires t >= 3.
     submit(
         "voting,PM,phase_transition,1,tallying".into(),
         pm_key.clone(),
@@ -548,7 +551,7 @@ async fn wbb_policy_enforcement() {
     );
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// -- Helpers ----------------------------------------------------------------
 
 async fn enroll_voter(client: &reqwest::Client, base_url: &str, fiscal_id: &str) -> String {
     let login: serde_json::Value = post_json(

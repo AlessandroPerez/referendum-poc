@@ -1,4 +1,4 @@
-//! Electoral Roll (ER) server (M3.3 + M5 backend).
+//! Electoral Roll (ER) server.
 //!
 //! Handles voter login, device registration, token issuance/verification,
 //! revocations, eligible-vid management, and admin publication of setup entries
@@ -54,24 +54,24 @@ pub struct ErState {
     devices: Arc<Mutex<HashMap<Vid, DeviceRecord>>>,
     /// Latest PIN-request rid per vid (needed by retrieval-token issuance).
     last_rid: Arc<Mutex<HashMap<Vid, String>>>,
-    /// Logical clock for WBB entry timestamps (§9.4).
+    /// Logical clock for WBB entry timestamps.
     clock: Arc<Mutex<LogicalClock>>,
     /// Revoked vids (V9); their credentials are excluded from the eligible
-    /// list and filtered at tally (M8).
+    /// list and filtered at tally.
     revoked_vids: Arc<Mutex<HashSet<Vid>>>,
     /// Post-revocation vid reassignments, keyed by fiscal id (V9).
     vid_overrides: Arc<Mutex<HashMap<String, Vid>>>,
-    /// Next spare vid to hand out on revocation (n_voters+1 ..= n_acc, D12).
+    /// Next spare vid to hand out on revocation (n_voters+1 ..= n_acc).
     next_spare_vid: Arc<Mutex<u64>>,
     /// Casting tokens issued per vid, keyed by ballot commitment (CAT rate
-    /// limit over DISTINCT commitments, D3/§12).  Re-requesting tokens for
+    /// limit over DISTINCT commitments).  Re-requesting tokens for
     /// the SAME commitment returns the cached tokens instead of minting new
     /// ones, so idempotent re-casts neither burn budget nor grow the store.
     cast_commitments: Arc<Mutex<HashMap<Vid, CommitmentTokens>>>,
-    /// Dedicated operation seed (`er-seed.bin`, §9.2) for token generation.
+    /// Dedicated operation seed (`er-seed.bin`) for token generation.
     token_seed: ActorSeed,
-    /// Shared internal-API token authenticating service→service calls
-    /// (`/tokens/verify`, roadmap §6.1).
+    /// Shared internal-API token authenticating service->service calls
+    /// (`/tokens/verify`).
     internal_token: SecretString,
 }
 
@@ -115,7 +115,7 @@ struct TokenMeta {
     token_type: TokenType,
     vid: Vid,
     rid: Option<String>,
-    /// Casting tokens are bound to the ballot commitment `commB` (§5.3.1.6).
+    /// Casting tokens are bound to the ballot commitment `commB` (Sec. 5.3.1.6).
     comm_b: Option<CommB>,
     used: bool,
 }
@@ -178,7 +178,7 @@ impl ErState {
     }
 
     /// Mint a fresh single-use token from the ER's dedicated operation seed
-    /// (§9.2; deliberately decoupled from the WBB entry-signing key).
+    /// (deliberately decoupled from the WBB entry-signing key).
     async fn next_token(
         &self,
         token_type: TokenType,
@@ -222,7 +222,7 @@ impl ErState {
     }
 
     /// Resolve a fiscal id to its EFFECTIVE vid: the ceremony assignment
-    /// (index+1, §3.5.3) unless a revocation reassigned it (V9).
+    /// (index+1, Sec. 3.5.3) unless a revocation reassigned it (V9).
     async fn effective_vid(&self, fiscal_id: &str) -> Result<Vid, ErError> {
         if let Some(vid) = self.vid_overrides.lock().await.get(fiscal_id) {
             return Ok(*vid);
@@ -287,7 +287,7 @@ impl ErState {
         let signing_key = self.signing_key();
 
         // One logical timestamp per artifact, advancing the clock in between
-        // (roadmap §9.4).
+        // (deterministic logical clock).
         let timestamps: Vec<i64> = {
             let mut clock = self.clock.lock().await;
             data_strings
@@ -300,7 +300,7 @@ impl ErState {
                 .collect()
         };
 
-        // Signing and serialization run in spawn_blocking per roadmap §6.
+        // Signing and serialization run in spawn_blocking.
         let signed_entries = tokio::task::spawn_blocking(move || {
             data_strings
                 .into_iter()
@@ -355,11 +355,11 @@ async fn login_handler(
 ) -> Result<Json<LoginResponse>, ErError> {
     state.verify_dip_assertion(&req.assertion, &req.signature)?;
 
-    // Deterministic vid assignment: the i-th registry voter gets vid i (§3.5.3,
+    // Deterministic vid assignment: the i-th registry voter gets vid i (Sec. 3.5.3,
     // matches the ceremony's `assign_vids` ordering), unless a revocation
     // reassigned a spare vid (V9).  Re-login returns the same vid with a
     // fresh registration token.  Unknown ids get the same generic 401 as a
-    // bad signature (anti-enumeration, style guide §09).
+    // bad signature (anti-enumeration).
     let vid = state.effective_vid(&req.assertion.fiscal_id).await?;
 
     let credential_package = state
@@ -450,8 +450,8 @@ struct DeviceRecoverRequest {
 #[derive(Serialize)]
 struct DeviceRecoverResponse {
     vid: Vid,
-    /// Passphrase-encrypted state blob — only the passphrase holder can
-    /// decrypt it (§3.7.4 approximation, Deviation 6).
+    /// Passphrase-encrypted state blob - only the passphrase holder can
+    /// decrypt it (Sec. 3.7.4 approximation, Deviation 6).
     state_blob: String,
 }
 
@@ -464,7 +464,7 @@ impl std::fmt::Debug for DeviceRecoverResponse {
     }
 }
 
-/// V8: new-device recovery — a fresh DIP login returns the encrypted state
+/// V8: new-device recovery - a fresh DIP login returns the encrypted state
 /// blob; the passphrase check happens client-side by decryption (fails
 /// closed on a wrong passphrase).
 #[tracing::instrument(skip(state, req))]
@@ -488,15 +488,15 @@ struct RevocationRequest {
 
 #[derive(Debug, Serialize)]
 struct RevocationResponse {
-    /// The freshly assigned spare vid (§3.7.5).
+    /// The freshly assigned spare vid (Sec. 3.7.5).
     vid: Vid,
     registration_token: TokenValue,
     credential_package: CredentialPackage,
 }
 
-/// V9: revoke the caller's credential and re-issue a spare vid (§3.7.5).
+/// V9: revoke the caller's credential and re-issue a spare vid (Sec. 3.7.5).
 ///
-/// Publishes a salted-hash `voting,ER,revocation_commitment,1,…` entry: the
+/// Publishes a salted-hash `voting,ER,revocation_commitment,1,...` entry: the
 /// commitment binds (old vid, new vid) without revealing the linkage.
 #[tracing::instrument(skip(state, req))]
 async fn revocation_handler(
@@ -506,7 +506,7 @@ async fn revocation_handler(
     state.verify_dip_assertion(&req.assertion, &req.signature)?;
     let old_vid = state.effective_vid(&req.assertion.fiscal_id).await?;
 
-    // Assign the next spare vid (nACC > nV leaves spares, D12).
+    // Assign the next spare vid (nACC > nV leaves spares).
     let new_vid = {
         let mut next = state.next_spare_vid.lock().await;
         if *next > state.election.n_acc as u64 {
@@ -526,14 +526,14 @@ async fn revocation_handler(
     state.devices.lock().await.remove(&old_vid);
     // Defense in depth: kill every outstanding token of the revoked vid so
     // its registration session cannot mint casting tokens any more (the
-    // tally-side ACC filtering in M8 remains the protocol-level backstop).
+    // tally-side ACC filtering remains the protocol-level backstop).
     for meta in state.tokens.lock().await.values_mut() {
         if meta.vid == old_vid {
             meta.used = true;
         }
     }
 
-    // Publish the commitment: SHA3-256(domain ‖ salt ‖ old ‖ new); the salt
+    // Publish the commitment: SHA3-256(domain || salt || old || new); the salt
     // comes from the ER operation seed so the pair is not publicly linkable.
     let commitment = {
         use rand::RngCore;
@@ -620,7 +620,7 @@ impl ErState {
 }
 
 /// A7 support: the eligible vid list (assigned minus revoked), also
-/// published to the WBB at tally start (M8).
+/// published to the WBB at tally start.
 async fn eligible_handler(
     Extension(state): Extension<Arc<ErState>>,
 ) -> Result<Json<EligibleResponse>, ErError> {
@@ -633,8 +633,8 @@ struct PublishEligibleResponse {
     vids: Vec<Vid>,
 }
 
-/// A7: publish `tallying,ER,eligible_vids,1,…` at tally start, honoring
-/// revocations (§3.9 step 1, roadmap §6.1).
+/// A7: publish `tallying,ER,eligible_vids,1,...` at tally start, honoring
+/// revocations (Sec. 3.9 step 1).
 async fn publish_eligible_handler(
     Extension(state): Extension<Arc<ErState>>,
     headers: axum::http::HeaderMap,
@@ -749,7 +749,7 @@ async fn retrieval_tokens_handler(
 struct CastingTokensRequest {
     comm_b: CommB,
     /// Base64 EdDSA signature over the commB bytes, made with the voter's
-    /// app secret key AtSK (§5.3.1.6, §3.13).
+    /// app secret key AtSK (Sec. 5.3.1.6, Sec. 3.13).
     signature: String,
 }
 
@@ -768,7 +768,7 @@ struct CastingTokensResponse {
     casting_tokens: Vec<TokenValue>,
 }
 
-/// V12: issue anonymous single-use casting tokens (§5.3.1.6).
+/// V12: issue anonymous single-use casting tokens (Sec. 5.3.1.6).
 ///
 /// The voter authenticates with the registration token and an EdDSA signature
 /// over `comm_b` made with the registered app key; the ER rate-limits per vid
@@ -803,7 +803,7 @@ async fn casting_tokens_handler(
         )
         .map_err(|_| ErError::Unauthorized)?;
 
-    // CAT rate limit (max_casts_per_voter, D3/§12) over DISTINCT ballot
+    // CAT rate limit (max_casts_per_voter, Sec. 5.3.1.6) over DISTINCT ballot
     // commitments.  A re-request for an already-committed ballot replays the
     // cached tokens (idempotent: no budget burn, no token-store growth); the
     // reservation happens atomically under the lock, so the limit is
@@ -857,7 +857,7 @@ struct VerifyTokenRequest {
     #[serde(default)]
     consume: bool,
     /// For casting tokens: the commitment the caller observed; must match the
-    /// binding recorded at issuance (§5.3.1.6).
+    /// binding recorded at issuance (Sec. 5.3.1.6).
     #[serde(default)]
     comm_b: Option<CommB>,
 }
@@ -881,7 +881,7 @@ impl VerifyTokenResponse {
     }
 }
 
-/// Service-facing single-use token verification (§6.1).  Requires the shared
+/// Service-facing single-use token verification .  Requires the shared
 /// internal-API bearer token: voter clients never call this endpoint.
 async fn verify_token_handler(
     Extension(state): Extension<Arc<ErState>>,
@@ -903,7 +903,7 @@ async fn verify_token_handler(
         return Ok(Json(VerifyTokenResponse::invalid()));
     }
     // Casting tokens are bound to commB: the caller must present the matching
-    // commitment (§5.3.1.6).
+    // commitment (Sec. 5.3.1.6).
     if let Some(bound) = &meta.comm_b {
         if req.comm_b.as_ref() != Some(bound) {
             return Ok(Json(VerifyTokenResponse::invalid()));
@@ -974,7 +974,7 @@ impl IntoResponse for ErError {
         let (status, message) = match &self {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
             Self::RateLimited => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
-            // Internal failures are logged but not leaked (style guide §03).
+            // Internal failures are logged but not leaked.
             Self::Json(_) | Self::Wbb(_) | Self::Internal(_) => {
                 tracing::error!(error = %self, "er-server internal error");
                 (
@@ -1082,7 +1082,7 @@ async fn load_election_context(
         .map_err(|e| anyhow::anyhow!("failed to parse election context: {e}"))
 }
 
-/// Load the ER's dedicated operation seed (`er-seed.bin`, §9.2).
+/// Load the ER's dedicated operation seed (`er-seed.bin`).
 async fn load_actor_seed(settings: &Settings) -> anyhow::Result<ActorSeed> {
     let context_path = std::path::PathBuf::from(&settings._ceremony.election_context);
     let base_dir = context_path

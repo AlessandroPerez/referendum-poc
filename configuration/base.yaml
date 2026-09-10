@@ -9,7 +9,7 @@ tls:
   ca_pem: certs/ca.pem
 
 seeds:
-  # TEST-ONLY master seed (D4). Deterministic on purpose: every artifact of the
+  # TEST-ONLY master seed. Deterministic on purpose: every artifact of the
   # PoC is reproducible from this value. Override with APP_SEEDS__MASTER_SEED.
   master_seed: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 

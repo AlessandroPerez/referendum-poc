@@ -1,6 +1,5 @@
-//! Actor services (HTTP servers), implemented per roadmap milestones:
-//! `er`/`dip`/`ns` (M3), `rt`/`tt` (M4), `voter` (M5), `bb`/`wbb_ui` (M6),
-//! tally driver and auditor CLIs (M8).
+//! Actor services (HTTP servers): `er`, `dip`, `ns`, `rt`, `tt`, `voter`,
+//! `bb`, `wbb_ui`, plus the election-admin driver and the auditor.
 
 use anyhow::Context;
 
@@ -16,7 +15,7 @@ pub mod tt;
 pub mod voter;
 pub mod wbb_ui;
 
-/// Placeholder entrypoint used by binary targets whose milestone has not landed
+/// Placeholder entrypoint used by binary targets without a dedicated service
 /// yet. Initializes telemetry and exits successfully.
 pub async fn run_stub(service_name: &'static str) -> anyhow::Result<()> {
     crate::telemetry::init_subscriber(crate::telemetry::get_subscriber(
@@ -24,15 +23,12 @@ pub async fn run_stub(service_name: &'static str) -> anyhow::Result<()> {
         "info".into(),
         std::io::stdout,
     ));
-    tracing::info!(
-        service = service_name,
-        "service stub: implemented in a later milestone"
-    );
+    tracing::info!(service = service_name, "service stub: no dedicated service");
     tokio::task::yield_now().await;
     Ok(())
 }
 
-/// Read settings for `base_dir`, logging the target environment — shared by
+/// Read settings for `base_dir`, logging the target environment - shared by
 /// all future service entrypoints.
 pub fn load_settings(base_dir: &std::path::Path) -> anyhow::Result<crate::configuration::Settings> {
     crate::configuration::get_configuration(base_dir).context("failed to load configuration")

@@ -1,4 +1,4 @@
-//! Notification Server service (M3). Slim main — logic lives in `referendum_poc`.
+//! Notification Server service . Slim main - logic lives in `referendum_poc`.
 
 use std::path::PathBuf;
 

@@ -1,8 +1,8 @@
-//! Tally pipeline primitives (M8, §3.9 / roadmap §8.5).
+//! Tally pipeline primitives (Sec. 3.9).
 //!
 //! Framework-free helpers shared by the `election-admin tally` driver, the
 //! TT server, and the `referendum-auditor`: TT share loading, ballot-release
-//! reconciliation (the §3.8.5 ⊥ filter), the WBB entry payloads of the
+//! reconciliation (the Sec. 3.8.5 bot filter), the WBB entry payloads of the
 //! tallying phase, and counts extraction from the decrypted tally via the
 //! D-mandated serde round-trip.
 
@@ -82,13 +82,13 @@ pub fn reconstruct_tt_teller(share: TTSecretKeyShare<G>) -> ThresholdTabulationT
 }
 
 /// Reconcile the per-BB ballot releases into the canonical tally input
-/// (design lock (a), §3.8.5).
+/// (Sec. 3.8.5).
 ///
 /// A ballot digest counts as accepted only when it appears on at least
 /// [`NO_BOT_MIN_BBS`] distinct BBs (by `receipt.bb_id`); anything else is the
-/// ⊥ case and is excluded. The canonical copy of each accepted ballot is the
+/// bot case and is excluded. The canonical copy of each accepted ballot is the
 /// one released by the lowest-numbered BB, and the output is ordered by that
-/// BB's `seq_no` — the global cast order used for last-vote-wins dedup.
+/// BB's `seq_no` - the global cast order used for last-vote-wins dedup.
 pub fn reconcile_ballots(
     per_bb: &[Vec<BallotRecord<G>>],
 ) -> Result<Vec<BallotRecord<G>>, TallyError> {
@@ -109,7 +109,7 @@ pub fn reconcile_ballots(
 /// Digest-level reconciliation core (unit-testable without real ballots).
 ///
 /// Returns `(bb_list_index, item_index)` of the canonical copy of every
-/// digest present on ≥ [`NO_BOT_MIN_BBS`] distinct BBs, in canonical
+/// digest present on >= [`NO_BOT_MIN_BBS`] distinct BBs, in canonical
 /// `seq_no` order.
 fn reconcile_indices(per_bb: &[Vec<(BallotDigest, Receipt)>]) -> Vec<(usize, usize)> {
     let mut by_digest: HashMap<BallotDigest, Vec<(usize, usize, Receipt)>> = HashMap::new();
@@ -128,7 +128,7 @@ fn reconcile_indices(per_bb: &[Vec<(BallotDigest, Receipt)>]) -> Vec<(usize, usi
         bb_ids.sort_unstable();
         bb_ids.dedup();
         if bb_ids.len() < NO_BOT_MIN_BBS {
-            // ⊥: accepted by too few BBs (§3.8.5).
+            // bot: accepted by too few BBs (Sec. 3.8.5).
             continue;
         }
         let canonical = copies
@@ -145,56 +145,56 @@ fn reconcile_indices(per_bb: &[Vec<(BallotDigest, Receipt)>]) -> Vec<(usize, usi
     chosen.into_iter().map(|(l, i, _)| (l, i)).collect()
 }
 
-// ── WBB entry payloads (tallying phase, roadmap §4.4 + design lock (d)) ─────
+// -- WBB entry payloads (tallying phase, Sec. 3.4.2 write policy) -----
 
-/// Content of a `tallying,BB,encrypted_ballot,1,…` entry: one released
-/// ballot with its receipt and `bb_id_enc` (full record — design lock (d)).
+/// Content of a `tallying,BB,encrypted_ballot,1,...` entry: one released
+/// ballot with its receipt and `bb_id_enc` (full record).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct EncryptedBallotEntry {
     pub record: BallotRecord<G>,
 }
 
-/// Content of a `tallying,TT,mixed_ballots,3,…` entry (one per mix).
+/// Content of a `tallying,TT,mixed_ballots,3,...` entry (one per mix).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", bound = "")]
 pub enum MixedBallotsEntry {
-    /// The §3.9 vote mix over the deduped verified votes.
+    /// The Sec. 3.9 vote mix over the deduped verified votes.
     Votes { artifact: Box<VoteMixArtifact<G>> },
-    /// The §3.9 credential mix over the eligible public credentials.
+    /// The Sec. 3.9 credential mix over the eligible public credentials.
     Credentials { artifact: Box<CredMixArtifact<G>> },
 }
 
-/// Content of a `tallying,TT,re_encryption_proof,3,…` entry: the public
-/// verification artifacts of one pipeline stage (design lock (d)).
+/// Content of a `tallying,TT,re_encryption_proof,3,...` entry: the public
+/// verification artifacts of one pipeline stage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", bound = "")]
 pub enum ReEncryptionProofEntry {
-    /// §3.9 steps 5–10: ox fingerprint proof + threshold decryptions.
+    /// Sec. 3.9 steps 5-10: ox fingerprint proof + threshold decryptions.
     OxFingerprints {
         fps: VerifiableFingerprints<G>,
         decryptions: Vec<ThresholdDecOk<G>>,
     },
-    /// §3.9 step 11: RT credential control proofs over the shuffled votes.
+    /// Sec. 3.9 step 11: RT credential control proofs over the shuffled votes.
     Controls {
         controls: Vec<CredentialControlProof<G>>,
     },
-    /// §3.9 steps 12–14: ACC checks (ζ is a public verification input of
+    /// Sec. 3.9 steps 12-14: ACC checks (zeta is a public verification input of
     /// `verify_acc_checks` / `filter_invalid`).
     AccChecks {
         acc_checks: Vec<ThresholdDecOk<G>>,
         #[serde(with = "ScalarHelper::<G>")]
         zeta: <G as GroupScalar>::Scalar,
     },
-    /// §3.9 steps 20–24: credential fingerprints + decryption bundle.
+    /// Sec. 3.9 steps 20-24: credential fingerprints + decryption bundle.
     CredentialFingerprints {
         fps: VerifiableFingerprints<G>,
         bundle: DecryptedFingerprintsBundle<G>,
     },
 }
 
-/// Content of a `tallying,TT,tally_result,3,…` entry — and the driver/auditor
-/// counts type (§3.11: 0 = blank, 1 = Sì, 2 = No).
+/// Content of a `tallying,TT,tally_result,3,...` entry - and the driver/auditor
+/// counts type (Sec. 3.11: 0 = blank, 1 = Si, 2 = No).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TallyCounts {
     pub blank: u64,
@@ -202,7 +202,7 @@ pub struct TallyCounts {
     pub no: u64,
 }
 
-/// Content of a `tallying,TT,tally_proof,3,…` entry.
+/// Content of a `tallying,TT,tally_proof,3,...` entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct TallyProofEntry {
@@ -210,10 +210,10 @@ pub struct TallyProofEntry {
     pub decrypted: DecryptedTally<G>,
 }
 
-// ── Counts extraction (M8.2 serde round-trip) ───────────────────────────────
+// -- Counts extraction (serde round-trip) -------------------------------
 
 /// Extract the referendum counts from a `DecryptedTally` via the serde
-/// round-trip mandated by the roadmap (§5): the first-level counters
+/// round-trip: the first-level counters
 /// `tally.l1[0..3]` are the per-option totals.
 pub fn extract_counts(decrypted: &DecryptedTally<G>) -> Result<TallyCounts, TallyError> {
     counts_from_value(&serde_json::to_value(decrypted)?)
@@ -245,7 +245,7 @@ fn counts_from_value(value: &serde_json::Value) -> Result<TallyCounts, TallyErro
 }
 
 /// Derive the deterministic tally-driver RNG (mixes, fingerprint blinding)
-/// from the TT operation seeds (`tt-{i}-seed.bin`, §9.2) — the
+/// from the TT operation seeds (`tt-{i}-seed.bin`) - the
 /// `acc_rng_from_seeds` precedent, decoupled from WBB signing keys.
 pub fn tally_rng_from_seeds(seeds: &[[u8; 32]]) -> ChaCha20Rng {
     use sha2::{Digest, Sha256};
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn reconcile_excludes_single_bb_ballots() {
-        // Digest 1 on both BBs, digest 2 only on BB-2 (⊥, §3.8.5).
+        // Digest 1 on both BBs, digest 2 only on BB-2 (bot, Sec. 3.8.5).
         let bb1 = vec![(digest(1), receipt(0, 1))];
         let bb2 = vec![(digest(1), receipt(0, 2)), (digest(2), receipt(1, 2))];
         let chosen = reconcile_indices(&[bb1, bb2]);
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn reconcile_ignores_duplicate_receipts_from_one_bb() {
-        // The same digest twice on ONE BB does not clear the ⊥ threshold.
+        // The same digest twice on ONE BB does not clear the bot threshold.
         let bb1 = vec![(digest(1), receipt(0, 1)), (digest(1), receipt(1, 1))];
         let bb2: Vec<(BallotDigest, Receipt)> = Vec::new();
         assert!(reconcile_indices(&[bb1, bb2]).is_empty());

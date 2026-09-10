@@ -42,8 +42,8 @@ pub async fn load_signing_key(path: &Path) -> anyhow::Result<SigningKey> {
 }
 
 /// Load the shared internal-API token (`internal-api-token.txt`) written by
-/// the ceremony next to the election context.  Authenticates service→service
-/// calls such as ER `/tokens/verify` (roadmap §6.1).
+/// the ceremony next to the election context.  Authenticates service->service
+/// calls such as ER `/tokens/verify` .
 pub async fn load_internal_token(
     settings: &crate::configuration::Settings,
 ) -> anyhow::Result<secrecy::SecretString> {

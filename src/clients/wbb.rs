@@ -1,4 +1,4 @@
-//! Typed client for the Sunlight WBB read/submit API (roadmap M2.3).
+//! Typed client for the Sunlight WBB read/submit API .
 //!
 //! Implements the exact signing convention used by the WBB:
 //!
@@ -48,7 +48,7 @@ pub struct PhaseResponse {
 }
 
 /// WBB client. Holds a pre-configured [`reqwest::Client`] so TLS roots and
-/// timeouts are set up once (see `protocol::tls` in M2.6).
+/// timeouts are set up once (see `protocol::tls`).
 #[derive(Clone, Debug)]
 pub struct WbbClient {
     client: Client,
@@ -282,7 +282,7 @@ mod tests {
         let entry2 = sign_entry(b"hello,wbb", "ER-1", 123456789, &signing_key);
         assert_eq!(entry.signature, entry2.signature);
 
-        // Different entity_id → different signature.
+        // Different entity_id -> different signature.
         let entry3 = sign_entry(b"hello,wbb", "ER-2", 123456789, &signing_key);
         assert_ne!(entry.signature, entry3.signature);
     }

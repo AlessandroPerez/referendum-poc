@@ -1,4 +1,4 @@
-//! Deterministic randomness for reproducible tests and ceremonies (roadmap §9).
+//! Deterministic randomness for reproducible tests and ceremonies .
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -102,7 +102,7 @@ impl ActorRng {
 
 /// Derive a one-off operation RNG from an actor seed without going through the
 /// stateful [`ActorRng`] counter (for services that keep their own per-purpose
-/// counters, e.g. RT decoy/DVNIZKP/τ generation).
+/// counters, e.g. RT decoy/DVNIZKP/tau generation).
 pub fn operation_rng(actor_seed: &ActorSeed, purpose: &str, counter: u64) -> ChaCha20Rng {
     ChaCha20Rng::from_seed(derive_operation_seed(&actor_seed.seed, purpose, counter))
 }

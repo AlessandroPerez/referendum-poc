@@ -1,4 +1,4 @@
-//! Election-admin driver logic (M4/M8).
+//! Election-admin driver logic .
 //!
 //! This module implements the coordinator-side steps that run inside the
 //! `election-admin` CLI.  It keeps crypto in `protocol/` and HTTP orchestration
@@ -82,11 +82,11 @@ impl From<anyhow::Error> for AdminError {
     }
 }
 
-/// Run the M4 credential-generation driver.
+/// Run the credential-generation driver.
 ///
 /// 1. Reconstruct all RT tellers from share files.
 /// 2. Generate `n_acc` credentials and the public ACC list.
-/// 3. Co-sign the `setup,RT,acc_pub_key,2,…` WBB entry (via RT `/sign`
+/// 3. Co-sign the `setup,RT,acc_pub_key,2,...` WBB entry (via RT `/sign`
 ///    endpoints when configured, otherwise locally).
 /// 4. Submit the partial signatures to the WBB and wait for inclusion.
 /// 5. Write `enrollment_packages.json` to `output_dir`.
@@ -126,7 +126,7 @@ pub async fn gen_credentials(cfg: GenCredentialsConfig) -> Result<(), AdminError
         operation_seeds.push(seed);
     }
 
-    // Deterministic RNG seeded from the RT operation seeds (§9.2), decoupled
+    // Deterministic RNG seeded from the RT operation seeds, decoupled
     // from the WBB entry-signing keys used below for co-signing.
     let mut rng = acc_rng_from_seeds(&operation_seeds);
 
@@ -144,7 +144,7 @@ pub async fn gen_credentials(cfg: GenCredentialsConfig) -> Result<(), AdminError
     .await
     .map_err(|e| AdminError::Other(e.to_string()))??;
 
-    // Write enrollment packages for M5.
+    // Write the enrollment packages.
     let packages_path = cfg.output_dir.join("enrollment_packages.json");
     tokio::fs::write(&packages_path, serde_json::to_string_pretty(&packages)?).await?;
     // Credential material for every voter: owner-readable only.
@@ -276,7 +276,7 @@ async fn sign_acc_pub_key_entries(
 /// to inspect the generated artifacts.
 pub use crate::protocol::acc::EnrollmentPackage;
 
-/// Configuration for a PM phase transition (§3.4.2, roadmap A4).
+/// Configuration for a PM phase transition (Sec. 3.4.2).
 #[derive(Clone, Debug)]
 pub struct PhaseTransitionConfig {
     /// Directory containing `pm-signing-key.bin`.
@@ -285,11 +285,11 @@ pub struct PhaseTransitionConfig {
     pub wbb_url: Url,
     /// Cluster CA PEM for TLS.
     pub ca_pem: String,
-    /// Logical clock for the entry timestamp (§9.4).
+    /// Logical clock for the entry timestamp.
     pub clock: LogicalClock,
 }
 
-// ── M8: tally driver (§3.9 / roadmap §8.5, design lock 2026-09-07) ─────────
+// -- Tally driver (Sec. 3.9) ---------
 
 /// Configuration for the `election-admin tally` driver.
 #[derive(Clone, Debug)]
@@ -305,15 +305,15 @@ pub struct TallyConfig {
     pub bb_urls: Vec<Url>,
     /// RT base URLs in `rt-1..n` order (credential controls).
     pub rt_urls: Vec<Url>,
-    /// TT base URLs in `tt-1..n` order (ζ VSS, threshold decryptions, co-signing).
+    /// TT base URLs in `tt-1..n` order (zeta VSS, threshold decryptions, co-signing).
     pub tt_urls: Vec<Url>,
     /// Cluster CA PEM for TLS.
     pub ca_pem: String,
-    /// Deterministic logical clock for WBB timestamps (§9.4).
+    /// Deterministic logical clock for WBB timestamps.
     pub clock: LogicalClock,
-    /// Number of generated credentials (`n_acc`) — bounds the dlog table.
+    /// Number of generated credentials (`n_acc`) - bounds the dlog table.
     pub n_acc: usize,
-    /// TT reconstruction threshold (`t_tt`) for ζ finalization.
+    /// TT reconstruction threshold (`t_tt`) for zeta finalization.
     pub t_tt: usize,
 }
 
@@ -323,17 +323,17 @@ pub struct TallyOutcome {
     pub counts: crate::protocol::tally::TallyCounts,
     /// Ballots released across all BBs (with duplicates).
     pub released: usize,
-    /// Reconciled ballots after the ⊥ filter (§3.8.5).
+    /// Reconciled ballots after the bot filter (Sec. 3.8.5).
     pub reconciled: usize,
-    /// Ballots after ox re-vote dedup (§3.9 step 10).
+    /// Ballots after ox re-vote dedup (Sec. 3.9 step 10).
     pub deduped: usize,
-    /// Votes surviving the ACC check (§3.9 step 14).
+    /// Votes surviving the ACC check (Sec. 3.9 step 14).
     pub valid: usize,
-    /// Votes surviving the illicit/keep-last filter (§3.9 step 24).
+    /// Votes surviving the illicit/keep-last filter (Sec. 3.9 step 24).
     pub legitimate: usize,
 }
 
-/// Run the full §3.9 tally pipeline over HTTP (M8.1).
+/// Run the full Sec. 3.9 tally pipeline over HTTPS.
 pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
     use crate::clients::bb::BbClient;
     use crate::clients::er::ErClient;
@@ -354,7 +354,7 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
     let wbb = WbbClient::new(http.clone(), cfg.wbb_url.clone());
     let mut clock = cfg.clock;
 
-    // §3.9 step 1: the tally runs strictly inside the tallying phase.
+    // Sec. 3.9 step 1: the tally runs strictly inside the tallying phase.
     let phase = wbb
         .phase()
         .await
@@ -365,7 +365,7 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
         )));
     }
 
-    // §3.9 step 1: ER publishes the eligible vid list (minus revoked).
+    // Sec. 3.9 step 1: ER publishes the eligible vid list (minus revoked).
     let er_admin_token = load_token_file(&cfg.ceremony_dir.join("er-admin-token.txt")).await?;
     let er = ErClient::new(http.clone(), cfg.er_url.clone());
     let eligible = er
@@ -373,8 +373,8 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
         .await
         .map_err(|e| AdminError::Other(format!("eligible-vid publication failed: {e}")))?;
 
-    // §3.9 step 2: fetch every BB's ballots and publish the per-BB release,
-    // each record signed with that BB's own key (design lock (a)/(c)).
+    // Sec. 3.9 step 2: fetch every BB's ballots and publish the per-BB release,
+    // each record signed with that BB's own key.
     let mut per_bb = Vec::with_capacity(cfg.bb_urls.len());
     for (i, url) in cfg.bb_urls.iter().enumerate() {
         let name = format!("bb-{}", i + 1);
@@ -409,14 +409,14 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
     }
     let released: usize = per_bb.iter().map(Vec::len).sum();
 
-    // Design lock (a): reconcile by digest — the §3.8.5 ⊥ filter.
+    // Design lock (a): reconcile by digest - the Sec. 3.8.5 bot filter.
     let records = tokio::task::spawn_blocking(move || reconcile_ballots(&per_bb))
         .await
         .map_err(|e| AdminError::Other(e.to_string()))?
         .map_err(|e| AdminError::Other(format!("ballot reconciliation failed: {e}")))?;
     let reconciled = records.len();
 
-    // Deterministic driver RNG for mixes and fingerprint blinding (§9.2).
+    // Deterministic driver RNG for mixes and fingerprint blinding.
     let mut tt_seeds = Vec::with_capacity(cfg.tt_urls.len());
     for i in 1..=cfg.tt_urls.len() {
         let path = cfg.ceremony_dir.join(format!("tt-{i}-seed.bin"));
@@ -430,7 +430,7 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
     }
     let mut rng = tally_rng_from_seeds(&tt_seeds);
 
-    // TT clients (ζ VSS, decryptions, co-signing).
+    // TT clients (zeta VSS, decryptions, co-signing).
     let mut tts = Vec::with_capacity(cfg.tt_urls.len());
     for (i, url) in cfg.tt_urls.iter().enumerate() {
         let token = load_token_file(
@@ -443,10 +443,10 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
 
     let pipeline = PublicPipeline::new(PublicElection::new(election_context.clone()));
 
-    // §3.9 steps 6–7: threshold ζ* generation over all TTs.
+    // Sec. 3.9 steps 6-7: threshold zeta* generation over all TTs.
     let zeta_star = run_zeta_vss(&tts, "ox", cfg.t_tt).await?;
 
-    // §3.9 steps 5–10: verify ballots, fingerprint the ox handles, threshold-
+    // Sec. 3.9 steps 5-10: verify ballots, fingerprint the ox handles, threshold-
     // decrypt, and dedup re-votes (last cast wins).
     let (fps, records, mut rng) = {
         let pipeline = pipeline.clone();
@@ -499,7 +499,7 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
     )
     .await?;
 
-    // §3.9 steps 4–5 + mix: verify the deduped ballots and mix the votes.
+    // Sec. 3.9 steps 4-5 + mix: verify the deduped ballots and mix the votes.
     let (vote_art, mut rng) = {
         let pipeline = pipeline.clone();
         tokio::task::spawn_blocking(move || {
@@ -529,7 +529,7 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
     )
     .await?;
 
-    // §3.9 step 11: RT credential controls over the shuffled votes.
+    // Sec. 3.9 step 11: RT credential controls over the shuffled votes.
     let shuffled_votes: Vec<_> = vote_art.shuffled.iter().map(|r| r.vote.clone()).collect();
     let mut rts = Vec::with_capacity(cfg.rt_urls.len());
     for (i, url) in cfg.rt_urls.iter().enumerate() {
@@ -586,7 +586,7 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
     )
     .await?;
 
-    // §3.9 steps 12–14: fresh ζ, threshold ACC checks, invalid-vote filter.
+    // Sec. 3.9 steps 12-14: fresh zeta, threshold ACC checks, invalid-vote filter.
     let zeta = run_zeta_vss(&tts, "acc", cfg.t_tt).await?;
     let mut acc_partials = Vec::with_capacity(tts.len());
     for tt in &tts {
@@ -637,7 +637,7 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
     )
     .await?;
 
-    // §3.9 steps 20–24: mix the eligible public credentials, fingerprint,
+    // Sec. 3.9 steps 20-24: mix the eligible public credentials, fingerprint,
     // threshold-decrypt, and drop illicit votes (keep-last per credential).
     let short_accs: Vec<ShortPublicACC<RistrettoGroup>> = {
         let entries = wbb.entries().await.map_err(AdminError::Wbb)?;
@@ -753,7 +753,7 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
     )
     .await?;
 
-    // §3.9 steps 25–29: homomorphic sum + threshold tally decryption.
+    // Sec. 3.9 steps 25-29: homomorphic sum + threshold tally decryption.
     let enc_tally = {
         let pipeline = pipeline.clone();
         tokio::task::spawn_blocking(move || pipeline.homomorphic_sum(legitimate))
@@ -791,7 +791,7 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
         .map_err(|e| AdminError::Crypto(format!("tally decryption failed: {e:?}")))?
     };
 
-    // §3.9 step 30: publish the proofs and the final counts.
+    // Sec. 3.9 step 30: publish the proofs and the final counts.
     publish_tt_cosigned(
         &wbb,
         &tts,
@@ -840,8 +840,8 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
     })
 }
 
-/// Run one threshold ζ VSS session over every TT and finalize from the first
-/// `t_tt` sub-shares (§3.9 steps 6–7).
+/// Run one threshold zeta VSS session over every TT and finalize from the first
+/// `t_tt` sub-shares (Sec. 3.9 steps 6-7).
 async fn run_zeta_vss(
     tts: &[crate::clients::tt::TtClient],
     session: &str,
@@ -854,7 +854,7 @@ async fn run_zeta_vss(
         broadcasts.push(
             tt.zeta_round1(session)
                 .await
-                .map_err(|e| AdminError::Other(format!("ζ VSS round 1 failed: {e}")))?,
+                .map_err(|e| AdminError::Other(format!("zeta VSS round 1 failed: {e}")))?,
         );
     }
     let mut sub_shares = Vec::with_capacity(tts.len());
@@ -862,7 +862,7 @@ async fn run_zeta_vss(
         sub_shares.push(
             tt.zeta_combine(session, &broadcasts)
                 .await
-                .map_err(|e| AdminError::Other(format!("ζ VSS combine failed: {e}")))?,
+                .map_err(|e| AdminError::Other(format!("zeta VSS combine failed: {e}")))?,
         );
     }
     Ok(ThresholdTabulationTeller::<RistrettoGroup>::finalize_zeta(
@@ -872,7 +872,7 @@ async fn run_zeta_vss(
 
 /// Publish one TT-co-signed entry: all TTs sign the same data with a shared
 /// logical timestamp; the entry publishes once the WBB staging threshold
-/// (t≥3) is met.
+/// (t>=3) is met.
 async fn publish_tt_cosigned(
     wbb: &WbbClient,
     tts: &[crate::clients::tt::TtClient],
@@ -934,7 +934,7 @@ async fn load_token_file(path: &Path) -> Result<SecretString, AdminError> {
 }
 
 /// Publish a PM-signed `phase_transition` entry moving the WBB from `from` to
-/// `to` (forward-only `setup → voting → tallying`, enforced by the WBB).
+/// `to` (forward-only `setup -> voting -> tallying`, enforced by the WBB).
 pub async fn transition_phase(
     cfg: PhaseTransitionConfig,
     from: &str,

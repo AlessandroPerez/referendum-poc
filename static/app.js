@@ -1,4 +1,4 @@
-// Vote App SPA (M5): login → enroll → status poll → PIN retrieve → PIN verify.
+// Vote App SPA: login -> enroll -> status poll -> PIN retrieve -> PIN verify.
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -63,10 +63,10 @@ $("btn-status").addEventListener("click", async () => {
       show($("btn-retrieve"));
     } else if (result.pin_ready) {
       $("status-label").textContent =
-        "Enough registration tellers have notified — the PIN is ready.";
+        "Enough registration tellers have notified - the PIN is ready.";
       show($("btn-retrieve"));
     } else {
-      $("status-label").textContent = "PIN not ready yet — try again shortly.";
+      $("status-label").textContent = "PIN not ready yet - try again shortly.";
     }
   } catch (e) {
     setError(`Status check failed: ${e.message}`);
@@ -90,14 +90,14 @@ $("btn-verify").addEventListener("click", async () => {
     const pin = parseInt($("pin-input").value, 10);
     const result = await api("/api/pin/verify", { passphrase, pin });
     $("verify-label").textContent = result.valid
-      ? "✔ PIN is valid."
-      : "✘ PIN is NOT valid.";
+      ? "[OK] PIN is valid."
+      : "[X] PIN is NOT valid.";
   } catch (e) {
     setError(`Verification failed: ${e.message}`);
   }
 });
 
-// ── Voting (M6): build → cast → publication check → CAI confirm ──────────
+// -- Voting: build -> cast -> publication check -> CAI confirm ----------
 
 async function refreshPhase() {
   try {
@@ -146,8 +146,8 @@ $("btn-status").addEventListener("click", async () => {
     const passphrase = $("passphrase-input").value.trim();
     const result = await api("/api/ballot/status", { passphrase });
     $("cast-label").textContent = result.no_bot
-      ? `✔ Published by ballot boxes ${result.published_bb_ids.join(", ")} (no ⊥).`
-      : `⚠ Published by ${result.published_bb_ids.length} ballot box(es) — fewer than 2 (⊥).`;
+      ? `[OK] Published by ballot boxes ${result.published_bb_ids.join(", ")} (no bot).`
+      : `[!] Published by ${result.published_bb_ids.length} ballot box(es) - fewer than 2 (bot).`;
   } catch (e) {
     setError(`Status check failed: ${e.message}`);
   }
@@ -158,13 +158,13 @@ $("btn-confirm").addEventListener("click", async () => {
     const passphrase = $("passphrase-input").value.trim();
     const result = await api("/api/confirm", { passphrase });
     $("cast-label").textContent =
-      `✔ Cast-as-intended proof published (confirmed at ${result.confirmed_at_ms}).`;
+      `[OK] Cast-as-intended proof published (confirmed at ${result.confirmed_at_ms}).`;
   } catch (e) {
     setError(`Confirmation failed: ${e.message}`);
   }
 });
 
-// ── PIN & credential management (M7) ─────────────────────────────────────
+// -- PIN & credential management -------------------------------------
 
 $("btn-ruse").addEventListener("click", async () => {
   try {
@@ -174,7 +174,7 @@ $("btn-ruse").addEventListener("click", async () => {
     el.textContent = String(result.ruse_pin).padStart(8, "0");
     show(el);
     $("manage-label").textContent =
-      "Ruse PIN issued — it verifies like the real one, but its ballots are discarded at tally.";
+      "Ruse PIN issued - it verifies like the real one, but its ballots are discarded at tally.";
   } catch (e) {
     setError(`Ruse PIN failed: ${e.message}`);
   }
@@ -195,7 +195,7 @@ $("btn-revoke").addEventListener("click", async () => {
     const passphrase = $("passphrase-input").value.trim();
     const result = await api("/api/revoke", { passphrase });
     $("manage-label").textContent =
-      `Credential revoked — new pseudonymous id ${result.vid}. Check status, then retrieve your new PIN.`;
+      `Credential revoked - new pseudonymous id ${result.vid}. Check status, then retrieve your new PIN.`;
   } catch (e) {
     setError(`Revocation failed: ${e.message}`);
   }
@@ -225,7 +225,7 @@ $("btn-trusted").addEventListener("click", async () => {
       bbs: split($("trusted-bbs").value),
     });
     $("manage-label").textContent =
-      `Trusted: RTs ${result.rts.join(", ")} — BBs ${result.bbs.join(", ")}.`;
+      `Trusted: RTs ${result.rts.join(", ")} - BBs ${result.bbs.join(", ")}.`;
   } catch (e) {
     setError(`Trusted-authority update failed: ${e.message}`);
   }

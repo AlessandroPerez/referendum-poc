@@ -1,4 +1,4 @@
-// Public WBB page (M6): phase banner, entry table, ballot digest search (V14).
+// Public WBB page : phase banner, entry table, ballot digest search (V14).
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -60,7 +60,7 @@ async function refreshEntries() {
   }
 }
 
-// V15: results view — counts from the tally_result entry + links to the
+// V15: results view - counts from the tally_result entry + links to the
 // tally entries themselves.
 function renderResults() {
   const container = $("results");
@@ -74,14 +74,14 @@ function renderResults() {
   );
   const { blank, si, no } = result.payload;
   container.innerHTML =
-    `<p><strong>Sì: ${si}</strong> · <strong>No: ${no}</strong> · blank: ${blank}</p>` +
+    `<p><strong>Si: ${si}</strong> - <strong>No: ${no}</strong> - blank: ${blank}</p>` +
     `<p>Published in log ${proofs
       .map((r) => `entry #${r.leaf_index} (${r.entry_type})`)
-      .join(", ")} — co-signed by the tabulation tellers and verifiable with <code>referendum-auditor</code>.</p>`;
+      .join(", ")} - co-signed by the tabulation tellers and verifiable with <code>referendum-auditor</code>.</p>`;
 }
 
 // The published disclosure reveals which cast-as-intended slot (code or
-// sum) was opened for the list-level (l1) value (§3.8.5 1(b)).
+// sum) was opened for the list-level (l1) value (Sec. 3.8.5 1(b)).
 function describeDisclosure(disclosure) {
   if (!disclosure || !disclosure.l1) return "n/a";
   const slot = Object.keys(disclosure.l1)[0];
@@ -106,16 +106,16 @@ function renderSearch(digest) {
   const summary = document.createElement("p");
   const noBot = bbIds.length >= 2;
   summary.innerHTML =
-    `Published by ballot box(es) <strong>${bbIds.join(", ")}</strong> — ` +
+    `Published by ballot box(es) <strong>${bbIds.join(", ")}</strong> - ` +
     (noBot
-      ? "✔ accepted by at least 2 ballot boxes (no ⊥)."
-      : "⚠ fewer than 2 ballot boxes published this digest (⊥).") +
+      ? "[OK] accepted by at least 2 ballot boxes (no bot)."
+      : "[!] fewer than 2 ballot boxes published this digest (bot).") +
     (cai.length > 0
-      ? ` ✔ cast-as-intended disclosure published by BB ${cai
+      ? ` [OK] cast-as-intended disclosure published by BB ${cai
           .map((r) => r.payload.bb_id)
           .sort()
           .join(", ")} (confirmed at ${cai[0].payload.confirmed_at_ms}; disclosed slot: ${describeDisclosure(cai[0].payload.disclosure)}). Only confirmed ballots are counted.`
-      : " ⚠ No cast-as-intended disclosure yet — an unconfirmed ballot is NOT counted at tally.");
+      : " [!] No cast-as-intended disclosure yet - an unconfirmed ballot is NOT counted at tally.");
   container.appendChild(summary);
 
   for (const row of digests) {

@@ -1,4 +1,4 @@
-//! Registration Teller server (M4). Slim main — logic lives in `referendum_poc`.
+//! Registration Teller server . Slim main - logic lives in `referendum_poc`.
 
 use std::path::PathBuf;
 

@@ -1,6 +1,6 @@
-//! §13 `golden_determinism` (§9.6): the full 8-voter flow, driven with the
+//! `golden_determinism` (golden fields): the full 8-voter flow, driven with the
 //! COMMITTED master seed, must reproduce `tests/e2e/golden/expected.json`
-//! field-by-field — master seed, election-context hash, per-entry data
+//! field-by-field - master seed, election-context hash, per-entry data
 //! hashes, ballot emoji vectors, tally counts, WBB tree size and checkpoint
 //! root.
 //!
@@ -19,6 +19,24 @@ const MATRIX: [&str; 8] = [
     "approve", "reject", "blank", "approve", "reject", "approve", "reject", "approve",
 ];
 
+/// Escape every non-ASCII character as a JSON `\\uXXXX` sequence (UTF-16
+/// surrogate pairs above the BMP) so the committed golden file is pure ASCII;
+/// the parsed value is unchanged.
+fn ascii_escape(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    for ch in json.chars() {
+        if ch.is_ascii() {
+            out.push(ch);
+        } else {
+            let mut units = [0u16; 2];
+            for unit in ch.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    out
+}
+
 fn golden_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -29,7 +47,7 @@ fn golden_path() -> PathBuf {
 
 #[tokio::test]
 async fn golden_determinism() {
-    // The COMMITTED §9.1 test master seed from configuration/base.yaml.
+    // The COMMITTED test master seed from configuration/base.yaml.
     let base = referendum_poc::configuration::get_configuration(&PathBuf::from(env!(
         "CARGO_MANIFEST_DIR"
     )))
@@ -50,7 +68,7 @@ async fn golden_determinism() {
     )
     .await;
 
-    // ── Drive the fixed flow ──────────────────────────────────────────────
+    // -- Drive the fixed flow ----------------------------------------------
     cluster.enroll_all().await;
     cluster.open_voting().await;
     let mut ballot_emoji: Vec<Vec<String>> = Vec::new();
@@ -76,7 +94,7 @@ async fn golden_determinism() {
     cluster.close_voting().await;
     let outcome = cluster.tally().await;
 
-    // ── Collect the §9.6 golden fields ────────────────────────────────────
+    // -- Collect the golden fields ------------------------------------
     let context_bytes =
         std::fs::read(cluster.ceremony_dir().join("election_context.json")).expect("context file");
     let entries = cluster.wbb.client.entries().await.expect("wbb entries");
@@ -124,11 +142,12 @@ async fn golden_determinism() {
         "entries": entry_hashes,
     });
 
-    // ── Regenerate or compare ─────────────────────────────────────────────
+    // -- Regenerate or compare ---------------------------------------------
     let path = golden_path();
     if std::env::var("GOLDEN_UPDATE").is_ok() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, serde_json::to_string_pretty(&actual).unwrap()).unwrap();
+        let pretty = serde_json::to_string_pretty(&actual).unwrap();
+        std::fs::write(&path, ascii_escape(&pretty)).unwrap();
         eprintln!("golden: wrote {}", path.display());
         return;
     }

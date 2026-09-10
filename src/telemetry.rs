@@ -1,4 +1,4 @@
-//! Telemetry (style guide §04): `tracing` with a Bunyan JSON formatter,
+//! Telemetry: `tracing` with a Bunyan JSON formatter,
 //! environment-driven filtering, and a once-per-process test initializer.
 
 use std::sync::LazyLock;
@@ -29,13 +29,13 @@ where
 
 /// Register the subscriber globally and redirect legacy `log` records.
 ///
-/// Panics if called twice — by design (called once at process start).
+/// Panics if called twice - by design (called once at process start).
 pub fn init_subscriber(subscriber: impl Subscriber + Send + Sync) {
     LogTracer::init().expect("failed to set logger");
     set_global_default(subscriber).expect("failed to set subscriber");
 }
 
-/// Test telemetry, initialized at most once per test process (§04).
+/// Test telemetry, initialized at most once per test process (Sec. 04).
 /// Set `TEST_LOG=1` to emit to stdout, otherwise logs go to a sink.
 pub static TEST_TRACING: LazyLock<()> = LazyLock::new(|| {
     let (sink_name, filter) = ("test", "debug");

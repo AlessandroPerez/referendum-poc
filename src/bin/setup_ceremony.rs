@@ -1,4 +1,4 @@
-//! Trusted setup ceremony (M3.5).
+//! Trusted setup ceremony (Sec. 3.5).
 //!
 //! Generates entity keys, RT/TT DKG share files, election context, seed.bin,
 //! sunlight.yaml, checkpoints.db, cluster CA + per-service TLS certs, and

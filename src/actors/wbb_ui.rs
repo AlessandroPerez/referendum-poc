@@ -1,11 +1,11 @@
-//! Public WBB page + same-origin read proxy (M6, roadmap §6.7 / V14).
+//! Public WBB page + same-origin read proxy (Sec. 3.8.5 manual verification).
 //!
 //! Serves the read-only bulletin-board web page from `static_dir` and proxies
 //! the WBB read API so the browser needs no CORS or extra trust anchors:
-//!   - `GET /api/entries`      — decoded entry table rows
-//!   - `GET /api/entries/{i}`  — one raw sequenced entry
-//!   - `GET /api/phase`        — current phase
-//!   - `GET /api/checkpoint`   — signed checkpoint text
+//!   - `GET /api/entries`      - decoded entry table rows
+//!   - `GET /api/entries/{i}`  - one raw sequenced entry
+//!   - `GET /api/phase`        - current phase
+//!   - `GET /api/checkpoint`   - signed checkpoint text
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

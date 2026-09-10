@@ -197,7 +197,7 @@ impl ErClient {
 
     /// Verify a token with the ER; `expected_type` narrows the accepted token
     /// class and `consume` atomically marks a single-use token as spent.
-    /// Requires the shared internal-API token (§6.1) — this is a
+    /// Requires the shared internal-API token  - this is a
     /// service-to-service call, never made by voter clients.
     pub async fn verify_token(
         &self,
@@ -233,7 +233,7 @@ impl ErClient {
         }
     }
 
-    /// `POST /devices/blob` — refresh the encrypted recovery blob (V8).
+    /// `POST /devices/blob` - refresh the encrypted recovery blob (V8).
     pub async fn upload_device_blob(
         &self,
         registration_token: &TokenValue,
@@ -265,7 +265,7 @@ impl ErClient {
         }
     }
 
-    /// `POST /devices/recover` — fetch the encrypted recovery blob (V8).
+    /// `POST /devices/recover` - fetch the encrypted recovery blob (V8).
     pub async fn recover_device(
         &self,
         assertion: &DipAssertion,
@@ -297,8 +297,8 @@ impl ErClient {
         }
     }
 
-    /// `POST /revocations` — revoke the caller's credential, re-issue a
-    /// spare vid (V9, §3.7.5).
+    /// `POST /revocations` - revoke the caller's credential, re-issue a
+    /// spare vid (V9, Sec. 3.7.5).
     pub async fn revoke(
         &self,
         assertion: &DipAssertion,
@@ -330,7 +330,7 @@ impl ErClient {
         }
     }
 
-    /// `GET /voters/eligible` — the current eligible vid list (A7).
+    /// `GET /voters/eligible` - the current eligible vid list (A7).
     pub async fn eligible(&self) -> Result<EligibleResponse, ErError> {
         let url = self.base_url.join("voters/eligible")?;
         let response = self
@@ -349,8 +349,8 @@ impl ErClient {
         }
     }
 
-    /// `POST /admin/eligible-vids` — publish the eligible vid list to the
-    /// WBB at tally start (M8, A7).  Requires the ER admin token.
+    /// `POST /admin/eligible-vids` - publish the eligible vid list to the
+    /// WBB at tally start (Sec. 3.9 step 1).  Requires the ER admin token.
     pub async fn publish_eligible_vids(
         &self,
         admin_token: &SecretString,
@@ -376,8 +376,8 @@ impl ErClient {
         }
     }
 
-    /// `POST /tokens/casting` — request anonymous casting tokens for `comm_b`
-    /// (§5.3.1.6). `signature` is the base64 EdDSA signature over the commB
+    /// `POST /tokens/casting` - request anonymous casting tokens for `comm_b`
+    /// (Sec. 5.3.1.6). `signature` is the base64 EdDSA signature over the commB
     /// bytes made with the voter's app key.
     pub async fn casting_tokens(
         &self,
@@ -413,7 +413,7 @@ impl ErClient {
     }
 
     /// Like [`ErClient::verify_token`] but also presents the observed `comm_b`
-    /// so the ER can check the casting-token binding (§5.3.1.6).
+    /// so the ER can check the casting-token binding (Sec. 5.3.1.6).
     pub async fn verify_token_with_comm_b(
         &self,
         token: &TokenValue,

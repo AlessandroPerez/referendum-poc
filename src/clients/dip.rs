@@ -43,7 +43,7 @@ impl DipClient {
         Self { client, base_url }
     }
 
-    /// `POST /authenticate` — obtain a signed DIP assertion.
+    /// `POST /authenticate` - obtain a signed DIP assertion.
     pub async fn authenticate(&self, fiscal_id: &str) -> Result<AuthenticateResponse, DipError> {
         let url = self.base_url.join("authenticate")?;
         let response = self

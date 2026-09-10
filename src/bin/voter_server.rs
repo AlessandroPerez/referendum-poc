@@ -1,4 +1,4 @@
-//! Voter backend (M5). Slim main — logic lives in `referendum_poc`.
+//! Voter backend . Slim main - logic lives in `referendum_poc`.
 
 use std::path::PathBuf;
 

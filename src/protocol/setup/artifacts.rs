@@ -1,4 +1,4 @@
-//! File-system artifacts produced by the setup ceremony (M3.5).
+//! File-system artifacts produced by the setup ceremony.
 //!
 //! Writes the election context, master seed, WBB configuration, TLS material,
 //! per-service configs, and DKG share files into an output directory so that
@@ -94,7 +94,7 @@ pub fn write_artifacts(
     fs::write(&ca_pem, ca.cert_pem())?;
 
     // The WBB serves TLS via sunlight's `-testcert` flag, which reads
-    // `sunlight.pem`/`sunlight-key.pem` from its working directory (D16).
+    // `sunlight.pem`/`sunlight-key.pem` from its working directory.
     let wbb_cert = issue_service_cert(&ca, "wbb", &derive_service_seed(&master_seed_bytes, "wbb"))?;
     fs::write(output_dir.join("sunlight.pem"), wbb_cert.cert_pem())?;
     fs::write(output_dir.join("sunlight-key.pem"), wbb_cert.key_pem())?;
@@ -142,7 +142,7 @@ pub fn write_artifacts(
         let service_token_path = output_dir.join(format!("{name}-service-token.txt"));
         fs::write(&service_token_path, service_token.expose_secret())?;
 
-        // Dedicated per-service operation seed (§9.2) so protocol RNGs are
+        // Dedicated per-service operation seed so protocol RNGs are
         // not derived from the WBB entry-signing keys.
         let op_seed = master_seed.actor_seed(name);
         fs::write(output_dir.join(format!("{name}-seed.bin")), op_seed.bytes())?;
@@ -153,15 +153,15 @@ pub fn write_artifacts(
     let admin_token_path = output_dir.join("er-admin-token.txt");
     fs::write(&admin_token_path, admin_token.expose_secret())?;
 
-    // Shared internal-API token authenticating service→service calls that are
-    // not voter-facing (e.g. ER `/tokens/verify`, roadmap §6.1).
+    // Shared internal-API token authenticating service->service calls that are
+    // not voter-facing (e.g. ER `/tokens/verify`).
     let internal_token = derive_service_token(master_seed, "internal-api");
     fs::write(
         output_dir.join("internal-api-token.txt"),
         internal_token.expose_secret(),
     )?;
 
-    // Per-voter deterministic seeds + TLS certs (M5, roadmap §9/D16).  Voter
+    // Per-voter deterministic seeds + TLS certs .  Voter
     // servers are not WBB entities, so they get no entry in `sunlight.yaml`;
     // each instance only ever sees its own seed file.
     // `wbb-ui` (public read proxy) gets a TLS cert but is not a WBB entity.

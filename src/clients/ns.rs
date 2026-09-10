@@ -66,7 +66,7 @@ impl NsClient {
         }
     }
 
-    /// `POST /notify` — an RT reports that a credential is ready for `(vid, rid)`.
+    /// `POST /notify` - an RT reports that a credential is ready for `(vid, rid)`.
     pub async fn notify(&self, vid: Vid, rid: &str, rt_id: &str) -> Result<(), NsError> {
         #[derive(Serialize)]
         struct NotifyRequest {

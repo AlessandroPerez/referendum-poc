@@ -1,4 +1,4 @@
-//! M3 integration test: ceremony → cluster boot → ER publishes 3 setup entries
+//! Setup-ceremony integration test: ceremony -> cluster boot -> ER publishes 3 setup entries
 //! to the WBB, visible via the read API.
 
 use std::path::PathBuf;

@@ -1,5 +1,5 @@
-//! §13 `referendum_happy_path`: V1–V15 for 8 voters over the full HTTPS
-//! cluster — fixed vote matrix (1 blank, 1 re-vote, all options), exact
+//! `referendum_happy_path`: V1-V15 for 8 voters over the full HTTPS
+//! cluster - fixed vote matrix (1 blank, 1 re-vote, all options), exact
 //! tally, complete WBB entry census, wbb-ui lookup, auditor all-OK.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -8,7 +8,7 @@ use referendum_poc::protocol::voting::parse_wbb_data;
 
 use super::helpers::{get_json, ElectionCluster, ElectionOpts};
 
-/// Fixed §13 vote matrix: voter index → (option, is the FINAL vote).
+/// Fixed vote matrix: voter index -> (option, is the FINAL vote).
 /// Voter 4 re-votes: reject first, then approve (last wins).
 const MATRIX: [&str; 8] = [
     "approve", // v1: si
@@ -25,10 +25,10 @@ const MATRIX: [&str; 8] = [
 async fn referendum_happy_path() {
     let mut cluster = ElectionCluster::start(8, ElectionOpts::default()).await;
 
-    // ── V1–V4: all 8 voters enroll and retrieve their PIN ─────────────────
+    // -- V1-V4: all 8 voters enroll and retrieve their PIN -----------------
     cluster.enroll_all().await;
 
-    // ── V5: PIN verification succeeds with the real PIN ───────────────────
+    // -- V5: PIN verification succeeds with the real PIN -------------------
     let pin1 = cluster.pin(0).await;
     let verify = cluster
         .voter_post(
@@ -39,7 +39,7 @@ async fn referendum_happy_path() {
         .await;
     assert_eq!(verify["valid"], true, "V5: real PIN verifies");
 
-    // ── V10: voter 1 restricts to a trusted t_RT subset + both BBs ────────
+    // -- V10: voter 1 restricts to a trusted t_RT subset + both BBs --------
     let trusted = cluster
         .voter_post(
             0,
@@ -53,10 +53,10 @@ async fn referendum_happy_path() {
         .await;
     assert_eq!(trusted["rts"], serde_json::json!(["rt-1", "rt-3"]));
 
-    // ── A4: PM opens the voting window ────────────────────────────────────
+    // -- A4: PM opens the voting window ------------------------------------
     cluster.open_voting().await;
 
-    // ── V11–V12: the fixed matrix (voter 4 re-votes: reject → approve) ────
+    // -- V11-V12: the fixed matrix (voter 4 re-votes: reject -> approve) ----
     let mut digests = Vec::new();
     for (i, option) in MATRIX.iter().enumerate() {
         let pin = cluster.pin(i).await;
@@ -67,7 +67,7 @@ async fn referendum_happy_path() {
         digests.push(vote["digest"].as_str().unwrap().to_string());
     }
 
-    // ── V14: publication check — digest on ≥2 BBs, no ⊥ ───────────────────
+    // -- V14: publication check - digest on >=2 BBs, no bot -------------------
     let status = cluster
         .voter_post(
             0,
@@ -75,11 +75,11 @@ async fn referendum_happy_path() {
             serde_json::json!({ "passphrase": cluster.passphrases[0] }),
         )
         .await;
-    assert_eq!(status["no_bot"], true, "V14: no ⊥ for voter 1");
+    assert_eq!(status["no_bot"], true, "V14: no bot for voter 1");
     assert_eq!(status["published_bb_ids"], serde_json::json!([1, 2]));
 
-    // ── V13: the CAI confirmation happened inside `vote_and_cast` (every
-    //    cast is confirmed); a second confirmation has no held ballot ──────
+    // -- V13: the CAI confirmation happened inside `vote_and_cast` (every
+    //    cast is confirmed); a second confirmation has no held ballot ------
     let again = cluster
         .client
         .post(format!("{}/api/confirm", cluster.voter_urls[0]))
@@ -93,7 +93,7 @@ async fn referendum_happy_path() {
         again.status()
     );
 
-    // ── V14: manual verification on the public wbb-ui ─────────────────────
+    // -- V14: manual verification on the public wbb-ui ---------------------
     let ui = cluster.ui_base();
     let page = cluster
         .client
@@ -123,12 +123,12 @@ async fn referendum_happy_path() {
         "V13/V14: voter 1's cast-as-intended disclosure is on the public page"
     );
 
-    // ── A5/A7: close voting, run the §3.9 tally ───────────────────────────
+    // -- A5/A7: close voting, run the Sec. 3.9 tally ---------------------------
     cluster.close_voting().await;
     let outcome = cluster.tally().await;
 
-    assert_eq!(outcome.released, 18, "9 casts × 2 BBs released");
-    assert_eq!(outcome.reconciled, 9, "every ballot on ≥2 BBs (no ⊥)");
+    assert_eq!(outcome.released, 18, "9 casts x 2 BBs released");
+    assert_eq!(outcome.reconciled, 9, "every ballot on >=2 BBs (no bot)");
     assert_eq!(outcome.deduped, 8, "voter 4's re-vote merges (last wins)");
     assert_eq!(outcome.valid, 8, "all real-PIN ballots pass the ACC check");
     assert_eq!(outcome.legitimate, 8, "all voters are eligible");
@@ -138,7 +138,7 @@ async fn referendum_happy_path() {
         "fixed matrix tally"
     );
 
-    // ── §4.4 census: every tallying artifact is on the log ────────────────
+    // -- WBB entry census: every tallying artifact is on the log ----------------
     assert_eq!(cluster.entry_type_count("eligible_vids").await, 1);
     assert_eq!(
         cluster.entry_type_count("cast_intended_proof").await,
@@ -151,7 +151,7 @@ async fn referendum_happy_path() {
     assert_eq!(cluster.entry_type_count("tally_proof").await, 1);
     assert_eq!(cluster.entry_type_count("tally_result").await, 1);
 
-    // ── V15: results viewing — decode the published tally_result ──────────
+    // -- V15: results viewing - decode the published tally_result ----------
     let entries = cluster.wbb.client.entries().await.expect("wbb entries");
     let published: TallyCounts = entries
         .entries
@@ -186,7 +186,7 @@ async fn referendum_happy_path() {
         "links to the tally_result and tally_proof entries"
     );
 
-    // ── A6: §3.10 universal verification — every step OK ──────────────────
+    // -- A6: Sec. 3.10 universal verification - every step OK ------------------
     let report = cluster.audit().await;
     assert!(report.ok(), "auditor found failures:\n{}", report.render());
     assert!(

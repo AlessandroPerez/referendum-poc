@@ -1,7 +1,7 @@
-//! M8 integration test: full election → §3.9 tally over HTTP → expected
-//! counts → §3.10 auditor OK (roadmap M8.4).
+//! Tally + audit integration test: full election -> Sec. 3.9 tally over HTTP -> expected
+//! counts -> Sec. 3.10 auditor OK .
 //!
-//! Covers the deferred M6/M7 tally assertions: the ruse-PIN and wrong-PIN
+//! Covers the tally assertions of the earlier flows: the ruse-PIN and wrong-PIN
 //! ballots are accepted by the BBs (indistinguishable at cast time) but
 //! filtered by the ACC check, and a re-vote resolves last-wins via the ox
 //! fingerprint dedup.
@@ -50,7 +50,7 @@ async fn full_election_tally_and_audit() {
     helpers::init();
     let _cluster = helpers::cluster_guard().await;
 
-    // ── 1. Ceremony + WBB (all entities + the phase manager) ──────────────
+    // -- 1. Ceremony + WBB (all entities + the phase manager) --------------
     let temp = tempfile::tempdir().expect("tempdir");
     let ceremony_dir = temp.path();
     let base = base_settings();
@@ -100,7 +100,7 @@ async fn full_election_tally_and_audit() {
     .await
     .expect("spawn wbb");
 
-    // ── 2. Credentials (setup phase) ──────────────────────────────────────
+    // -- 2. Credentials (setup phase) --------------------------------------
     let wbb_url = Url::parse(&format!("https://127.0.0.1:{}/wbb/", ports.wbb)).unwrap();
     gen_credentials(GenCredentialsConfig {
         ceremony_dir: ceremony_dir.to_path_buf(),
@@ -117,7 +117,7 @@ async fn full_election_tally_and_audit() {
     .await
     .expect("gen credentials");
 
-    // ── 3. Boot the cluster (incl. the TT servers, first time in e2e) ─────
+    // -- 3. Boot the cluster (incl. the TT servers, first time in e2e) -----
     let mk = |name: &str, port: u16| cluster_settings(ceremony_dir, name, port, &ports, &base);
 
     tokio::spawn(dip::run(
@@ -202,7 +202,7 @@ async fn full_election_tally_and_audit() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let client = reqwest_client_trusting_ca(ca.cert_pem()).unwrap();
 
-    // ER publishes the setup entries (A2) — the auditor reads the election
+    // ER publishes the setup entries (A2) - the auditor reads the election
     // context and n_acc from the log itself.
     let setup = client
         .post(format!("https://127.0.0.1:{}/admin/setup", ports.er))
@@ -215,7 +215,7 @@ async fn full_election_tally_and_audit() {
         .expect("admin setup");
     assert!(setup.status().is_success(), "ER setup publication");
 
-    // ── 4. Enroll the three voters, open voting ───────────────────────────
+    // -- 4. Enroll the three voters, open voting ---------------------------
     let mut passphrases = Vec::new();
     for (i, base_url) in voter_urls.iter().enumerate() {
         passphrases.push(enroll_voter(&client, base_url, &format!("VOTER-00{}", i + 1)).await);
@@ -233,7 +233,7 @@ async fn full_election_tally_and_audit() {
     .await
     .expect("open voting");
 
-    // ── 5. Cast: v1 approve · v2 reject → blank (re-vote, last wins) ──────
+    // -- 5. Cast: v1 approve * v2 reject -> blank (re-vote, last wins) ------
     let (v1, p1) = (&voter_urls[0], &passphrases[0]);
     let pin1 = pin_of(&client, v1, p1).await;
     vote_and_cast(&client, v1, p1, "approve", pin1).await;
@@ -243,8 +243,8 @@ async fn full_election_tally_and_audit() {
     vote_and_cast(&client, v2, p2, "reject", pin2).await;
     vote_and_cast(&client, v2, p2, "blank", pin2).await;
 
-    // ── 6. v3: ruse-PIN and wrong-PIN ballots (accepted at cast, filtered
-    //          at tally), then the real approve ────────────────────────────
+    // -- 6. v3: ruse-PIN and wrong-PIN ballots (accepted at cast, filtered
+    //          at tally), then the real approve ----------------------------
     let (v3, p3) = (&voter_urls[2], &passphrases[2]);
     let pin3 = pin_of(&client, v3, p3).await;
     let ruse: serde_json::Value = post_json(
@@ -267,7 +267,7 @@ async fn full_election_tally_and_audit() {
     vote_and_cast(&client, v3, p3, "reject", wrong_pin).await;
     vote_and_cast(&client, v3, p3, "approve", pin3).await;
 
-    // ── 7. Close voting, run the §3.9 tally driver over HTTP ──────────────
+    // -- 7. Close voting, run the Sec. 3.9 tally driver over HTTP --------------
     transition_phase(
         PhaseTransitionConfig {
             ceremony_dir: ceremony_dir.to_path_buf(),
@@ -310,8 +310,8 @@ async fn full_election_tally_and_audit() {
 
     // 6 cast ballots on both BBs; the re-vote merges in the ox dedup; the
     // ruse-PIN and wrong-PIN ballots die at the ACC check.
-    assert_eq!(outcome.released, 12, "6 ballots × 2 BBs released");
-    assert_eq!(outcome.reconciled, 6, "all ballots on ≥2 BBs (no ⊥)");
+    assert_eq!(outcome.released, 12, "6 ballots x 2 BBs released");
+    assert_eq!(outcome.reconciled, 6, "all ballots on >=2 BBs (no bot)");
     assert_eq!(outcome.deduped, 5, "v2's re-vote merges (last wins)");
     assert_eq!(outcome.valid, 3, "ruse + wrong-PIN filtered by ACC check");
     assert_eq!(outcome.legitimate, 3, "all valid votes are eligible");
@@ -321,7 +321,7 @@ async fn full_election_tally_and_audit() {
         "blank=1 (v2 last vote), si=2 (v1 + v3 real), no=0"
     );
 
-    // ── 8. All tally entries on the WBB (§4.4) ────────────────────────────
+    // -- 8. All tally entries on the WBB (Sec. 3.4.2 write policy) ----------------------------
     let entries = wbb.client.entries().await.expect("wbb entries");
     let type_count = |wanted: &str| -> usize {
         use base64::Engine as _;
@@ -338,7 +338,7 @@ async fn full_election_tally_and_audit() {
     assert_eq!(
         type_count("cast_intended_proof"),
         12,
-        "6 confirmations × 2 BBs"
+        "6 confirmations x 2 BBs"
     );
     assert_eq!(type_count("encrypted_ballot"), 12, "per-BB release");
     assert_eq!(type_count("mixed_ballots"), 2, "vote + credential mixes");
@@ -350,7 +350,7 @@ async fn full_election_tally_and_audit() {
     assert_eq!(type_count("tally_proof"), 1);
     assert_eq!(type_count("tally_result"), 1);
 
-    // ── 9. §3.10 universal verification: every audit step passes ──────────
+    // -- 9. Sec. 3.10 universal verification: every audit step passes ----------
     let mut entity_keys = vec![
         ("PM-1".to_string(), pm_key.verifying_key()),
         (
@@ -391,9 +391,9 @@ async fn full_election_tally_and_audit() {
     );
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// -- Helpers ----------------------------------------------------------------
 
-/// Vote (any PIN — ruse and wrong PINs included) and cast to both BBs.
+/// Vote (any PIN - ruse and wrong PINs included) and cast to both BBs.
 async fn vote_and_cast(
     client: &reqwest::Client,
     base_url: &str,
@@ -419,8 +419,8 @@ async fn vote_and_cast(
         2,
         "both BBs accept the ballot"
     );
-    // §3.8.4 steps 8–17: confirm the cast-as-intended disclosure — only
-    // confirmed ballots are released at tally (§3.9 step 2).
+    // Sec. 3.8.4 steps 8-17: confirm the cast-as-intended disclosure - only
+    // confirmed ballots are released at tally (Sec. 3.9 step 2).
     let confirm: serde_json::Value = post_json(
         client,
         &format!("{base_url}/api/confirm"),

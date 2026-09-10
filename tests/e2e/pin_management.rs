@@ -1,4 +1,4 @@
-//! M7 integration test: PIN management & lifecycle (roadmap M7) —
+//! PIN management & lifecycle integration test (Sec. 3.7):
 //! ruse PIN (coercion partial), PIN re-send, new-device recovery,
 //! revocation + spare-vid re-issue, trusted-authority settings.
 
@@ -43,7 +43,7 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     helpers::init();
     let _cluster = helpers::cluster_guard().await;
 
-    // ── 1. Ceremony + WBB (entities incl. ER for revocation entries) ──────
+    // -- 1. Ceremony + WBB (entities incl. ER for revocation entries) ------
     let temp = tempfile::tempdir().expect("tempdir");
     let ceremony_dir = temp.path();
     let base = base_settings();
@@ -87,7 +87,7 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     .await
     .expect("spawn wbb");
 
-    // ── 2. Credentials + cluster boot ─────────────────────────────────────
+    // -- 2. Credentials + cluster boot -------------------------------------
     let wbb_url = Url::parse(&format!("https://127.0.0.1:{}/wbb/", ports.wbb)).unwrap();
     gen_credentials(GenCredentialsConfig {
         ceremony_dir: ceremony_dir.to_path_buf(),
@@ -176,7 +176,7 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let client = reqwest_client_trusting_ca(ca.cert_pem()).unwrap();
 
-    // ── 3. Enroll voters 1 and 2 (M5 flow, setup phase) ───────────────────
+    // -- 3. Enroll voters 1 and 2 (setup phase) -------------------
     let v1 = voter_urls[0].clone();
     let v2 = voter_urls[1].clone();
     let v3 = voter_urls[2].clone();
@@ -185,7 +185,7 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     let pin1 = pin_of(&client, &v1, &p1).await;
     let pin2 = pin_of(&client, &v2, &p2).await;
 
-    // ── 4. V7 ruse PIN: verifies locally, distinct from the real PIN ──────
+    // -- 4. V7 ruse PIN: verifies locally, distinct from the real PIN ------
     let ruse: serde_json::Value = post_json(
         &client,
         &format!("{v1}/api/pin/ruse"),
@@ -195,9 +195,9 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     let ruse_pin = ruse["ruse_pin"].as_u64().expect("ruse pin");
     assert_ne!(ruse_pin, pin1, "ruse PIN must differ from the real PIN");
 
-    // §3.7.3: the ruse DVNIZKP substitutes the original, so only the ruse
+    // Sec. 3.7.3: the ruse DVNIZKP substitutes the original, so only the ruse
     // PIN verifies locally from now on; the valid PIN keeps its ability to
-    // cast a counted vote (asserted in M8/M9).
+    // cast a counted vote (asserted in the tally tests).
     for (pin, expected) in [
         (ruse_pin, true),
         (pin1, false),
@@ -212,7 +212,7 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
         assert_eq!(verify["valid"], expected, "verify_pin({pin})");
     }
 
-    // ── 5. Open voting; coercion partial: cast ruse then real ballot ──────
+    // -- 5. Open voting; coercion partial: cast ruse then real ballot ------
     transition_phase(
         PhaseTransitionConfig {
             ceremony_dir: ceremony_dir.to_path_buf(),
@@ -257,9 +257,9 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
         serde_json::json!({ "passphrase": p1 }),
     )
     .await;
-    // Tally-side filtering of the ruse ballot is asserted in M8.
+    // Tally-side filtering of the ruse ballot is asserted in the tally tests.
 
-    // ── 6. V6 PIN re-send: fresh rid + retrieval, same PIN ────────────────
+    // -- 6. V6 PIN re-send: fresh rid + retrieval, same PIN ----------------
     let resend: serde_json::Value = post_json(
         &client,
         &format!("{v1}/api/pin/resend"),
@@ -269,10 +269,10 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     assert_eq!(
         resend["pin"].as_u64().unwrap(),
         pin1,
-        "re-delivered PIN equals the original (§3.7.2)"
+        "re-delivered PIN equals the original (Sec. 3.7.2)"
     );
 
-    // ── 7. V8 new-device recovery on the fresh voter-3 server ─────────────
+    // -- 7. V8 new-device recovery on the fresh voter-3 server -------------
     let wrong = client
         .post(format!("{v3}/api/device/recover"))
         .json(&serde_json::json!({
@@ -293,15 +293,15 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     assert_eq!(recovered["vid"], 1);
     assert_eq!(recovered["pin_set"], true);
     // The blob was refreshed while a ruse was active, so the recovered
-    // device DISPLAYS the ruse PIN (§3.7.3 cover story survives recovery) …
+    // device DISPLAYS the ruse PIN (Sec. 3.7.3 cover story survives recovery) ...
     assert_eq!(
         pin_of(&client, &v3, &p1).await,
         ruse_pin,
         "PIN display shows the active ruse PIN after recovery"
     );
-    // … and, the ruse substitution having been restored with it (§3.7.3),
+    // ... and, the ruse substitution having been restored with it (Sec. 3.7.3),
     // only the ruse PIN verifies locally on the recovered device; the real
-    // credential is restored too (its counted cast is asserted in M8/M9).
+    // credential is restored too (its counted cast is asserted in the tally tests).
     for (pin, expected) in [(ruse_pin, true), (pin1, false)] {
         let verify: serde_json::Value = post_json(
             &client,
@@ -315,7 +315,7 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
         );
     }
 
-    // ── 8. V9 revocation: spare vid, WBB commitment, new PIN ──────────────
+    // -- 8. V9 revocation: spare vid, WBB commitment, new PIN --------------
     let revoked: serde_json::Value = post_json(
         &client,
         &format!("{v2}/api/revoke"),
@@ -323,7 +323,7 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     )
     .await;
     let new_vid = revoked["vid"].as_u64().unwrap();
-    assert_eq!(new_vid, 9, "first spare vid is n_voters + 1 (D12)");
+    assert_eq!(new_vid, 9, "first spare vid is n_voters + 1 ");
 
     // The eligible list swaps old vid 2 for spare vid 9 (A7).
     let eligible: serde_json::Value = get_json(
@@ -338,7 +338,10 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
 
     // Exactly one revocation_commitment entry on the WBB.
     let commitments = count_entries_of_type(&wbb.client, "revocation_commitment").await;
-    assert_eq!(commitments, 1, "revocation commitment published (§3.7.5)");
+    assert_eq!(
+        commitments, 1,
+        "revocation commitment published (Sec. 3.7.5)"
+    );
 
     // The re-issued credential delivers a fresh PIN.
     wait_pin_ready(&client, &v2, &p2).await;
@@ -358,7 +361,7 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     .await;
     assert_eq!(verify["valid"], true);
 
-    // ── 9. V10 trusted-authority settings ─────────────────────────────────
+    // -- 9. V10 trusted-authority settings ---------------------------------
     for invalid in [
         serde_json::json!({ "passphrase": p1, "rts": ["rt-1"], "bbs": ["bb-1", "bb-2"] }),
         serde_json::json!({ "passphrase": p1, "rts": ["rt-1", "rt-2"], "bbs": ["bb-1"] }),
@@ -403,7 +406,7 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     );
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// -- Helpers ----------------------------------------------------------------
 
 async fn count_entries_of_type(
     wbb_client: &referendum_poc::clients::wbb::WbbClient,

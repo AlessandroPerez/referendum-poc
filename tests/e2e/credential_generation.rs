@@ -1,5 +1,5 @@
-//! M4 integration test: ceremony → election-admin generates 10 credentials,
-//! co-signs `setup,RT,acc_pub_key,2,…` on the WBB, and writes enrollment
+//! Credential-generation integration test: ceremony -> election-admin generates 10 credentials,
+//! co-signs `setup,RT,acc_pub_key,2,...` on the WBB, and writes enrollment
 //! packages.
 
 use std::path::PathBuf;

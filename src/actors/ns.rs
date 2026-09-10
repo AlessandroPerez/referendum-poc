@@ -1,4 +1,4 @@
-//! Notification Server (NS) stub service (M3.2).
+//! Notification Server (NS) stub service.
 //!
 //! NS receives per-voter notifications from RTs and lets voter clients poll for
 //! readiness. The PoC keeps notifications in memory.

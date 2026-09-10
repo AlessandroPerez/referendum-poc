@@ -1,8 +1,8 @@
-//! M5 integration test: full enrollment of one voter through the real HTTP
-//! cluster (DIP, NS, ER, RT×3, voter-server) — login → enroll → NS readiness →
-//! PIN retrieval (share delivery + threshold DVNIZKP) → local PIN verification.
+//! Enrollment integration test: full enrollment of one voter through the real HTTP
+//! cluster (DIP, NS, ER, RTx3, voter-server) - login -> enroll -> NS readiness ->
+//! PIN retrieval (share delivery + threshold DVNIZKP) -> local PIN verification.
 //!
-//! Exit gate (roadmap M5): the retrieved PIN is deterministic — asserted
+//! The retrieved PIN is deterministic - asserted
 //! against a committed expected value derived from the test master seed.
 
 use std::path::PathBuf;
@@ -30,8 +30,8 @@ use super::helpers;
 
 const MASTER_SEED: [u8; 32] = [0xabu8; 32];
 
-/// The deterministic 8-digit PIN for voter 1 under `MASTER_SEED` (D4/§9).
-/// If this changes, the credential derivation pipeline changed — that is a
+/// The deterministic 8-digit PIN for voter 1 under `MASTER_SEED` .
+/// If this changes, the credential derivation pipeline changed - that is a
 /// determinism regression, not a value to casually update.
 const EXPECTED_PIN_VOTER_1: usize = 25149446;
 
@@ -40,7 +40,7 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
     helpers::init();
     let _cluster = helpers::cluster_guard().await;
 
-    // ── 1. Ceremony ────────────────────────────────────────────────────────
+    // -- 1. Ceremony --------------------------------------------------------
     let temp = tempfile::tempdir().expect("tempdir");
     let ceremony_dir = temp.path();
     let base = base_settings();
@@ -50,7 +50,7 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
     write_artifacts(ceremony_dir, &base, &ceremony, &master_seed, &base.dip)
         .expect("write ceremony artifacts");
 
-    // ── 2. WBB (needed by gen-credentials for the acc_pub_key entry) ──────
+    // -- 2. WBB (needed by gen-credentials for the acc_pub_key entry) ------
     let ca = ClusterCa::from_seed(&MASTER_SEED).unwrap();
     let wbb_cert = issue_service_cert(&ca, "wbb", &MASTER_SEED).unwrap();
     let wbb_port = helpers::free_port();
@@ -69,7 +69,7 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
     .await
     .expect("spawn wbb");
 
-    // ── 3. Credentials (enrollment packages) ──────────────────────────────
+    // -- 3. Credentials (enrollment packages) ------------------------------
     let wbb_url = Url::parse(&format!("https://127.0.0.1:{wbb_port}/wbb/")).unwrap();
     gen_credentials(GenCredentialsConfig {
         ceremony_dir: ceremony_dir.to_path_buf(),
@@ -86,7 +86,7 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
     .await
     .expect("gen credentials");
 
-    // ── 4. Boot the cluster: DIP, NS, ER, RT×3, voter-server ─────────────
+    // -- 4. Boot the cluster: DIP, NS, ER, RTx3, voter-server -------------
     let dip_port = helpers::free_port();
     let ns_port = helpers::free_port();
     let er_port = helpers::free_port();
@@ -156,7 +156,7 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // ── 5. Drive the SPA API (V1–V5) ──────────────────────────────────────
+    // -- 5. Drive the SPA API (V1-V5) --------------------------------------
     let client = reqwest_client_trusting_ca(ca.cert_pem()).unwrap();
     let base_url = format!("https://127.0.0.1:{voter_port}");
 
@@ -180,7 +180,7 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
     .await;
     assert_eq!(login["vid"], 1);
 
-    // V2–V3 enroll (passphrase shown once).
+    // V2-V3 enroll (passphrase shown once).
     let enroll: serde_json::Value = post_json(
         &client,
         &format!("{base_url}/api/enroll"),
@@ -209,7 +209,7 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
         .unwrap();
     assert_eq!(dup.status(), 409, "second enrollment must conflict");
 
-    // V4a status poll until the NS shows ≥ t_RT notifications.
+    // V4a status poll until the NS shows >= t_RT notifications.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let status: serde_json::Value = post_json(
@@ -238,10 +238,10 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
     .await;
     let pin = pin_resp["pin"].as_u64().expect("pin") as usize;
     assert_gt!(pin, 0);
-    assert_lt!(pin, 100_000_000, "8-digit PIN (D14)");
+    assert_lt!(pin, 100_000_000, "8-digit PIN");
     assert_eq!(
         pin, EXPECTED_PIN_VOTER_1,
-        "PIN must be deterministic under the committed master seed (M5 exit gate)"
+        "PIN must be deterministic under the committed master seed"
     );
 
     // Retrieval is idempotent.
@@ -262,7 +262,7 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
     .await;
     assert_eq!(shown["pin"].as_u64().unwrap() as usize, pin);
 
-    // V5 verify: correct PIN passes, wrong PIN fails (§3.7.1).
+    // V5 verify: correct PIN passes, wrong PIN fails (Sec. 3.7.1).
     let ok: serde_json::Value = post_json(
         &client,
         &format!("{base_url}/api/pin/verify"),
@@ -280,7 +280,7 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
     .await;
     assert_eq!(bad["valid"], false, "wrong PIN must not verify");
 
-    // Wrong passphrase is a generic 401 (anti-enumeration, §09).
+    // Wrong passphrase is a generic 401 (anti-enumeration, Sec. 09).
     let unauthorized = client
         .post(format!("{base_url}/api/status"))
         .json(&serde_json::json!({ "passphrase": "wrong-wrong-wrong-wrong-wrong-wrong" }))
@@ -355,7 +355,7 @@ fn cluster_settings(
                 })
                 .collect();
             // The enrollment flow never contacts a BB, but the voter server
-            // requires BB peers at boot (M6); point them at unused ports.
+            // requires BB peers at boot; point them at unused ports.
             for i in 1..=2 {
                 peers.push(PeerSettings {
                     name: format!("bb-{i}"),

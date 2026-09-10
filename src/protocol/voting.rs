@@ -1,7 +1,7 @@
-//! Ballot casting primitives (M6, §3.8 / §5.3.1.6 / §3.11).
+//! Ballot casting primitives (Sec. 3.8, 5.3.1.6, 3.11).
 //!
 //! Framework-free helpers shared by the voter server and the ballot boxes:
-//! ballot digests, casting-token commitments, the §3.8.4 `bb_id` encryption,
+//! ballot digests, casting-token commitments, the Sec. 3.8.4 `bb_id` encryption,
 //! and the WBB entry payloads of the voting phase.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -22,8 +22,8 @@ use crate::domain::{BallotDigest, CommB, ReferendumOption};
 type G = RistrettoGroup;
 
 /// Minimum number of distinct BBs that must publish a ballot digest for the
-/// ballot to count as accepted without ⊥ (§3.8.5).  A protocol constant, not
-/// a deployment knob: the ⊥ check is defined as "at least two".
+/// ballot to count as accepted without bot (Sec. 3.8.5).  A protocol constant, not
+/// a deployment knob: the bot check is defined as "at least two".
 pub const NO_BOT_MIN_BBS: usize = 2;
 
 /// Errors from the voting helpers.
@@ -54,7 +54,7 @@ fn shake256_32(parts: &[&[u8]]) -> [u8; 32] {
     out
 }
 
-/// Ballot digest `H(B)`: SHAKE256 over the CBOR encoding (§3.8.4, roadmap §8.4).
+/// Ballot digest `H(B)`: SHAKE256 over the CBOR encoding (Sec. 3.8.4).
 pub fn ballot_digest(ballot: &Ballot<G>) -> Result<BallotDigest, VotingError> {
     let bytes = serde_cbor::to_vec(ballot)?;
     Ok(BallotDigest::from_bytes(shake256_32(&[
@@ -63,7 +63,7 @@ pub fn ballot_digest(ballot: &Ballot<G>) -> Result<BallotDigest, VotingError> {
     ])))
 }
 
-/// Casting-token commitment `commB = H(B ‖ rndcomm)` (§5.3.1.6).
+/// Casting-token commitment `commB = H(B || rndcomm)` (Sec. 5.3.1.6).
 pub fn comm_b(ballot: &Ballot<G>, rndcomm: &[u8; 32]) -> Result<CommB, VotingError> {
     let bytes = serde_cbor::to_vec(ballot)?;
     Ok(CommB::from_bytes(shake256_32(&[
@@ -73,7 +73,7 @@ pub fn comm_b(ballot: &Ballot<G>, rndcomm: &[u8; 32]) -> Result<CommB, VotingErr
     ])))
 }
 
-/// Build the referendum `Choice` for an option (§3.11: 3 first-level options,
+/// Build the referendum `Choice` for an option (Sec. 3.11: 3 first-level options,
 /// one candidate slot each; `Choice::new(i, vec![0], params)`).
 pub fn referendum_choice(
     option: ReferendumOption,
@@ -82,8 +82,8 @@ pub fn referendum_choice(
     Ok(Choice::new(option.index(), vec![0], params)?)
 }
 
-/// `E_pk_TT[g1^{2^bb_id}]` (§3.8.4): the tally later multiplies these
-/// homomorphically to detect ballots accepted by fewer than 2 BBs (⊥ check).
+/// `E_pk_TT[g1^{2^bb_id}]` (Sec. 3.8.4): the tally later multiplies these
+/// homomorphically to detect ballots accepted by fewer than 2 BBs (bot check).
 pub fn bb_id_encryption<R: RngCore + CryptoRng>(
     election_pk: &ElectionPublicKey<G>,
     bb_id: u64,
@@ -99,9 +99,9 @@ pub fn bb_id_encryption<R: RngCore + CryptoRng>(
     )
 }
 
-// ── WBB entry payloads (voting phase, roadmap §4.4) ────────────────────────
+// -- WBB entry payloads (voting phase, Sec. 3.4.2 write policy) ------------------------
 
-/// Content of a `voting,BB,ballot_digest,1,…` entry.
+/// Content of a `voting,BB,ballot_digest,1,...` entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BallotDigestEntry {
     pub digest: BallotDigest,
@@ -110,24 +110,24 @@ pub struct BallotDigestEntry {
     pub receipt: Receipt,
 }
 
-/// Content of a `voting,BB,ballot_metadata,1,…` entry.
+/// Content of a `voting,BB,ballot_metadata,1,...` entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct BallotMetadataEntry {
     pub digest: BallotDigest,
     pub bb_id: u64,
-    /// `E_pk_TT[g1^{2^bb_id}]` (§3.8.4).
+    /// `E_pk_TT[g1^{2^bb_id}]` (Sec. 3.8.4).
     pub bb_id_enc: Ciphertext<G>,
 }
 
-/// Content of a `voting,BB,cast_intended_proof,1,…` entry (§3.8.4 steps 11–16).
+/// Content of a `voting,BB,cast_intended_proof,1,...` entry (Sec. 3.8.4 steps 11-16).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct CaiEntry {
     pub digest: BallotDigest,
     pub bb_id: u64,
     pub disclosure: DiscloseCAI<G>,
-    /// Logical confirmation time (§3.8.4 step 17).
+    /// Logical confirmation time (Sec. 3.8.4 step 17).
     pub confirmed_at_ms: u64,
 }
 
@@ -191,7 +191,7 @@ impl ParsedWbbData {
 ///
 /// The content field is the RAW next-phase name (the WBB compares it
 /// directly, no base64) and the entry's phase field must equal the server's
-/// current phase (§3.4.2, fork `http.go`).
+/// current phase (Sec. 3.4.2, fork `http.go`).
 pub fn phase_transition_data_string(from: &str, to: &str) -> String {
     format!("{from},PM,phase_transition,1,{to}")
 }

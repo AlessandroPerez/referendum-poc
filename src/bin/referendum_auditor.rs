@@ -1,9 +1,9 @@
-//! Universal-verification auditor CLI (§3.10, M8).
+//! Universal-verification auditor CLI (Sec. 3.10).
 //!
 //! Fetches every artifact from the WBB and re-runs the public pipeline; only
 //! the entity verifying keys and the cluster CA come from the local
 //! ceremony/config directory. Prints per-step OK/FAIL and exits nonzero on
-//! any FAIL (roadmap §8.6).
+//! any FAIL (Sec. 3.10).
 
 use std::path::PathBuf;
 
@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("invalid wbb.base_url: {e}"))?,
     };
 
-    // Entity verifying keys from the ceremony's PUBLIC key files — an
+    // Entity verifying keys from the ceremony's PUBLIC key files - an
     // external verifier needs no secret material to run the audit.
     let mut names = vec![("pm".to_string(), "PM-1".to_string())];
     names.push(("er".to_string(), "ER-1".to_string()));

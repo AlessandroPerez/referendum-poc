@@ -5,7 +5,7 @@
 configuration/local.yaml
 configuration/production.yaml
 
-# Generated TLS material (D16: produced by setup-ceremony)
+# Generated TLS material (produced by setup-ceremony)
 certs/
 
 # Local WBB runtime state
