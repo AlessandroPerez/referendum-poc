@@ -2,98 +2,209 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1a5fb4">
   <title>Vote App - Referendum PoC</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <main>
-    <h1>Vote App</h1>
-    <p class="subtitle">Referendum proof-of-concept - voter enrollment</p>
+  <div class="app">
+    <header class="appbar">
+      <span class="appbar-title">Vote App</span>
+      <span id="route-title" class="appbar-sub">Enrollment</span>
+      <button id="btn-menu" class="menu-button" aria-haspopup="true" aria-expanded="false" aria-controls="menu" aria-label="Sections">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+      <nav id="menu" class="menu hidden" aria-label="Sections">
+        <a href="/enrollment" data-route="enrollment" class="menu-item active">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="11" r="2.2"/><path d="M5.5 16c.6-1.8 2-2.6 3.5-2.6s2.9.8 3.5 2.6M15 10h4M15 13.5h3"/></svg>
+          <span>Enrollment</span>
+        </a>
+        <a href="/voting" data-route="voting" class="menu-item">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h16v7H4zM7 13l1.5-8h7L17 13"/><path d="M9.5 8.5l2 2 3.5-3.5"/></svg>
+          <span>Voting</span>
+        </a>
+        <a href="/management" data-route="management" class="menu-item">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
+          <span>Management</span>
+        </a>
+      </nav>
+    </header>
 
-    <section id="screen-login" class="screen">
-      <h2>1 - eID login</h2>
-      <label for="fiscal-id">Fiscal ID</label>
-      <input id="fiscal-id" placeholder="VOTER-001" autocomplete="off">
-      <button id="btn-login">Log in via DIP</button>
-    </section>
+    <main id="scroller" class="scroller">
+      <!-- /enrollment: every step up to a verified PIN -->
+      <div class="view" data-route="enrollment">
+        <section id="screen-login" class="screen">
+          <p class="step">Step 1 of 5</p>
+          <h2>eID login</h2>
+          <p class="lead">Identify yourself with your electronic ID to start the enrollment.</p>
+          <label for="fiscal-id">Fiscal ID</label>
+          <input id="fiscal-id" placeholder="VOTER-001" autocomplete="off">
+          <button id="btn-login">Log in via DIP</button>
+        </section>
 
-    <section id="screen-enroll" class="screen hidden">
-      <h2>2 - Enrollment</h2>
-      <p>Logged in. Assigned pseudonymous id: <strong id="vid-label"></strong></p>
-      <button id="btn-enroll">Enroll this device</button>
-      <div id="passphrase-box" class="hidden">
-        <p class="warning">Write down your passphrase - it is shown only once
-          and unlocks every later step:</p>
-        <code id="passphrase"></code>
+        <section id="screen-enroll" class="screen hidden">
+          <p class="step">Step 2 of 5</p>
+          <h2>Enroll this device</h2>
+          <p class="lead">Logged in. Your pseudonymous id is <strong id="vid-label"></strong>.</p>
+          <button id="btn-enroll">Enroll this device</button>
+          <div id="passphrase-box" class="hidden">
+            <p class="warning">Write down your passphrase - it is shown only once
+              and unlocks every later step:</p>
+            <code id="passphrase"></code>
+            <button id="btn-enroll-next" class="secondary">I wrote it down</button>
+          </div>
+        </section>
+
+        <section id="screen-status" class="screen hidden">
+          <p class="step">Step 3 of 5</p>
+          <h2>PIN delivery</h2>
+          <p class="lead">The registration tellers prepare your PIN. Check whether it is ready.</p>
+          <label for="passphrase-input">Passphrase</label>
+          <input id="passphrase-input" placeholder="six-words-joined-by-dashes" autocomplete="off">
+          <button id="btn-status">Check status</button>
+          <p id="status-label" class="result"></p>
+          <button id="btn-retrieve" class="hidden">Retrieve PIN</button>
+        </section>
+
+        <section id="screen-pin" class="screen hidden">
+          <p class="step">Step 4 of 5</p>
+          <h2>Your PIN</h2>
+          <p class="lead">This is your 8-digit voting PIN. Memorise it and keep it secret.</p>
+          <code id="pin" class="big"></code>
+          <button id="btn-pin-next" class="secondary">Continue</button>
+        </section>
+
+        <section id="screen-verify" class="screen hidden">
+          <p class="step">Step 5 of 5</p>
+          <h2>Verify your PIN</h2>
+          <p class="lead">Type your PIN to verify it locally on this device.</p>
+          <label for="pin-input">PIN</label>
+          <input id="pin-input" inputmode="numeric" autocomplete="off">
+          <button id="btn-verify">Verify</button>
+          <p id="verify-label" class="result"></p>
+          <a id="link-to-voting" class="button secondary hidden" href="/voting" data-route="voting">Go to voting</a>
+        </section>
       </div>
-    </section>
 
-    <section id="screen-status" class="screen hidden">
-      <h2>3 - PIN delivery status</h2>
-      <label for="passphrase-input">Passphrase</label>
-      <input id="passphrase-input" placeholder="six-words-joined-by-dashes" autocomplete="off">
-      <button id="btn-status">Check status</button>
-      <p id="status-label"></p>
-      <button id="btn-retrieve" class="hidden">Retrieve PIN</button>
-    </section>
+      <!-- /voting: build, cast, check, confirm -->
+      <div class="view hidden" data-route="voting">
+        <section id="screen-unlock-voting" class="screen unlock">
+          <h2>Unlock</h2>
+          <p class="lead">Enter the passphrase you received at enrollment.</p>
+          <label for="unlock-voting-input">Passphrase</label>
+          <input id="unlock-voting-input" class="unlock-input" placeholder="six-words-joined-by-dashes" autocomplete="off">
+          <button class="btn-unlock">Unlock</button>
+        </section>
 
-    <section id="screen-pin" class="screen hidden">
-      <h2>4 - Your PIN</h2>
-      <p>Voting PIN (8 digits):</p>
-      <code id="pin"></code>
-      <h2>5 - Verify PIN</h2>
-      <label for="pin-input">Type your PIN to verify it locally</label>
-      <input id="pin-input" inputmode="numeric" autocomplete="off">
-      <button id="btn-verify">Verify</button>
-      <p id="verify-label"></p>
-    </section>
+        <section id="screen-vote" class="screen locked">
+          <p class="step">Step 1 of 3</p>
+          <h2>Your vote</h2>
+          <p class="lead">Election phase: <strong id="phase-label">...</strong></p>
+          <label for="vote-option">Your choice</label>
+          <select id="vote-option">
+            <option value="blank">Scheda bianca (blank)</option>
+            <option value="approve">Si (approve)</option>
+            <option value="reject">No (reject)</option>
+          </select>
+          <label for="vote-pin">PIN</label>
+          <input id="vote-pin" inputmode="numeric" autocomplete="off">
+          <button id="btn-vote">Build ballot</button>
+        </section>
 
-    <section id="screen-vote" class="screen">
-      <h2>6 - Vote</h2>
-      <p>Phase: <strong id="phase-label">...</strong></p>
-      <label for="vote-option">Your choice</label>
-      <select id="vote-option">
-        <option value="blank">Scheda bianca (blank)</option>
-        <option value="approve">Si (approve)</option>
-        <option value="reject">No (reject)</option>
-      </select>
-      <label for="vote-pin">PIN</label>
-      <input id="vote-pin" inputmode="numeric" autocomplete="off">
-      <button id="btn-vote">Build ballot</button>
-      <div id="ballot-box" class="hidden">
-        <p>Ballot digest: <code id="ballot-digest"></code></p>
-        <p>Emoji receipt: <code id="ballot-emoji"></code></p>
-        <button id="btn-cast">Cast to ballot boxes</button>
-        <button id="btn-status" class="hidden">Check publication</button>
-        <button id="btn-confirm" class="hidden">Confirm (CAI)</button>
-        <p id="cast-label"></p>
+        <section id="screen-cast" class="screen hidden">
+          <p class="step">Step 2 of 3</p>
+          <h2>Cast your ballot</h2>
+          <p class="lead">Your encrypted ballot is ready. Keep the digest: it finds your ballot on the public bulletin board.</p>
+          <label>Ballot digest</label>
+          <code id="ballot-digest" class="small"></code>
+          <label>Emoji receipt</label>
+          <code id="ballot-emoji"></code>
+          <button id="btn-cast">Cast to ballot boxes</button>
+          <p id="cast-label" class="result"></p>
+        </section>
+
+        <section id="screen-check" class="screen hidden">
+          <p class="step">Step 3 of 3</p>
+          <h2>Check and confirm</h2>
+          <p class="lead">Check that the ballot boxes published your ballot, then confirm it.
+            A ballot that is cast but never confirmed is <strong>not counted</strong>.</p>
+          <button id="btn-publication">Check publication</button>
+          <p id="publication-label" class="result"></p>
+          <div id="control-box" class="control hidden">
+            <div class="control-value"><span>Control code</span><strong id="control-code">--</strong></div>
+            <div class="control-value"><span>Control sum</span><strong id="control-sum">--</strong></div>
+          </div>
+          <p id="control-check" class="hint"></p>
+          <label id="cai-label">Which control value should be opened?</label>
+          <div id="cai-choice" class="segmented" role="radiogroup" aria-labelledby="cai-label">
+            <button type="button" class="seg" role="radio" aria-checked="false" data-slot="code">Code</button>
+            <button type="button" class="seg" role="radio" aria-checked="false" data-slot="sum">Sum</button>
+            <button type="button" class="seg toss" data-slot="toss">Toss a coin</button>
+          </div>
+          <p class="hint">Note the two numbers. Choose which one to open only now, after casting:
+            the app could not know your choice when it sealed the ballot, so it could not have
+            altered your vote unnoticed. Only one can ever be opened - both would reveal your vote.</p>
+          <button id="btn-confirm" disabled>Confirm (cast as intended)</button>
+          <p id="confirm-label" class="result"></p>
+        </section>
       </div>
-    </section>
 
-    <section id="screen-manage" class="screen">
-      <h2>7 - PIN &amp; credential management</h2>
-      <button id="btn-ruse">Get a ruse PIN</button>
-      <code id="ruse-pin" class="hidden"></code>
-      <button id="btn-resend">Re-send PIN</button>
-      <button id="btn-revoke">Revoke credential</button>
-      <p id="manage-label"></p>
-      <h3>Recover on this device</h3>
-      <label for="recover-fiscal">Fiscal ID</label>
-      <input id="recover-fiscal" placeholder="VOTER-001" autocomplete="off">
-      <label for="recover-passphrase">Passphrase</label>
-      <input id="recover-passphrase" autocomplete="off">
-      <button id="btn-recover">Recover</button>
-      <h3>Trusted authorities</h3>
-      <label for="trusted-rts">Registration tellers (comma-separated)</label>
-      <input id="trusted-rts" placeholder="rt-1,rt-2,rt-3" autocomplete="off">
-      <label for="trusted-bbs">Ballot boxes (comma-separated)</label>
-      <input id="trusted-bbs" placeholder="bb-1,bb-2" autocomplete="off">
-      <button id="btn-trusted">Save selection</button>
-    </section>
+      <!-- /management: PIN and credential operations -->
+      <div class="view hidden" data-route="management">
+        <section id="screen-unlock-management" class="screen unlock">
+          <h2>Unlock</h2>
+          <p class="lead">Enter the passphrase you received at enrollment.
+            To move your account to this device, scroll down to <em>Recover</em>.</p>
+          <label for="unlock-management-input">Passphrase</label>
+          <input id="unlock-management-input" class="unlock-input" placeholder="six-words-joined-by-dashes" autocomplete="off">
+          <button class="btn-unlock">Unlock</button>
+        </section>
 
-    <p id="error" class="error hidden"></p>
-  </main>
+        <section id="screen-pin-tools" class="screen locked">
+          <h2>PIN tools</h2>
+          <p class="lead">A ruse PIN looks and verifies like the real one, but every ballot cast
+            with it is discarded at tally. Hand it over if you are being coerced.</p>
+          <button id="btn-ruse">Get a ruse PIN</button>
+          <code id="ruse-pin" class="big hidden"></code>
+          <button id="btn-resend" class="secondary">Re-send my PIN</button>
+          <p id="pin-tools-label" class="result"></p>
+        </section>
+
+        <section id="screen-revoke" class="screen locked">
+          <h2>Revoke credential</h2>
+          <p class="lead">Deletes your current voting identity: every ballot cast with it becomes
+            void and you are issued a new pseudonymous id and a new PIN.</p>
+          <button id="btn-revoke" class="danger">Revoke credential</button>
+          <p id="revoke-label" class="result"></p>
+        </section>
+
+        <section id="screen-trusted" class="screen locked">
+          <h2>Trusted authorities</h2>
+          <p class="lead">Choose which registration tellers and ballot boxes this app relies on.</p>
+          <label for="trusted-rts">Registration tellers (comma-separated)</label>
+          <input id="trusted-rts" placeholder="rt-1,rt-2,rt-3" autocomplete="off">
+          <label for="trusted-bbs">Ballot boxes (comma-separated)</label>
+          <input id="trusted-bbs" placeholder="bb-1,bb-2" autocomplete="off">
+          <button id="btn-trusted">Save selection</button>
+          <p id="trusted-label" class="result"></p>
+        </section>
+
+        <section id="screen-recover" class="screen">
+          <h2>Recover on this device</h2>
+          <p class="lead">Lost or changed your device? Restore your account with your eID and passphrase.</p>
+          <label for="recover-fiscal">Fiscal ID</label>
+          <input id="recover-fiscal" placeholder="VOTER-001" autocomplete="off">
+          <label for="recover-passphrase">Passphrase</label>
+          <input id="recover-passphrase" autocomplete="off">
+          <button id="btn-recover">Recover</button>
+          <p id="recover-label" class="result"></p>
+        </section>
+      </div>
+    </main>
+
+    <p id="error" class="toast hidden" role="alert"></p>
+  </div>
   <script src="/app.js"></script>
 </body>
 </html>

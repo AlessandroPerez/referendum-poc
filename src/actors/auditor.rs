@@ -514,16 +514,22 @@ fn audit_entries(
                      cast-as-intended disclosure"
                 )),
                 Some(cai) => {
-                    if record
-                        .ballot
-                        .verify_cai_disclosure(&cai.disclosure, &context)
-                    {
-                        confirmed_releases += 1;
-                    } else {
-                        confirmation_problems.push(format!(
+                    // Re-open the disclosure on the released ballot: it must
+                    // verify, and the values the BB published must be the
+                    // ones really sealed in the ballot - otherwise the BB
+                    // could show the voter the number they expect while the
+                    // ballot says something else.
+                    match record.ballot.open_cai_disclosure(&cai.disclosure, &context) {
+                        Some(opened) if opened == cai.opened => confirmed_releases += 1,
+                        Some(opened) => confirmation_problems.push(format!(
+                            "digest {digest}: BB-{bb_id} published opened values {:?} but \
+                             the released ballot opens to {opened:?}",
+                            cai.opened
+                        )),
+                        None => confirmation_problems.push(format!(
                             "digest {digest}: cast-as-intended disclosure published by \
                              BB-{bb_id} does not verify against the released ballot"
-                        ));
+                        )),
                     }
                 }
             }

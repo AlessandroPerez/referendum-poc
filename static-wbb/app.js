@@ -32,12 +32,83 @@ async function refreshPhase() {
 }
 
 let cachedEntries = [];
+let validators = [];
+let autoRefresh = null;
+
+// Validators (demo): independent parties that rebuild the log's Merkle
+// tree, check it against the signed checkpoint and BLS-sign every leaf they
+// verified. Each row shows a semaphore: red = no validator signature yet,
+// yellow = some, green = every registered validator signed.
+function semaphore(row) {
+  const total = row.validators_total || 0;
+  const signed = (row.validations || []).length;
+  const state = signed === 0 ? "red" : signed < total ? "yellow" : "green";
+  const cell = document.createElement("td");
+  const dot = document.createElement("span");
+  dot.className = `sem sem-${state}`;
+  dot.title =
+    signed === 0
+      ? "no validator has signed this entry yet"
+      : `signed by ${row.validations.join(", ")}`;
+  cell.appendChild(dot);
+  cell.appendChild(document.createTextNode(` ${signed}/${total}`));
+  return cell;
+}
+
+async function refreshValidators() {
+  try {
+    const result = await api("/api/validators");
+    validators = result.validators || [];
+    const legend = $("validators-legend");
+    if (validators.length === 0) {
+      legend.classList.add("hidden");
+      if (autoRefresh) clearInterval(autoRefresh);
+      autoRefresh = null;
+      return;
+    }
+    legend.classList.remove("hidden");
+    $("validators-list").textContent = validators.join(", ");
+    // Validations land one by one: keep the table live while they do.
+    if (!autoRefresh) autoRefresh = setInterval(refreshEntries, 2000);
+  } catch (e) {
+    setError(`Failed to load validators: ${e.message}`);
+  }
+}
+
+// WBB timestamps are Unix milliseconds when the cluster runs on the wall
+// clock: shown in the viewer's local time, with the exact UTC instant as a
+// tooltip. On the reproducible logical clock they are small tick counters,
+// shown as-is.
+function isUnixMillis(ts) {
+  return typeof ts === "number" && ts >= 1e12;
+}
+
+function formatTimestamp(ts) {
+  if (!isUnixMillis(ts)) {
+    return String(ts);
+  }
+  return new Date(ts).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "medium",
+  });
+}
+
+function timestampCell(ts) {
+  const td = document.createElement("td");
+  td.textContent = formatTimestamp(ts);
+  if (isUnixMillis(ts)) {
+    td.title = `${new Date(ts).toISOString()} (${ts} ms)`;
+  }
+  return td;
+}
 
 async function refreshEntries() {
   try {
     cachedEntries = await api("/api/entries");
     const tbody = $("entries").querySelector("tbody");
     tbody.innerHTML = "";
+    const showValidators = cachedEntries.some((r) => (r.validators_total || 0) > 0);
+    $("entries").classList.toggle("no-validators", !showValidators);
     for (const row of cachedEntries) {
       const tr = document.createElement("tr");
       for (const value of [
@@ -46,12 +117,13 @@ async function refreshEntries() {
         row.role,
         row.entry_type,
         (row.entity_ids || []).join(", "),
-        row.timestamp,
       ]) {
         const td = document.createElement("td");
         td.textContent = value;
         tr.appendChild(td);
       }
+      tr.appendChild(timestampCell(row.timestamp));
+      tr.appendChild(semaphore(row));
       tbody.appendChild(tr);
     }
     renderResults();
@@ -80,12 +152,18 @@ function renderResults() {
       .join(", ")} - co-signed by the tabulation tellers and verifiable with <code>referendum-auditor</code>.</p>`;
 }
 
-// The published disclosure reveals which cast-as-intended slot (code or
-// sum) was opened for the list-level (l1) value (Sec. 3.8.5 1(b)).
-function describeDisclosure(disclosure) {
-  if (!disclosure || !disclosure.l1) return "n/a";
-  const slot = Object.keys(disclosure.l1)[0];
-  return slot === "Code" ? "l1 control code" : slot === "Sum" ? "l1 control sum" : slot;
+// The published proof carries the value the voter chose to open, after
+// casting, at each level, decoded by the ballot box (Sec. 3.8.5 1(b)). The
+// voter compares it with the control value their app showed.
+function describeOpened(opened) {
+  if (!opened) return "n/a";
+  const one = (level) => {
+    const slot = level ? Object.keys(level)[0] : null;
+    if (!slot) return "n/a";
+    const name = slot === "Code" ? "control code" : "control sum";
+    return `${name} ${String(level[slot]).padStart(2, "0")}`;
+  };
+  return `list level: ${one(opened.l1)}, candidate level: ${one(opened.l2)}`;
 }
 
 function renderSearch(digest) {
@@ -108,19 +186,19 @@ function renderSearch(digest) {
   summary.innerHTML =
     `Published by ballot box(es) <strong>${bbIds.join(", ")}</strong> - ` +
     (noBot
-      ? "[OK] accepted by at least 2 ballot boxes (no bot)."
-      : "[!] fewer than 2 ballot boxes published this digest (bot).") +
+      ? "[OK] accepted by at least 2 ballot boxes, as required for it to be counted."
+      : "[!] published by fewer than 2 ballot boxes: this ballot would be discarded at tally.") +
     (cai.length > 0
       ? ` [OK] cast-as-intended disclosure published by BB ${cai
           .map((r) => r.payload.bb_id)
           .sort()
-          .join(", ")} (confirmed at ${cai[0].payload.confirmed_at_ms}; disclosed slot: ${describeDisclosure(cai[0].payload.disclosure)}). Only confirmed ballots are counted.`
+          .join(", ")} (confirmed at ${formatTimestamp(cai[0].payload.confirmed_at_ms)}; opened control values - ${describeOpened(cai[0].payload.opened)}). Compare them with the numbers your Vote App showed. Only confirmed ballots are counted.`
       : " [!] No cast-as-intended disclosure yet - an unconfirmed ballot is NOT counted at tally.");
   container.appendChild(summary);
 
   for (const row of digests) {
     const p = document.createElement("p");
-    p.innerHTML = `BB ${row.payload.receipt.bb_id}: emoji receipt <code>${(row.payload.emoji || []).join(" ")}</code>, logical time ${row.payload.receipt.received_at_unix_ms}`;
+    p.innerHTML = `BB ${row.payload.receipt.bb_id}: emoji receipt <code>${(row.payload.emoji || []).join(" ")}</code>, received at ${formatTimestamp(row.payload.receipt.received_at_unix_ms)}`;
     container.appendChild(p);
   }
 }
@@ -133,3 +211,4 @@ $("btn-refresh").addEventListener("click", refreshEntries);
 
 refreshPhase();
 refreshEntries();
+refreshValidators();

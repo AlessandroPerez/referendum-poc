@@ -73,7 +73,7 @@
       "\ud83d\udd0b"
     ]
   ],
-  "checkpoint_root": "2JTjqawaE1nfGrPMxZVfjyk1seDTUusxK4PQ9DmWuCQ=",
+  "checkpoint_root": "TrhJUrK57242JBOXdjKRSToOPjwiURdP+8PrhRTuVxQ=",
   "election_context_sha256": "d6138a4693510f6635d666ea7e04ea47ecd76487ccebd9f91913331100d94aca",
   "entries": [
     {
@@ -122,12 +122,12 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "457f9cf9aef2b8b389b78d2f099bf250d0d45240c8041fd64c8512bb465bd54b",
+      "data_sha256": "616e6e58229b9e9763a21651643b014ce00e616f98c27d1d0ec1cc571ab8e3d4",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
     {
-      "data_sha256": "e6c87c82953a05b782729b9d3a18aa9e99a726b65497abee859f96958c5e12fc",
+      "data_sha256": "f0422027322b3f11401a94b00c53c2be18a8255e04459490adb0fdcaf0b10030",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
@@ -152,12 +152,12 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "f4033be40b2074e080a663d10e4e86d52b5bef2bc33113271b06dbc26eb0261f",
+      "data_sha256": "36448548217d052cb84e82ec003806c1c9d3a2d370b4436c57759e3c18256183",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
     {
-      "data_sha256": "3b344ba9043ab8de24a244a9acaa69863ce92e195bbd59430659f1f5d7290fc4",
+      "data_sha256": "ce1edf8242711fd00b68e7867f90f64a70c64292aa993dc21d5c24fe69252f5f",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
@@ -182,12 +182,12 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "517c392acf052087ffeaf5a2d9571d09705b3aa27e05acdc1a1d53f9d56af86f",
+      "data_sha256": "a26b2203afd558a449f1cac5f8a76ec56c21ce6d947ba1e307e2875e7da840c0",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
     {
-      "data_sha256": "1df165a4fa53bfde850e6d8a6cae5f59ef3caf4e692a827a1710467162b0a1a2",
+      "data_sha256": "cacffed88c458211e91f9100255f026a6db542ee2ec6ad33e72ca04d4992cf3f",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
@@ -212,12 +212,12 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "0d557149ad9880835b66f49f66099646d1570a9364782fbf39cc09dbd38b9fc0",
+      "data_sha256": "ef983945bac535f7a9e7b7276a857cdd073be094b8c42ad204aecd647b0a8f27",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
     {
-      "data_sha256": "8bb0e54477530d12bc96df85e4872b770b13eab1da12abab82cdd6e01d0c0c11",
+      "data_sha256": "ed7d3b1989c4a48f9ba93e6e0cd11c2398fe88662e6e17a2a68eeda4b29f6e47",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
@@ -242,12 +242,12 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "ec60d2aea8098ffb887544dedb442ba0064ff533f8782a586b3cf3148bbbf900",
+      "data_sha256": "f0a846c686eeb3a0e406d2d286d82bf4e5925165ce2aa82fcef5f7822992d88f",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
     {
-      "data_sha256": "3165502c003b933247e41f4d3b2f74cb3faed61b42b64c352ee135fbb9378fee",
+      "data_sha256": "9593472558bb7dbff3f202cd025c4736fd3f76408760b103c15e2c200c29331f",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
@@ -272,12 +272,12 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "e277592c0ec2e7a7f51177b76c36cc125cdd70b0d02871fff165184e51afc160",
+      "data_sha256": "c5710c0ef74fd2722beada65bfa3500c96fe5e3d6b64905dd1290e983e325daf",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
     {
-      "data_sha256": "96a6223acd2a3eb9f10b3a6b3536a2d0e0363df11c8a3b7b3ea68cb549113ba0",
+      "data_sha256": "0e8b1fa280fb8a8d0265a0ad3df1bc90158956ce0edaae5dd90ff1c7c2210296",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
@@ -302,12 +302,12 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "8707f5c36cd7f37a9bd2a172150ba750a8840d635a1ffd7e21114832cd4129c9",
+      "data_sha256": "eeb9cecd8545a6c2a9759e1537c09d4ec0cbc8f36f08dff7587804eab90e664a",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
     {
-      "data_sha256": "fde6009a403d6d97cd11850fd52697b6f863a334ae138a666f8104b2d0dd0129",
+      "data_sha256": "4dd0693c99c82c353377c9d359c4435c292566356e6d40f161ce714d275e2735",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
@@ -332,12 +332,12 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "7172a89e6e34e41b074de6135e74e9f5a9fe2077340c94aa0fbfccd5603b695d",
+      "data_sha256": "2e86acb8adeb9a876206bbebc65e7e6831fd6ca28ea1b7ba21dccaba4c23384c",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
     {
-      "data_sha256": "a734f8e50e76a654adffe77cea51630ed9f17ca1e9d4831c17e11ce0e4eecac6",
+      "data_sha256": "2fea185d3bbba31c2f0d9d25944e5b7f41884d32009bf585b9ac19d0aa72e5c2",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
@@ -362,12 +362,12 @@
       "phase": "voting"
     },
     {
-      "data_sha256": "9f288aa634a6f3c7709b51ba060a8b11e65662b149400a843150c8f417ce77ee",
+      "data_sha256": "7eca724eb803cd96fd30f58d2051b3289c0efe836624266be272ac80ecb8c99a",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },
     {
-      "data_sha256": "473d75a7cef569a3c2c8844886ca1fd1357c7b253e666bd739a38d9d81befd30",
+      "data_sha256": "71bc78e56cfa89a05ce9650a56750ddccd61d02b150691eaa089bc5443fdd0e5",
       "entry_type": "cast_intended_proof",
       "phase": "voting"
     },

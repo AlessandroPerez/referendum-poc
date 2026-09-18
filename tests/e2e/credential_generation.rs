@@ -14,7 +14,7 @@ use referendum_poc::actors::rt;
 use referendum_poc::configuration::{
     get_configuration, CeremonyPaths, ServiceSettings, Settings, TlsSettings, WbbSettings,
 };
-use referendum_poc::protocol::clock::LogicalClock;
+use referendum_poc::protocol::clock::Clock;
 use referendum_poc::protocol::rng::MasterSeed;
 use referendum_poc::protocol::setup::artifacts::write_artifacts;
 use referendum_poc::protocol::setup::run_ceremony;
@@ -68,6 +68,15 @@ async fn admin_generates_credentials_and_publishes_acc_pub_key() {
     .await
     .expect("spawn wbb");
 
+    // A leftover from the older layout, which held EVERY teller's shares:
+    // credential generation must remove it.
+    std::fs::create_dir_all(ceremony_dir.join("output")).unwrap();
+    std::fs::write(
+        ceremony_dir.join("output").join("enrollment_packages.json"),
+        b"[\"stale all-shares file\"]",
+    )
+    .unwrap();
+
     // 3. Run the election-admin credential-generation driver (local RT signing).
     let wbb_url = Url::parse(&format!("https://127.0.0.1:{wbb_port}/wbb/")).unwrap();
     gen_credentials(GenCredentialsConfig {
@@ -76,14 +85,55 @@ async fn admin_generates_credentials_and_publishes_acc_pub_key() {
         n_acc: base_settings.election.n_acc,
         t_rt: base_settings.election.t_rt,
         t_prime: base_settings.election.t_prime,
-        wbb_url,
+        wbb_url: wbb_url.clone(),
         rt_urls: None,
         rt_tokens: None,
         ca_pem: ca.cert_pem().to_string(),
-        clock: LogicalClock::new(base_settings.clock.base_ms, base_settings.clock.tick_ms),
+        clock: Clock::from_settings(&base_settings.clock),
     })
     .await
     .expect("gen credentials");
+
+    // A rerun - e.g. after a crash between publication and the writing of the
+    // share files - is deterministic: it must ADOPT the entry already on the
+    // board (not be refused as a duplicate, not publish it twice) and leave
+    // the same files behind.
+    let first_run = std::fs::read(
+        ceremony_dir
+            .join("output")
+            .join("rt-1-credential_shares.json"),
+    )
+    .unwrap();
+    std::fs::remove_file(
+        ceremony_dir
+            .join("output")
+            .join("rt-1-credential_shares.json"),
+    )
+    .unwrap();
+    gen_credentials(GenCredentialsConfig {
+        ceremony_dir: ceremony_dir.to_path_buf(),
+        output_dir: ceremony_dir.join("output"),
+        n_acc: base_settings.election.n_acc,
+        t_rt: base_settings.election.t_rt,
+        t_prime: base_settings.election.t_prime,
+        wbb_url: wbb_url.clone(),
+        rt_urls: None,
+        rt_tokens: None,
+        ca_pem: ca.cert_pem().to_string(),
+        clock: Clock::from_settings(&base_settings.clock),
+    })
+    .await
+    .expect("a rerun adopts the published entry and rewrites the files");
+    let second_run = std::fs::read(
+        ceremony_dir
+            .join("output")
+            .join("rt-1-credential_shares.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        first_run, second_run,
+        "credential generation is deterministic"
+    );
 
     // 4. Poll the WBB until the acc_pub_key entry appears.
     let entries = poll_for_rt_setup_entries(&wbb.client, 1, Duration::from_secs(15))
@@ -123,14 +173,78 @@ async fn admin_generates_credentials_and_publishes_acc_pub_key() {
         .expect("signatures array");
     assert_eq!(signatures.len(), 3);
 
-    // 6. Verify 10 enrollment packages were written.
-    let packages_path = ceremony_dir.join("output").join("enrollment_packages.json");
-    let packages_json = tokio::fs::read_to_string(&packages_path)
+    // 6. Credential material is split by recipient (Sec. 3.5.4): the ER file
+    //    carries no teller share, each teller's file carries ONLY its own
+    //    shares, and no file holds every teller's shares any more.
+    let output = ceremony_dir.join("output");
+    assert!(
+        !output.join("enrollment_packages.json").exists(),
+        "the all-shares file must not exist"
+    );
+    let er_json = tokio::fs::read_to_string(output.join("er_credential_packages.json"))
         .await
-        .expect("read enrollment packages");
-    let packages: Vec<serde_json::Value> =
-        serde_json::from_str(&packages_json).expect("parse enrollment packages");
-    assert_eq!(packages.len(), base_settings.election.n_acc);
+        .expect("read the ER credential file");
+    let er_packages: Vec<serde_json::Value> = serde_json::from_str(&er_json).unwrap();
+    assert_eq!(er_packages.len(), base_settings.election.n_acc);
+    for package in &er_packages {
+        let keys: Vec<&String> = package.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["a", "enc_a_ext"], "the ER sees A and E[A] only");
+    }
+    assert!(
+        !er_json.contains("from_id"),
+        "no teller share in the ER file"
+    );
+    for rt_id in 1..=base_settings.election.n_rt {
+        let path = output.join(format!("rt-{rt_id}-credential_shares.json"));
+        let shares: Vec<serde_json::Value> = serde_json::from_str(
+            &tokio::fs::read_to_string(&path)
+                .await
+                .expect("RT share file"),
+        )
+        .unwrap();
+        assert_eq!(shares.len(), base_settings.election.n_acc);
+        for share in &shares {
+            assert_eq!(
+                share["share"]["from_id"].as_u64().unwrap() as usize,
+                rt_id,
+                "RT-{rt_id}'s file holds only its own shares"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "share files are owner-readable only");
+        }
+    }
+
+    // A teller polices its file: it loads its own shares, and refuses a file
+    // with another teller's share or with the wrong number of credentials.
+    use referendum_poc::protocol::acc::parse_rt_credential_shares;
+    let n_acc = base_settings.election.n_acc;
+    let own = std::fs::read(output.join("rt-1-credential_shares.json")).unwrap();
+    assert_eq!(
+        parse_rt_credential_shares(&own, 1, n_acc).unwrap().len(),
+        n_acc
+    );
+    let as_other = parse_rt_credential_shares(&own, 2, n_acc)
+        .unwrap_err()
+        .to_string();
+    assert!(as_other.contains("another teller's share"), "{as_other}");
+    // One foreign share smuggled into an otherwise valid file.
+    let mut mixed: Vec<serde_json::Value> = serde_json::from_slice(&own).unwrap();
+    let foreign: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(output.join("rt-2-credential_shares.json")).unwrap())
+            .unwrap();
+    mixed[3] = foreign[3].clone();
+    let smuggled = parse_rt_credential_shares(&serde_json::to_vec(&mixed).unwrap(), 1, n_acc)
+        .unwrap_err()
+        .to_string();
+    assert!(smuggled.contains("share of RT-2"), "{smuggled}");
+    let short = parse_rt_credential_shares(&own, 1, n_acc + 1)
+        .unwrap_err()
+        .to_string();
+    assert!(short.contains("credentials"), "{short}");
 }
 
 #[tokio::test]

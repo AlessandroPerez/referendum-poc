@@ -8,7 +8,7 @@ use referendum_poc::actors::admin::{
     TallyConfig,
 };
 use referendum_poc::actors::load_settings;
-use referendum_poc::protocol::clock::LogicalClock;
+use referendum_poc::protocol::clock::Clock;
 use reqwest::Url;
 use secrecy::SecretString;
 
@@ -28,7 +28,7 @@ struct Cli {
 enum Command {
     /// Generate anonymous credentials and publish the signed acc_pub_key WBB entry.
     GenCredentials {
-        /// Directory where `enrollment_packages.json` is written.
+        /// Directory where the ER credential file and the per-RT share files are written.
         #[arg(short, long)]
         output: Option<PathBuf>,
 
@@ -119,7 +119,7 @@ async fn run_transition(
             ceremony_dir,
             wbb_url,
             ca_pem,
-            clock: LogicalClock::new(settings.clock.base_ms, settings.clock.tick_ms),
+            clock: Clock::from_settings(&settings.clock),
         },
         from,
         to,
@@ -184,7 +184,7 @@ async fn main() -> anyhow::Result<()> {
                 None
             };
 
-            let clock = LogicalClock::new(settings.clock.base_ms, settings.clock.tick_ms);
+            let clock = Clock::from_settings(&settings.clock);
 
             gen_credentials(GenCredentialsConfig {
                 ceremony_dir,
@@ -228,7 +228,7 @@ async fn main() -> anyhow::Result<()> {
                 rt_urls: peer_urls(&settings, "rt")?,
                 tt_urls: peer_urls(&settings, "tt")?,
                 ca_pem,
-                clock: LogicalClock::new(settings.clock.base_ms, settings.clock.tick_ms),
+                clock: Clock::from_settings(&settings.clock),
                 n_acc: settings.election.n_acc,
                 t_tt: settings.election.t_tt,
             })

@@ -24,10 +24,13 @@ cargo build --manifest-path "$ROOT/Cargo.toml" --bins
 echo "==> Building the WBB (sunlight fork)"
 mkdir -p "$ROOT/target/wbb-bin"
 (cd "$WBB_SRC" && go build -o "$ROOT/target/wbb-bin/sunlight" ./cmd/sunlight)
+(cd "$WBB_SRC" && go build -o "$ROOT/target/wbb-bin/wbb-validator" ./cmd/wbb-validator)
 
 echo "==> Running the setup ceremony -> $OUT"
 rm -rf "$OUT"
-"$ROOT/target/debug/setup-ceremony" -c "$ROOT" -o "$OUT"
+# Real (wall-clock) timestamps for the demo; the test suite keeps the
+# reproducible logical clock.
+"$ROOT/target/debug/setup-ceremony" -c "$ROOT" -o "$OUT" --clock wall
 
 pids=()
 cleanup() {
@@ -38,11 +41,60 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# WBB validators (demo only): independent parties that rebuild the log's
+# Merkle tree, verify it against the signed checkpoint and BLS-sign every
+# leaf. Their public keys are registered with the WBB before it starts.
+N_VALIDATORS=3
+echo "==> Generating $N_VALIDATORS validator BLS keys"
+(
+    umask 077
+    for i in $(seq 1 "$N_VALIDATORS"); do
+        head -c 32 /dev/urandom >"$OUT/validator-$i-seed.bin"
+    done
+)
+{
+    echo "    validator_bls_keys:"
+    for i in $(seq 1 "$N_VALIDATORS"); do
+        key=$("$ROOT/target/wbb-bin/wbb-validator" -name "V-$i" \
+            -seed-file "$OUT/validator-$i-seed.bin" -print-key)
+        echo "      V-$i: $key"
+    done
+} >>"$OUT/sunlight.yaml"
+
 echo "==> Starting the WBB on https://127.0.0.1:8090/wbb/"
 (cd "$OUT" && exec "$ROOT/target/wbb-bin/sunlight" -c sunlight.yaml -testcert) \
     >"$OUT/wbb.log" 2>&1 &
 pids+=($!)
-sleep 2
+# Fail fast, with the WBB's own log, instead of letting every later step
+# hit "connection refused".
+for _ in $(seq 1 30); do
+    if curl --silent --fail --cacert "$OUT/ca.pem" https://127.0.0.1:8090/health >/dev/null 2>&1; then
+        break
+    fi
+    if ! kill -0 "${pids[-1]}" 2>/dev/null; then
+        echo "!! the WBB exited during startup - $OUT/wbb.log says:" >&2
+        grep -v '^{' "$OUT/wbb.log" | tail -5 >&2
+        exit 1
+    fi
+    sleep 0.5
+done
+if ! curl --silent --fail --cacert "$OUT/ca.pem" https://127.0.0.1:8090/health >/dev/null 2>&1; then
+    echo "!! the WBB did not become ready in 15s - see $OUT/wbb.log" >&2
+    exit 1
+fi
+
+# Validators are deliberately slow (a few seconds per leaf, each one slower
+# than the previous) so the public page shows signatures landing one by one.
+echo "==> Starting $N_VALIDATORS WBB validators"
+for i in $(seq 1 "$N_VALIDATORS"); do
+    "$ROOT/target/wbb-bin/wbb-validator" -name "V-$i" \
+        -seed-file "$OUT/validator-$i-seed.bin" \
+        -log https://127.0.0.1:8090/wbb -cacert "$OUT/ca.pem" \
+        -interval 1s -delay "$((2 + 2 * i))s" \
+        >"$OUT/validator-$i.log" 2>&1 &
+    pids+=($!)
+    echo "    V-$i (delay $((2 + 2 * i))s, $OUT/validator-$i.log)"
+done
 
 # Start one service binary with cwd = ceremony dir (keys, shares, tokens and
 # election_context.json resolve relative to it) and per-service overrides.
@@ -62,8 +114,9 @@ start_service() {
     echo "    $name on https://127.0.0.1:$port ($OUT/$name.log)"
 }
 
-# Credentials must exist before the ER boots: it loads
-# output/enrollment_packages.json at startup.
+# Credentials must exist before the ER and the RTs boot: each loads only its
+# own file from output/ at startup (the ER never sees a teller share, a teller
+# never sees another teller's).
 echo "==> Generating credentials (A3) and publishing acc_pub_key"
 "$ROOT/target/debug/election-admin" -c "$OUT" gen-credentials
 
@@ -115,6 +168,11 @@ cat <<EOF
                           https://127.0.0.1:9003/  (fiscal id VOTER-003)
    Public bulletin board: https://127.0.0.1:9100/
    WBB log (raw):         https://127.0.0.1:8090/wbb/entries
+
+ $N_VALIDATORS validators check the WBB's Merkle tree and BLS-sign every entry;
+ the bulletin board shows a semaphore per entry (red: no signature yet,
+ yellow: some, green: all) that turns green a few seconds after each
+ entry is published.
 
  The TLS certificates are issued by the demo cluster CA, so the browser
  will warn on first visit - accept the exception (test-only PKI).

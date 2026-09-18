@@ -29,8 +29,8 @@ use crate::clients::dip::DipAssertion;
 use crate::clients::wbb::{sign_entry, WbbClient};
 use crate::configuration::{DipSettings, Settings};
 use crate::domain::{CommB, TokenValue, Vid};
-use crate::protocol::acc::{CredentialPackage, EnrollmentPackage};
-use crate::protocol::clock::LogicalClock;
+use crate::protocol::acc::CredentialPackage;
+use crate::protocol::clock::Clock;
 use crate::protocol::merkle::voter_id_merkle_root;
 use crate::protocol::rng::{operation_rng, ActorSeed, MasterSeed};
 use crate::protocol::setup::{assign_vids, voter_pairs};
@@ -46,7 +46,8 @@ pub struct ErState {
     election: crate::configuration::ElectionSettings,
     wbb_client: WbbClient,
     dip: DipSettings,
-    enrollment_packages: Vec<EnrollmentPackage>,
+    /// `A` and `E[A]` per credential - the ER never holds a teller share.
+    credential_packages: Vec<CredentialPackage>,
     enrolled_vids: Arc<Mutex<HashSet<Vid>>>,
     tokens: Arc<Mutex<HashMap<TokenValue, TokenMeta>>>,
     token_counter: Arc<Mutex<u64>>,
@@ -54,8 +55,8 @@ pub struct ErState {
     devices: Arc<Mutex<HashMap<Vid, DeviceRecord>>>,
     /// Latest PIN-request rid per vid (needed by retrieval-token issuance).
     last_rid: Arc<Mutex<HashMap<Vid, String>>>,
-    /// Logical clock for WBB entry timestamps.
-    clock: Arc<Mutex<LogicalClock>>,
+    /// Clock for WBB entry timestamps (logical in tests, wall in real runs).
+    clock: Arc<Mutex<Clock>>,
     /// Revoked vids (V9); their credentials are excluded from the eligible
     /// list and filtered at tally.
     revoked_vids: Arc<Mutex<HashSet<Vid>>>,
@@ -139,8 +140,8 @@ impl ErState {
         election: crate::configuration::ElectionSettings,
         wbb_client: WbbClient,
         dip: DipSettings,
-        enrollment_packages: Vec<EnrollmentPackage>,
-        clock: LogicalClock,
+        credential_packages: Vec<CredentialPackage>,
+        clock: Clock,
         token_seed: ActorSeed,
         internal_token: SecretString,
     ) -> Self {
@@ -153,7 +154,7 @@ impl ErState {
             election,
             wbb_client,
             dip,
-            enrollment_packages,
+            credential_packages,
             enrolled_vids: Arc::new(Mutex::new(HashSet::new())),
             tokens: Arc::new(Mutex::new(HashMap::new())),
             token_counter: Arc::new(Mutex::new(0)),
@@ -286,8 +287,8 @@ impl ErState {
         let entity_id = "ER-1".to_string();
         let signing_key = self.signing_key();
 
-        // One logical timestamp per artifact, advancing the clock in between
-        // (deterministic logical clock).
+        // One timestamp per artifact, advancing the clock in between
+        // (a no-op on the wall clock).
         let timestamps: Vec<i64> = {
             let mut clock = self.clock.lock().await;
             data_strings
@@ -363,9 +364,9 @@ async fn login_handler(
     let vid = state.effective_vid(&req.assertion.fiscal_id).await?;
 
     let credential_package = state
-        .enrollment_packages
+        .credential_packages
         .get((vid.value() - 1) as usize)
-        .map(EnrollmentPackage::credential_package)
+        .cloned()
         .ok_or_else(|| ErError::Internal("missing enrollment package".into()))?;
 
     let registration_token = state
@@ -496,46 +497,54 @@ struct RevocationResponse {
 
 /// V9: revoke the caller's credential and re-issue a spare vid (Sec. 3.7.5).
 ///
-/// Publishes a salted-hash `voting,ER,revocation_commitment,1,...` entry: the
-/// commitment binds (old vid, new vid) without revealing the linkage.
+/// Publishes a salted-hash `{phase},ER,revocation_commitment,1,...` entry in
+/// the board's current phase (setup during enrollment, or voting): the
+/// commitment binds (old vid, new vid) without revealing the linkage. The
+/// revocation takes effect only after the entry is published.
 #[tracing::instrument(skip(state, req))]
 async fn revocation_handler(
     Extension(state): Extension<Arc<ErState>>,
     Json(req): Json<RevocationRequest>,
 ) -> Result<Json<RevocationResponse>, ErError> {
     state.verify_dip_assertion(&req.assertion, &req.signature)?;
+
+    // The spare-id counter stays locked for the whole operation, state
+    // changes included: requests are fully serialised, so a second request of
+    // the same voter sees the id the first one issued and revokes THAT.
+    let mut next_spare = state.next_spare_vid.lock().await;
     let old_vid = state.effective_vid(&req.assertion.fiscal_id).await?;
 
-    // Assign the next spare vid (nACC > nV leaves spares).
-    let new_vid = {
-        let mut next = state.next_spare_vid.lock().await;
-        if *next > state.election.n_acc as u64 {
-            return Err(ErError::Internal("spare credentials exhausted".into()));
-        }
-        let vid = Vid::new(*next).map_err(|_| ErError::Internal("vid out of range".into()))?;
-        *next += 1;
-        vid
-    };
-    state.revoked_vids.lock().await.insert(old_vid);
-    state
-        .vid_overrides
-        .lock()
-        .await
-        .insert(req.assertion.fiscal_id.clone(), new_vid);
-    // The new credential has no device/session state yet.
-    state.devices.lock().await.remove(&old_vid);
-    // Defense in depth: kill every outstanding token of the revoked vid so
-    // its registration session cannot mint casting tokens any more (the
-    // tally-side ACC filtering remains the protocol-level backstop).
-    for meta in state.tokens.lock().await.values_mut() {
-        if meta.vid == old_vid {
-            meta.used = true;
-        }
+    // A credential can be revoked from enrollment until the end of voting
+    // (Sec. 3.7.5); enrollment happens in the board's setup window, so the
+    // entry is stamped with the board's CURRENT phase.
+    let phase = state.wbb_client.phase().await?;
+    if phase != "setup" && phase != "voting" {
+        return Err(ErError::RevocationClosed);
     }
 
-    // Publish the commitment: SHA3-256(domain || salt || old || new); the salt
-    // comes from the ER operation seed so the pair is not publicly linkable.
-    let commitment = {
+    // The board, not this process's memory, is the record of which spare ids
+    // are taken: every published commitment consumed exactly one.
+    let published: HashSet<String> = state
+        .wbb_client
+        .entries()
+        .await?
+        .entries
+        .iter()
+        .filter_map(|e| e.entry.get("data").and_then(|v| v.as_str()))
+        .filter_map(|b64| {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.decode(b64).ok()
+        })
+        .filter_map(|data| crate::protocol::voting::parse_wbb_data(&data))
+        .filter(|parsed| parsed.entry_type == "revocation_commitment")
+        .filter_map(|parsed| parsed.decode_payload::<serde_json::Value>().ok())
+        .filter_map(|payload| payload["commitment"].as_str().map(str::to_owned))
+        .collect();
+
+    // Commitment to (old, new): SHA3-256(domain || salt || old || new); the
+    // salt comes from the ER operation seed so the pair is not publicly
+    // linkable, and the value is deterministic in (old, new).
+    let commit = |new_vid: u64| {
         use rand::RngCore;
         use sha3::{Digest as _, Sha3_256};
         let mut salt_rng = operation_rng(&state.token_seed, "revocation-salt", old_vid.value());
@@ -545,12 +554,30 @@ async fn revocation_handler(
         hasher.update(b"referendum-poc-revocation");
         hasher.update(salt);
         hasher.update(old_vid.value().to_le_bytes());
-        hasher.update(new_vid.value().to_le_bytes());
+        hasher.update(new_vid.to_le_bytes());
         hex::encode(hasher.finalize())
     };
+
+    // An earlier attempt for this same vid may have reached the board without
+    // this process recording it (a lost answer): adopt that spare id instead
+    // of publishing a second commitment. Otherwise take the first id that
+    // neither the board nor this process has handed out.
+    let first_spare = state.election.n_voters as u64 + 1;
+    let last_spare = state.election.n_acc as u64;
+    let adopted = (first_spare..=last_spare).find(|k| published.contains(&commit(*k)));
+    let already_published = adopted.is_some();
+    let new_vid_value =
+        adopted.unwrap_or_else(|| (*next_spare).max(first_spare + published.len() as u64));
+    if new_vid_value > last_spare {
+        return Err(ErError::SparesExhausted);
+    }
+    let new_vid =
+        Vid::new(new_vid_value).map_err(|_| ErError::Internal("vid out of range".into()))?;
+    let commitment = commit(new_vid_value);
+
     let payload = serde_json::json!({ "commitment": commitment });
     let data = crate::protocol::voting::wbb_data_string(
-        "voting",
+        &phase,
         "ER",
         "revocation_commitment",
         1,
@@ -569,16 +596,49 @@ async fn revocation_handler(
     })
     .await
     .map_err(|e| ErError::Internal(e.to_string()))?;
+    if !already_published {
+        if let Err(e) = state
+            .wbb_client
+            .submit_and_wait(&entry, std::time::Duration::from_secs(10))
+            .await
+        {
+            // An HTTP answer is a refusal: nothing was published, nothing is
+            // consumed. Anything else (transport error, not sequenced in
+            // time) leaves the outcome UNKNOWN - the commitment may still
+            // land - so this id is set aside: the next voter must not get it.
+            // The same voter's retry adopts it if it did land.
+            if !matches!(e, crate::clients::wbb::WbbError::Http(..)) {
+                *next_spare = (*next_spare).max(new_vid_value + 1);
+            }
+            return Err(ErError::Internal(format!("WBB publication failed: {e}")));
+        }
+    }
+
+    // The commitment is public: only now does the revocation take effect.
+    *next_spare = (*next_spare).max(new_vid_value + 1);
+    state.revoked_vids.lock().await.insert(old_vid);
     state
-        .wbb_client
-        .submit_and_wait(&entry, std::time::Duration::from_secs(10))
+        .vid_overrides
+        .lock()
         .await
-        .map_err(|e| ErError::Internal(format!("WBB publication failed: {e}")))?;
+        .insert(req.assertion.fiscal_id.clone(), new_vid);
+    // The new credential has no device/session state yet.
+    state.devices.lock().await.remove(&old_vid);
+    // Defense in depth: kill every outstanding token of the revoked vid so
+    // its registration session cannot mint casting tokens any more (the
+    // tally-side ACC filtering remains the protocol-level backstop).
+    for meta in state.tokens.lock().await.values_mut() {
+        if meta.vid == old_vid {
+            meta.used = true;
+        }
+    }
+    // Every state change is in place: let the next revocation in.
+    drop(next_spare);
 
     let credential_package = state
-        .enrollment_packages
+        .credential_packages
         .get((new_vid.value() - 1) as usize)
-        .map(EnrollmentPackage::credential_package)
+        .cloned()
         .ok_or_else(|| ErError::Internal("missing spare enrollment package".into()))?;
     let registration_token = state
         .next_token(TokenType::Registration, new_vid, None, None)
@@ -961,6 +1021,10 @@ enum ErError {
     Unauthorized,
     #[error("casting rate limit exceeded")]
     RateLimited,
+    #[error("credentials can no longer be revoked: the voting period is over")]
+    RevocationClosed,
+    #[error("no spare credential is left to re-issue")]
+    SparesExhausted,
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("wbb error: {0}")]
@@ -974,6 +1038,8 @@ impl IntoResponse for ErError {
         let (status, message) = match &self {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
             Self::RateLimited => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
+            Self::RevocationClosed => (StatusCode::CONFLICT, self.to_string()),
+            Self::SparesExhausted => (StatusCode::CONFLICT, self.to_string()),
             // Internal failures are logged but not leaked.
             Self::Json(_) | Self::Wbb(_) | Self::Internal(_) => {
                 tracing::error!(error = %self, "er-server internal error");
@@ -1029,12 +1095,10 @@ pub async fn build_service(
 )> {
     let election_context = load_election_context(&settings).await?;
     let dip_verifying_key = load_dip_verifying_key(&settings).await?;
-    // Enrollment packages only exist once `election-admin gen-credentials` has
-    // run; an ER booted before that (e.g. for setup publication) simply has no
-    // voters to log in yet.
-    let enrollment_packages = load_enrollment_packages(&settings)
-        .await
-        .unwrap_or_default();
+    // The credential file only exists once `election-admin gen-credentials`
+    // has run; an ER booted before that (e.g. for setup publication) simply
+    // has no voters to log in yet.
+    let credential_packages = load_credential_packages(&settings).await?;
 
     let wbb_client = build_wbb_client(&settings).await?;
     let token_seed = load_actor_seed(&settings).await?;
@@ -1048,8 +1112,8 @@ pub async fn build_service(
         settings.election.clone(),
         wbb_client,
         settings.dip.clone(),
-        enrollment_packages,
-        LogicalClock::new(settings.clock.base_ms, settings.clock.tick_ms),
+        credential_packages,
+        Clock::from_settings(&settings.clock),
         token_seed,
         internal_token,
     ));
@@ -1113,21 +1177,34 @@ async fn load_dip_verifying_key(settings: &Settings) -> anyhow::Result<Verifying
     Ok(SigningKey::from_bytes(&seed).verifying_key())
 }
 
-async fn load_enrollment_packages(settings: &Settings) -> anyhow::Result<Vec<EnrollmentPackage>> {
+/// Load the ER's credential file: `A` and `E[A]` per credential. It holds no
+/// registration-teller share, so the ER alone cannot rebuild a credential.
+/// Absent before `gen-credentials` has run (the ER must then be restarted
+/// once credentials exist).
+async fn load_credential_packages(settings: &Settings) -> anyhow::Result<Vec<CredentialPackage>> {
     let context_path = std::path::PathBuf::from(&settings._ceremony.election_context);
     let base_dir = context_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    let path = base_dir.join("output").join("enrollment_packages.json");
-    let bytes = tokio::fs::read(&path).await.map_err(|e| {
-        anyhow::anyhow!(
-            "failed to read enrollment packages {}: {}",
+    let path = base_dir
+        .join("output")
+        .join(crate::protocol::acc::ER_CREDENTIALS_FILE);
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => anyhow::bail!("failed to read credential packages {}: {e}", path.display()),
+    };
+    let packages: Vec<CredentialPackage> = serde_json::from_slice(&bytes)
+        .map_err(|e| anyhow::anyhow!("failed to parse credential packages: {e}"))?;
+    if packages.len() != settings.election.n_acc {
+        anyhow::bail!(
+            "{} holds {} credentials, the election has {}",
             path.display(),
-            e
-        )
-    })?;
-    serde_json::from_slice(&bytes)
-        .map_err(|e| anyhow::anyhow!("failed to parse enrollment packages: {e}"))
+            packages.len(),
+            settings.election.n_acc
+        );
+    }
+    Ok(packages)
 }
 
 async fn build_wbb_client(settings: &Settings) -> anyhow::Result<WbbClient> {

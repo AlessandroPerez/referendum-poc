@@ -7,6 +7,7 @@
 //!   t2  a forged decryption share (ox pipeline)      -> `ox_dedup`
 //!   t3  forged `tally_result` counts                 -> `tally_result`
 //!   t5  a released ballot with its confirmation gone -> `cai_confirmation`
+//!   t6  a ballot box publishing a forged opened control value -> `cai_confirmation`
 //!   t4  a flipped signature byte                     -> `entry_signatures`
 
 use std::collections::HashMap;
@@ -197,6 +198,44 @@ async fn auditor_detects_tamper() {
     let report = audit_raw_entries(&cfg, unconfirmed).await;
     assert!(!report.ok(), "release of an unconfirmed ballot must FAIL");
     assert_step_failed(&report, "cai_confirmation");
+
+    // -- t6: a ballot box lies about the opened control value (re-signed with
+    //        its real key): the voter would see the number they expect while
+    //        the ballot seals another one --
+    let mut lying = raw.clone();
+    let lie_pos = lying
+        .iter()
+        .position(|(_, e)| entry_type_of(e).as_deref() == Some("cast_intended_proof"))
+        .expect("a cast_intended_proof entry");
+    {
+        let entry = &mut lying[lie_pos].1;
+        let mut payload = payload_of(entry).expect("decodable cast_intended_proof");
+        let l1 = payload["opened"]["l1"]
+            .as_object()
+            .expect("opened l1")
+            .clone();
+        let (slot, value) = l1.iter().next().expect("one opened slot");
+        let forged = (value.as_u64().unwrap() + 1) % 100;
+        payload["opened"]["l1"] = serde_json::json!({ slot.as_str(): forged });
+        rewrite_and_resign(entry, &payload, &keys);
+    }
+    let report = audit_raw_entries(&cfg, lying).await;
+    assert!(!report.ok(), "a forged opened value must FAIL");
+    let step = report
+        .steps
+        .iter()
+        .find(|s| s.name == "cai_confirmation" && !s.ok)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected cai_confirmation to FAIL, got:\n{}",
+                report.render()
+            )
+        });
+    assert!(
+        step.detail.contains("published opened values"),
+        "the opened-value comparison must catch the lie, got: {}",
+        step.detail
+    );
 
     // -- t4: flip a signature byte (no insider keys involved) --------------
     let mut flipped = raw.clone();

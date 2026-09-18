@@ -1,12 +1,13 @@
-//! WBB harness smoke test: spawn the WBB over HTTPS and verify a threshold
-//! entry is published with a deterministic checkpoint root hash.
+//! WBB harness smoke tests: spawn the WBB over HTTPS and verify a threshold
+//! entry is published with a deterministic checkpoint root hash, and that a
+//! wall-clock WBB enforces its +/- 5 minute freshness window.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use referendum_poc::{
     clients::wbb::sign_entry,
     protocol::tls::{issue_service_cert, ClusterCa},
 };
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::helpers;
 
@@ -25,6 +26,85 @@ async fn wbb_threshold_entry_and_deterministic_checkpoint() {
     assert_eq!(
         root1, root2,
         "checkpoint root hash must be byte-identical across two runs"
+    );
+}
+
+/// On the wall clock the fork's freshness check is active: an entry stamped
+/// with the current Unix time is accepted and sequenced with a real
+/// timestamp, one stamped with a logical tick (far in the past) is refused.
+#[tokio::test]
+async fn wbb_wall_clock_enforces_freshness_window() {
+    helpers::init();
+    let _cluster = helpers::cluster_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let work_dir = temp.path();
+
+    let ca = ClusterCa::from_seed(&MASTER_SEED).expect("cluster ca");
+    let wbb_cert = issue_service_cert(&ca, "wbb", &[2u8; 32]).expect("wbb cert");
+    let rt_keys: Vec<_> = (1..=3)
+        .map(|i| helpers::entity_signing_key(&MASTER_SEED, &format!("RT-{i}")))
+        .collect();
+    let rt_key = &rt_keys[0];
+
+    let port = helpers::free_port();
+    let mut config = helpers::WbbSpawnConfig::new(port).with_timestamp_validation();
+    for (i, key) in rt_keys.iter().enumerate() {
+        config = config.with_entity(&format!("RT-{}", i + 1), key.verifying_key());
+    }
+    let wbb = helpers::WbbProcess::spawn(
+        work_dir,
+        &ca,
+        wbb_cert.cert_pem(),
+        wbb_cert.key_pem(),
+        config,
+    )
+    .await
+    .expect("spawn wbb");
+
+    let started_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_millis() as i64;
+
+    // Stale (logical-clock) timestamp: refused before sequencing.
+    let stale = "setup,RT,acc_pub_key,2,stale-timestamp";
+    let err = wbb
+        .client
+        .submit(&sign_entry(stale.as_bytes(), "RT-1", 1, rt_key))
+        .await
+        .expect_err("a logical tick is outside the freshness window");
+    assert!(
+        matches!(
+            err,
+            referendum_poc::clients::wbb::WbbError::Http(reqwest::StatusCode::BAD_REQUEST, _)
+        ),
+        "expected 400 for a stale timestamp, got {err:?}"
+    );
+
+    // Fresh wall-clock timestamps (threshold 2, three co-signers): accepted
+    // and sequenced on real time.
+    let fresh = "setup,RT,acc_pub_key,2,fresh-timestamp";
+    for (i, key) in rt_keys.iter().enumerate() {
+        let entity_id = format!("RT-{}", i + 1);
+        let _ = wbb
+            .client
+            .submit(&sign_entry(fresh.as_bytes(), &entity_id, started_ms, key))
+            .await
+            .expect("fresh submission accepted");
+    }
+    let found = poll_for_entry(&wbb.client, fresh, Duration::from_secs(5))
+        .await
+        .expect("entry included");
+    assert_eq!(found.leaf_index, 0, "the stale entry must not have landed");
+    assert!(
+        found.timestamp >= started_ms,
+        "sequencing timestamp {} must be real time (>= {started_ms})",
+        found.timestamp
+    );
+    assert!(
+        found.timestamp - started_ms < 60_000,
+        "sequencing timestamp {} must be current (test started at {started_ms})",
+        found.timestamp
     );
 }
 

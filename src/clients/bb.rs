@@ -27,6 +27,8 @@ pub struct CastResponse {
 pub struct CaiResponse {
     pub digest: BallotDigest,
     pub confirmed_at_ms: u64,
+    /// The values the ballot box opened and published.
+    pub opened: evoting::api::prelude::OpenedCai,
 }
 
 /// Response from `GET /receipts/{digest}`.

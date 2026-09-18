@@ -16,6 +16,7 @@ use serde::de::Error as DeError;
 
 use crate::actors::common::actor_signing_key;
 use crate::configuration::{DipSettings, ElectionSettings, Settings};
+use crate::protocol::clock::ClockMode;
 use crate::protocol::merkle::voter_id_merkle_root;
 use crate::protocol::rng::MasterSeed;
 use crate::protocol::setup::CeremonyOutput;
@@ -436,6 +437,14 @@ fn write_self_contained_base_config(
         }
     }
 
+    // The clock the ceremony was run with (`setup-ceremony --clock`), so the
+    // admin CLI and every service booted from this directory stamp their
+    // artifacts on the same time source as the WBB expects.
+    mapping.insert(
+        serde_yaml::Value::String("clock".to_string()),
+        serde_yaml::to_value(&base_settings.clock)?,
+    );
+
     // Ensure the election block contains the inner threshold. If the bundled
     // base.yaml already has it this is a no-op.
     if let Some(election) = mapping.get_mut(serde_yaml::Value::String("election".to_string())) {
@@ -653,7 +662,12 @@ fn build_sunlight_yaml(
         "    phase_manager_key: {}\n",
         BASE64.encode(pm_key.verifying_key().as_bytes())
     ));
-    yaml.push_str("    disable_timestamp_validation: true\n");
+    // The WBB's +/- 5 minute freshness check only makes sense against real
+    // time: off on the logical clock (reproducible sequencing), on otherwise.
+    yaml.push_str(&format!(
+        "    disable_timestamp_validation: {}\n",
+        settings.clock.mode == ClockMode::Logical
+    ));
     yaml.push_str("    grace_period_ms: 100\n");
     yaml.push_str("    max_submit_body_bytes: 33554432\n");
     yaml

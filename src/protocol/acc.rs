@@ -32,6 +32,8 @@ pub enum AccError {
     Base64(#[from] base64::DecodeError),
     #[error("invalid scalar bytes in share file")]
     InvalidScalar,
+    #[error("credential share file {0}")]
+    ShareFile(String),
     #[error("crypto error: {0}")]
     Crypto(String),
     #[error("share index mismatch: expected {expected}, got {got}")]
@@ -116,6 +118,70 @@ impl EnrollmentPackage {
             a: self.a,
             enc_a_ext: self.enc_a_ext.clone(),
         }
+    }
+}
+
+/// What ONE registration teller stores for one credential: the public
+/// credential point `A` and that teller's OWN share - never another teller's
+/// (Sec. 3.5.4: each RT_i privately stores its tuple). With fewer than t_RT of
+/// these files nobody can rebuild a credential or a PIN.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RtCredentialShare {
+    /// The credential point `A` (public: it is part of the published ACC).
+    #[serde(with = "PointHelper::<G>")]
+    pub a: <G as GroupPoint>::Point,
+    /// This teller's share broadcast for the credential.
+    pub share: AccShareBroadcast<G>,
+}
+
+/// File (under the ceremony's `output/`) with the ER's view of every
+/// credential: `A` and `E[A]` only, no teller share.
+pub const ER_CREDENTIALS_FILE: &str = "er_credential_packages.json";
+
+/// File (under the ceremony's `output/`) with teller `rt_id`'s own shares.
+pub fn rt_shares_file(rt_id: usize) -> String {
+    format!("rt-{rt_id}-credential_shares.json")
+}
+
+/// Parse and police a teller's share file: every share must be the teller's
+/// own and there must be exactly one per credential.
+pub fn parse_rt_credential_shares(
+    bytes: &[u8],
+    rt_id: usize,
+    n_acc: usize,
+) -> Result<Vec<RtCredentialShare>, AccError> {
+    let shares: Vec<RtCredentialShare> = serde_json::from_slice(bytes)
+        .map_err(|e| AccError::ShareFile(format!("cannot parse credential shares: {e}")))?;
+    if let Some(foreign) = shares.iter().find(|c| c.share.from_id != rt_id) {
+        return Err(AccError::ShareFile(format!(
+            "holds a share of RT-{}: refusing to load another teller's share",
+            foreign.share.from_id
+        )));
+    }
+    if shares.len() != n_acc {
+        return Err(AccError::ShareFile(format!(
+            "holds {} shares, the election has {n_acc} credentials",
+            shares.len()
+        )));
+    }
+    Ok(shares)
+}
+
+impl EnrollmentPackage {
+    /// Teller `rt_id`'s view of this credential, if it holds a share of it.
+    pub fn rt_share(&self, rt_id: usize) -> Option<RtCredentialShare> {
+        self.share_broadcasts
+            .iter()
+            .find(|s| s.from_id == rt_id)
+            .map(|share| RtCredentialShare {
+                a: self.a,
+                share: share.clone(),
+            })
+    }
+
+    /// Ids of the tellers that hold a share of this credential.
+    pub fn rt_ids(&self) -> Vec<usize> {
+        self.share_broadcasts.iter().map(|s| s.from_id).collect()
     }
 }
 

@@ -36,8 +36,8 @@ use tokio::sync::Mutex;
 use crate::actors::common::{health_router, serve_rustls, with_state};
 use crate::configuration::Settings;
 use crate::domain::{TokenValue, Vid};
-use crate::protocol::acc::{load_rt_share, reconstruct_rt_teller, EnrollmentPackage};
-use crate::protocol::clock::LogicalClock;
+use crate::protocol::acc::{load_rt_share, reconstruct_rt_teller, RtCredentialShare};
+use crate::protocol::clock::Clock;
 use crate::protocol::rng::{operation_rng, ActorSeed};
 use crate::protocol::tls::{reqwest_client_trusting_ca, rustls_config_for_service};
 
@@ -52,12 +52,13 @@ pub struct RtState {
     election_context: ElectionContext<RistrettoGroup>,
     rt_pk: evoting::api::prelude::RTPublicKey<RistrettoGroup>,
     share_path: std::path::PathBuf,
-    clock: LogicalClock,
+    clock: Clock,
     decoy_counter: Arc<AtomicU64>,
     dvnizkp_counter: Arc<AtomicU64>,
     tau_counter: Arc<AtomicU64>,
     controls_counter: Arc<AtomicU64>,
-    enrollment_packages: Vec<EnrollmentPackage>,
+    /// This teller's OWN credential shares, indexed by credential (vid - 1).
+    credential_shares: Vec<RtCredentialShare>,
     /// Clients to the ER (token verification) and NS (readiness notify);
     /// absent when the service is booted without those peers configured.
     er_client: Option<crate::clients::er::ErClient>,
@@ -98,7 +99,7 @@ impl std::fmt::Debug for RtState {
 #[derive(Debug, Clone)]
 struct PendingCredentialRequest {
     rid: String,
-    /// tau delay in logical-clock ticks, sampled from {2..5} (Sec. 5.3.1.3).
+    /// tau delay in clock ticks, sampled from {2..5} (Sec. 5.3.1.3).
     #[allow(dead_code)]
     tau_ticks: u64,
 }
@@ -118,8 +119,8 @@ impl RtState {
         election_context: ElectionContext<RistrettoGroup>,
         rt_pk: evoting::api::prelude::RTPublicKey<RistrettoGroup>,
         share_path: std::path::PathBuf,
-        clock: LogicalClock,
-        enrollment_packages: Vec<EnrollmentPackage>,
+        clock: Clock,
+        credential_shares: Vec<RtCredentialShare>,
         er_client: Option<crate::clients::er::ErClient>,
         ns_client: Option<crate::clients::ns::NsClient>,
         internal_token: SecretString,
@@ -138,7 +139,7 @@ impl RtState {
             dvnizkp_counter: Arc::new(AtomicU64::new(0)),
             tau_counter: Arc::new(AtomicU64::new(0)),
             controls_counter: Arc::new(AtomicU64::new(0)),
-            enrollment_packages,
+            credential_shares,
             er_client,
             ns_client,
             pending: Arc::new(Mutex::new(HashMap::new())),
@@ -203,17 +204,12 @@ impl RtState {
         &self,
         credential_index: usize,
     ) -> Result<AccShareBroadcast<RistrettoGroup>, RtError> {
-        let pkg = self
-            .enrollment_packages
+        self.credential_shares
             .get(credential_index)
+            .map(|c| c.share.clone())
             .ok_or_else(|| {
                 RtError::Internal(format!("credential index {credential_index} out of range"))
-            })?;
-        pkg.share_broadcasts
-            .iter()
-            .find(|s| s.from_id == self.rt_id)
-            .cloned()
-            .ok_or_else(|| RtError::Internal("share broadcast for this RT not found".into()))
+            })
     }
 
     fn build_teller(&self) -> Result<ThresholdRegistrationTeller<RistrettoGroup>, RtError> {
@@ -230,8 +226,8 @@ impl RtState {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SignRequest {
     pub data: String,
-    /// Optional logical timestamp in milliseconds. When omitted the server uses
-    /// its own logical clock. The coordinator should supply this so that all
+    /// Optional timestamp in milliseconds. When omitted the server uses
+    /// its own clock. The coordinator should supply this so that all
     /// co-signers share the same timestamp for a given artifact.
     #[serde(default)]
     pub timestamp: Option<i64>,
@@ -323,7 +319,7 @@ struct CredentialsRequestReq {
 
 #[derive(Debug, Serialize)]
 struct CredentialsRequestResp {
-    /// Sampled tau delay in logical-clock ticks (Sec. 5.3.1.3).
+    /// Sampled tau delay in clock ticks (Sec. 5.3.1.3).
     tau_ticks: u64,
 }
 
@@ -331,7 +327,7 @@ struct CredentialsRequestResp {
 ///
 /// The RT verifies and consumes the ER-issued PIN-request token, records the
 /// `(vid, rid)` pair, samples tau in {2..5} ticks with its seeded RNG, and
-/// notifies the NS on the logical clock (no wall-clock wait).
+/// notifies the NS immediately (tau is recorded, not waited for).
 async fn credentials_request_handler(
     Extension(state): Extension<Arc<RtState>>,
     Json(req): Json<CredentialsRequestReq>,
@@ -427,9 +423,9 @@ async fn dvnizkp_round1_handler(
     // Bind the proof statement to this voter's credential: the point `a` must
     // be the credential point A of the vid's enrollment package.
     let expected_a = state
-        .enrollment_packages
+        .credential_shares
         .get((vid.value() - 1) as usize)
-        .map(|p| p.a)
+        .map(|c| c.a)
         .ok_or(RtError::Unauthorized)?;
     if req.a != expected_a {
         return Err(RtError::Unauthorized);
@@ -616,10 +612,7 @@ pub async fn build_service(
     let share_path = rt_share_path(&settings).await?;
     let service_token = load_service_token(&settings).await?;
     let actor_seed = load_actor_seed(&settings).await?;
-    let enrollment_packages = load_enrollment_packages(&settings)
-        .await
-        .unwrap_or_default();
-    let clock = LogicalClock::new(settings.clock.base_ms, settings.clock.tick_ms);
+    let clock = Clock::from_settings(&settings.clock);
 
     // Peer clients are optional: an RT booted without ER/NS peers (e.g. the
     // signing test) simply rejects credential-request traffic.
@@ -634,6 +627,7 @@ pub async fn build_service(
         let share = load_rt_share(&share_path)?;
         share.id
     };
+    let credential_shares = load_credential_shares(&settings, rt_id).await?;
     let state = Arc::new(RtState::new(
         entity_id,
         rt_id,
@@ -644,7 +638,7 @@ pub async fn build_service(
         rt_pk,
         share_path,
         clock,
-        enrollment_packages,
+        credential_shares,
         er_client,
         ns_client,
         crate::actors::common::load_internal_token(&settings).await?,
@@ -702,21 +696,29 @@ async fn rt_share_path(settings: &Settings) -> anyhow::Result<std::path::PathBuf
     Ok(base_dir.join(format!("rt-{idx}-share.json")))
 }
 
-async fn load_enrollment_packages(settings: &Settings) -> anyhow::Result<Vec<EnrollmentPackage>> {
+/// Load this teller's own share file. Absent before `gen-credentials` has
+/// run (empty list: the teller must then be restarted once credentials
+/// exist); a file carrying another teller's share, or not exactly one share
+/// per credential, is refused - a teller must never hold more than its own
+/// shares (Sec. 3.5.4).
+async fn load_credential_shares(
+    settings: &Settings,
+    rt_id: usize,
+) -> anyhow::Result<Vec<RtCredentialShare>> {
     let context_path = std::path::PathBuf::from(&settings._ceremony.election_context);
     let base_dir = context_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    let path = base_dir.join("output").join("enrollment_packages.json");
-    let bytes = tokio::fs::read(&path).await.map_err(|e| {
-        anyhow::anyhow!(
-            "failed to read enrollment packages {}: {}",
-            path.display(),
-            e
-        )
-    })?;
-    serde_json::from_slice(&bytes)
-        .map_err(|e| anyhow::anyhow!("failed to parse enrollment packages: {e}"))
+    let path = base_dir
+        .join("output")
+        .join(crate::protocol::acc::rt_shares_file(rt_id));
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => anyhow::bail!("failed to read credential shares {}: {e}", path.display()),
+    };
+    crate::protocol::acc::parse_rt_credential_shares(&bytes, rt_id, settings.election.n_acc)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
 }
 
 /// Load this service's dedicated operation seed (`{name}-seed.bin`).

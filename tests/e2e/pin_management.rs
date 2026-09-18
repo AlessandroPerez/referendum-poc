@@ -17,7 +17,7 @@ use referendum_poc::configuration::{
     PeerSettings, ServiceSettings, Settings, TlsSettings, VoterSettings, WbbSettings,
     WbbUiSettings,
 };
-use referendum_poc::protocol::clock::LogicalClock;
+use referendum_poc::protocol::clock::Clock;
 use referendum_poc::protocol::rng::MasterSeed;
 use referendum_poc::protocol::setup::artifacts::write_artifacts;
 use referendum_poc::protocol::setup::run_ceremony;
@@ -99,7 +99,7 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
         rt_urls: None,
         rt_tokens: None,
         ca_pem: ca.cert_pem().to_string(),
-        clock: LogicalClock::new(base.clock.base_ms, base.clock.tick_ms),
+        clock: Clock::from_settings(&base.clock),
     })
     .await
     .expect("gen credentials");
@@ -218,7 +218,7 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
             ceremony_dir: ceremony_dir.to_path_buf(),
             wbb_url: wbb_url.clone(),
             ca_pem: ca.cert_pem().to_string(),
-            clock: LogicalClock::new(base.clock.base_ms, base.clock.tick_ms),
+            clock: Clock::from_settings(&base.clock),
         },
         "setup",
         "voting",

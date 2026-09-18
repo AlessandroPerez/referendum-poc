@@ -9,8 +9,9 @@
 //!   - `GET  /receipts/{digest}`- public receipt lookup.
 //!   - `GET  /ballots`          - ballot release for the tally driver.
 //!
-//! Receipts are minted on the logical clock - the library's
-//! `InMemoryBB` uses wall-clock time, so the PoC keeps its own store built
+//! Receipts are minted on the configured clock (logical in the test suite,
+//! wall clock in real runs) - the library's `InMemoryBB` always uses
+//! wall-clock time, so the PoC keeps its own store built
 //! from the library's public `BallotRecord`/`Receipt` types.
 
 use std::collections::{HashMap, HashSet};
@@ -37,7 +38,7 @@ use crate::actors::common::{health_router, serve_rustls, with_state};
 use crate::clients::wbb::{sign_entry, WbbClient};
 use crate::configuration::Settings;
 use crate::domain::{BallotDigest, TokenValue};
-use crate::protocol::clock::LogicalClock;
+use crate::protocol::clock::Clock;
 use crate::protocol::rng::{operation_rng, ActorSeed};
 use crate::protocol::tls::{reqwest_client_trusting_ca, rustls_config_for_service};
 use crate::protocol::voting::{
@@ -66,7 +67,7 @@ pub struct BbState {
     election_context: ElectionContext<G>,
     wbb_client: WbbClient,
     er_client: crate::clients::er::ErClient,
-    clock: Arc<Mutex<LogicalClock>>,
+    clock: Arc<Mutex<Clock>>,
     enc_counter: Arc<AtomicU64>,
     next_seq: Arc<AtomicU64>,
     ballots: Arc<Mutex<HashMap<BallotDigest, StoredBallot>>>,
@@ -123,7 +124,7 @@ impl BbState {
         SigningKey::from_bytes(&seed)
     }
 
-    /// Sign and publish a WBB data string with a fresh logical timestamp.
+    /// Sign and publish a WBB data string with a fresh timestamp.
     async fn publish(&self, data: &str) -> Result<(), BbError> {
         let timestamp = {
             let mut clock = self.clock.lock().await;
@@ -238,7 +239,7 @@ async fn cast_handler(
         .map_err(|e| BbError::Internal(e.to_string()))?
         .map_err(|_| BbError::BadRequest("ballot verification failed".into()))?;
 
-    // Mint the receipt on the logical clock and store the ballot.
+    // Mint the receipt on the configured clock and store the ballot.
     let received_at_ms = {
         let mut clock = state.clock.lock().await;
         let ts = clock.now_ms();
@@ -343,6 +344,10 @@ struct CaiRequest {
 struct CaiResponse {
     digest: BallotDigest,
     confirmed_at_ms: u64,
+    /// The values this ballot box opened and published for the ballot. On a
+    /// replay these are the FIRST disclosure's values: a ballot box never
+    /// opens a second slot, which would reveal the vote.
+    opened: evoting::api::prelude::OpenedCai,
 }
 
 /// V13: CAI disclosure verification + `cast_intended_proof` publication
@@ -360,6 +365,7 @@ async fn cai_handler(
             return Ok(Json(CaiResponse {
                 digest: req.digest,
                 confirmed_at_ms: cai.confirmed_at_ms,
+                opened: cai.opened,
             }));
         }
         // Verify the disclosure against the stored ballot (drop the lock for
@@ -376,13 +382,11 @@ async fn cai_handler(
     };
     let ctx = state.election_context.clone();
     let disclosure = req.disclosure.clone();
-    let valid =
-        tokio::task::spawn_blocking(move || ballot.verify_cai_disclosure(&disclosure, &ctx))
-            .await
-            .map_err(|e| BbError::Internal(e.to_string()))?;
-    if !valid {
-        return Err(BbError::BadRequest("CAI disclosure does not verify".into()));
-    }
+    // Verify the disclosure AND decode the opened values (steps 13-14).
+    let opened = tokio::task::spawn_blocking(move || ballot.open_cai_disclosure(&disclosure, &ctx))
+        .await
+        .map_err(|e| BbError::Internal(e.to_string()))?
+        .ok_or_else(|| BbError::BadRequest("CAI disclosure does not verify".into()))?;
 
     let confirmed_at_ms = {
         let mut clock = state.clock.lock().await;
@@ -394,6 +398,7 @@ async fn cai_handler(
         digest: req.digest,
         bb_id: state.bb_id,
         disclosure: req.disclosure,
+        opened,
         confirmed_at_ms,
     };
 
@@ -407,6 +412,7 @@ async fn cai_handler(
             return Ok(Json(CaiResponse {
                 digest: req.digest,
                 confirmed_at_ms: existing.confirmed_at_ms,
+                opened: existing.opened,
             }));
         }
         stored.cai = Some(entry.clone());
@@ -424,6 +430,7 @@ async fn cai_handler(
     Ok(Json(CaiResponse {
         digest: req.digest,
         confirmed_at_ms,
+        opened,
     }))
 }
 
@@ -593,10 +600,7 @@ pub async fn build_service(
         election_context,
         wbb_client,
         er_client,
-        clock: Arc::new(Mutex::new(LogicalClock::new(
-            settings.clock.base_ms,
-            settings.clock.tick_ms,
-        ))),
+        clock: Arc::new(Mutex::new(Clock::from_settings(&settings.clock))),
         enc_counter: Arc::new(AtomicU64::new(0)),
         next_seq: Arc::new(AtomicU64::new(0)),
         ballots: Arc::new(Mutex::new(HashMap::new())),

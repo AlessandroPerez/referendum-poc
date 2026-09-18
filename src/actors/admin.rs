@@ -22,7 +22,7 @@ use crate::protocol::acc::{
     acc_rng_from_seeds, build_acc_pub_key_data_string, generate_credentials, load_rt_share,
     reconstruct_rt_teller,
 };
-use crate::protocol::clock::LogicalClock;
+use crate::protocol::clock::Clock;
 use crate::protocol::tls::reqwest_client_trusting_ca;
 
 /// Configuration for the `gen-credentials` admin driver.
@@ -32,7 +32,7 @@ pub struct GenCredentialsConfig {
     /// `rt_public_key.json`, `rt-*-share.json`, `rt-*-signing-key.bin`,
     /// `ca.pem`).
     pub ceremony_dir: std::path::PathBuf,
-    /// Directory where `enrollment_packages.json` is written.
+    /// Directory where the ER credential file and the per-RT share files are written.
     pub output_dir: std::path::PathBuf,
     /// Number of credentials to generate.
     pub n_acc: usize,
@@ -49,8 +49,8 @@ pub struct GenCredentialsConfig {
     pub rt_tokens: Option<Vec<SecretString>>,
     /// PEM-encoded cluster CA certificate.
     pub ca_pem: String,
-    /// Deterministic logical clock for WBB timestamps.
-    pub clock: LogicalClock,
+    /// Clock for WBB timestamps (logical in tests, wall clock in real runs).
+    pub clock: Clock,
 }
 
 /// Errors raised by the admin driver.
@@ -82,6 +82,35 @@ impl From<anyhow::Error> for AdminError {
     }
 }
 
+/// Write credential material as pretty JSON, owner-readable only.
+async fn write_secret_json<T: serde::Serialize>(
+    path: &std::path::Path,
+    value: &T,
+) -> Result<(), AdminError> {
+    // Created owner-readable from the first byte (never world-readable, not
+    // even briefly), then moved into place so a reader never sees half a file.
+    let json = serde_json::to_string_pretty(value)?;
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut file = options.open(&tmp).await?;
+        file.write_all(json.as_bytes()).await?;
+        file.sync_all().await?;
+    }
+    #[cfg(unix)]
+    {
+        // An existing tmp file keeps its old mode: enforce it explicitly too.
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await?;
+    }
+    tokio::fs::rename(&tmp, path).await?;
+    Ok(())
+}
+
 /// Run the credential-generation driver.
 ///
 /// 1. Reconstruct all RT tellers from share files.
@@ -89,7 +118,7 @@ impl From<anyhow::Error> for AdminError {
 /// 3. Co-sign the `setup,RT,acc_pub_key,2,...` WBB entry (via RT `/sign`
 ///    endpoints when configured, otherwise locally).
 /// 4. Submit the partial signatures to the WBB and wait for inclusion.
-/// 5. Write `enrollment_packages.json` to `output_dir`.
+/// 5. Write the ER's credential file and one share file per RT to `output_dir`.
 pub async fn gen_credentials(cfg: GenCredentialsConfig) -> Result<(), AdminError> {
     std::fs::create_dir_all(&cfg.output_dir)?;
 
@@ -144,30 +173,41 @@ pub async fn gen_credentials(cfg: GenCredentialsConfig) -> Result<(), AdminError
     .await
     .map_err(|e| AdminError::Other(e.to_string()))??;
 
-    // Write the enrollment packages.
-    let packages_path = cfg.output_dir.join("enrollment_packages.json");
-    tokio::fs::write(&packages_path, serde_json::to_string_pretty(&packages)?).await?;
-    // Credential material for every voter: owner-readable only.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&packages_path, std::fs::Permissions::from_mode(0o600)).await?;
-    }
-
     // Build the WBB data string and sign it.
     let data_string = build_acc_pub_key_data_string(&short_accs)?;
     let mut clock = cfg.clock;
     let signed_entries =
         sign_acc_pub_key_entries(&cfg, &data_string, &signing_key_seeds, &mut clock).await?;
 
-    // Submit all partial signatures to the WBB.
+    // Submit all partial signatures to the WBB - unless an earlier run already
+    // got this very entry published and then died before writing the share
+    // files. Generation is deterministic, so the rerun rebuilds the identical
+    // entry: adopt the published one and go on to write the files, instead of
+    // being refused as a duplicate (or sequencing it a second time).
     let wbb_client = build_wbb_client(&cfg).await?;
-    for entry in &signed_entries {
-        wbb_client.submit(entry).await?;
+    let data_b64 = BASE64.encode(&signed_entries[0].data);
+    let already_published = wbb_client.entries().await?.entries.iter().any(|e| {
+        e.entry
+            .get("data")
+            .and_then(|v| v.as_str())
+            .map(|s| s == data_b64)
+            .unwrap_or(false)
+    });
+    if !already_published {
+        for entry in &signed_entries {
+            match wbb_client.submit(entry).await {
+                Ok(_) => {}
+                // 409: this signer's part is already staged (or the entry is
+                // already published) by an earlier run that died half-way.
+                // The entry is identical, so carry on to the wait loop.
+                Err(crate::clients::wbb::WbbError::Http(status, _))
+                    if status == reqwest::StatusCode::CONFLICT => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
 
     // Wait until the entry is included (do not resubmit: it is already staged).
-    let data_b64 = BASE64.encode(&signed_entries[0].data);
     let deadline = std::time::Duration::from_secs(15);
     let end = tokio::time::Instant::now() + deadline;
     loop {
@@ -190,9 +230,53 @@ pub async fn gen_credentials(cfg: GenCredentialsConfig) -> Result<(), AdminError
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
+    // Only now that the public ACCs are on the bulletin board is the secret
+    // material written: a failed publication leaves no usable shares behind.
+    // Split the credential material by recipient (Sec. 3.5.4): the ER gets
+    // `A` and `E[A]` only, and each registration teller gets a file with ITS
+    // OWN shares. No file ever holds two tellers' shares, so no single
+    // service can rebuild a credential or a PIN.
+    tokio::fs::create_dir_all(&cfg.output_dir).await?;
+    // A file from an older layout held every teller's shares: remove it.
+    match tokio::fs::remove_file(cfg.output_dir.join("enrollment_packages.json")).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    let er_view: Vec<crate::protocol::acc::CredentialPackage> = packages
+        .iter()
+        .map(crate::protocol::acc::EnrollmentPackage::credential_package)
+        .collect();
+    write_secret_json(
+        &cfg.output_dir
+            .join(crate::protocol::acc::ER_CREDENTIALS_FILE),
+        &er_view,
+    )
+    .await?;
+    let mut rt_ids: Vec<usize> = packages.iter().flat_map(|p| p.rt_ids()).collect();
+    rt_ids.sort_unstable();
+    rt_ids.dedup();
+    for rt_id in rt_ids {
+        let shares: Vec<crate::protocol::acc::RtCredentialShare> = packages
+            .iter()
+            .map(|p| {
+                p.rt_share(rt_id).ok_or_else(|| {
+                    AdminError::Other(format!("RT-{rt_id} holds no share of a credential"))
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        write_secret_json(
+            &cfg.output_dir
+                .join(crate::protocol::acc::rt_shares_file(rt_id)),
+            &shares,
+        )
+        .await?;
+    }
+    drop(packages);
+
     tracing::info!(
         n_acc = cfg.n_acc,
-        packages_path = %packages_path.display(),
+        output_dir = %cfg.output_dir.display(),
         "generated credentials and published acc_pub_key to WBB"
     );
 
@@ -228,7 +312,7 @@ async fn sign_acc_pub_key_entries(
     cfg: &GenCredentialsConfig,
     data_string: &str,
     signing_key_seeds: &[[u8; 32]],
-    clock: &mut LogicalClock,
+    clock: &mut Clock,
 ) -> Result<Vec<SignedEntry>, AdminError> {
     let mut entries = Vec::with_capacity(3);
 
@@ -285,8 +369,8 @@ pub struct PhaseTransitionConfig {
     pub wbb_url: Url,
     /// Cluster CA PEM for TLS.
     pub ca_pem: String,
-    /// Logical clock for the entry timestamp.
-    pub clock: LogicalClock,
+    /// Clock for the entry timestamp.
+    pub clock: Clock,
 }
 
 // -- Tally driver (Sec. 3.9) ---------
@@ -309,8 +393,8 @@ pub struct TallyConfig {
     pub tt_urls: Vec<Url>,
     /// Cluster CA PEM for TLS.
     pub ca_pem: String,
-    /// Deterministic logical clock for WBB timestamps.
-    pub clock: LogicalClock,
+    /// Clock for WBB timestamps (logical in tests, wall clock in real runs).
+    pub clock: Clock,
     /// Number of generated credentials (`n_acc`) - bounds the dlog table.
     pub n_acc: usize,
     /// TT reconstruction threshold (`t_tt`) for zeta finalization.
@@ -877,7 +961,7 @@ async fn publish_tt_cosigned(
     wbb: &WbbClient,
     tts: &[crate::clients::tt::TtClient],
     data: &str,
-    clock: &mut LogicalClock,
+    clock: &mut Clock,
 ) -> Result<(), AdminError> {
     use crate::clients::tt::TtClient;
 

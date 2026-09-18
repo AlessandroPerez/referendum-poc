@@ -34,7 +34,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use tokio::sync::Mutex;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::actors::common::serve_rustls;
 use crate::clients::bb::BbClient;
@@ -132,12 +132,95 @@ struct TrustedSettings {
     bbs: Vec<String>,
 }
 
-/// A built-but-not-yet-confirmed ballot with its CAI disclosure (Sec. 3.8.4).
-/// Never derives `Debug`: the disclosure reveals the vote.
+/// Which cast-as-intended value of a level the voter asks to open
+/// (Sec. 3.8.4 steps 10-11): the control code or the control sum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CaiSlot {
+    Code,
+    Sum,
+}
+
+/// The cast-as-intended openings held for a built ballot.
+///
+/// The ballot always carries BOTH encrypted values of each level (code and
+/// sum); which one is opened must be decided by the voter only AFTER the
+/// ballot has been cast, otherwise a malicious device could alter the vote
+/// and keep just the to-be-opened value consistent (Sec. 3.8.4, note on step
+/// 9). So the app keeps the openings of both slots until the choice is made.
+///
+/// Opening both slots of a level would reveal the vote (sum - code = choice):
+/// the first choice is therefore pinned, persisted BEFORE anything is sent,
+/// and the unused openings are destroyed. A retry can only resend the same
+/// disclosure. Never derives `Debug`: the openings reveal the vote.
+#[derive(Clone, Serialize, Deserialize)]
+enum HeldDisclosure {
+    /// No choice made yet: the openings of every code slot and of every sum slot.
+    Open {
+        all_code: DiscloseCAI<G>,
+        all_sum: DiscloseCAI<G>,
+    },
+    /// Choice made: only the chosen openings survive.
+    Chosen {
+        l1: CaiSlot,
+        l2: CaiSlot,
+        disclosure: DiscloseCAI<G>,
+    },
+}
+
+impl HeldDisclosure {
+    /// Pin the voter's choice (or return the already pinned disclosure when
+    /// the same choice is repeated). A different choice after the first one
+    /// is refused: it would open both slots.
+    fn choose(&mut self, l1: CaiSlot, l2: CaiSlot) -> Result<DiscloseCAI<G>, VoterError> {
+        match self {
+            HeldDisclosure::Open { all_code, all_sum } => {
+                let pick = |slot: CaiSlot| match slot {
+                    CaiSlot::Code => &*all_code,
+                    CaiSlot::Sum => &*all_sum,
+                };
+                let disclosure = DiscloseCAI {
+                    l1: pick(l1).l1.clone(),
+                    l2: pick(l2).l2.clone(),
+                };
+                *self = HeldDisclosure::Chosen {
+                    l1,
+                    l2,
+                    disclosure: disclosure.clone(),
+                };
+                Ok(disclosure)
+            }
+            HeldDisclosure::Chosen {
+                l1: pinned_l1,
+                l2: pinned_l2,
+                disclosure,
+            } => {
+                if (*pinned_l1, *pinned_l2) != (l1, l2) {
+                    return Err(VoterError::CaiAlreadyChosen);
+                }
+                Ok(disclosure.clone())
+            }
+        }
+    }
+
+    /// The pinned choice, if any.
+    fn chosen(&self) -> Option<(CaiSlot, CaiSlot)> {
+        match self {
+            HeldDisclosure::Open { .. } => None,
+            HeldDisclosure::Chosen { l1, l2, .. } => Some((*l1, *l2)),
+        }
+    }
+}
+
+/// A built-but-not-yet-confirmed ballot with its CAI openings (Sec. 3.8.4).
+/// Never derives `Debug`: the openings reveal the vote.
 #[derive(Clone, Serialize, Deserialize)]
 struct HeldVote {
     ballot: Ballot<G>,
-    disclosure: DiscloseCAI<G>,
+    disclosure: HeldDisclosure,
+    /// The plain control values sealed in the ballot (Sec. 3.8.4 step 9):
+    /// shown to the voter only after the cast, never sent anywhere.
+    control: evoting::api::prelude::CaiValues,
     digest: BallotDigest,
     /// Hex-encoded commitment randomness (Sec. 5.3.1.6).
     rndcomm: String,
@@ -848,16 +931,30 @@ async fn vote_handler(
     let mut vote_rng = state.next_rng("vote");
     let pin = req.pin.value() as usize;
     let option = req.option;
-    let (ballot, disclosure) = tokio::task::spawn_blocking(move || {
+    let (ballot, disclosure, control) = tokio::task::spawn_blocking(move || {
         let choice = referendum_choice(option, &params)?;
         let builder = evoting::api::client::BallotBuilder::new(choice);
-        // Referendum simplification (Sec. 3.11): disclose the l1 code slot; l2 is trivial for a referendum.
-        Ok::<_, crate::protocol::voting::VotingError>(voter.vote_with_disclosure(
-            &builder,
-            pin,
-            true,
-            false,
-            &mut vote_rng,
+        // The slot flags only select which opening the library hands back:
+        // the ballot holds both encrypted values of each level either way.
+        // Building twice from the same RNG state yields the SAME ballot with
+        // the openings of all code slots, then of all sum slots, so the
+        // voter can choose after casting (Sec. 3.8.4 steps 9-11).
+        let mut replay_rng = vote_rng.clone();
+        let (ballot, all_code, control) =
+            voter.vote_with_cai_values(&builder, pin, true, true, &mut vote_rng);
+        let (replayed, all_sum) =
+            voter.vote_with_disclosure(&builder, pin, false, false, &mut replay_rng);
+        // Guard the assumption: if the library ever made the ballot depend
+        // on the flags, the second set of openings would not fit the ballot.
+        if ballot_digest(&ballot)? != ballot_digest(&replayed)? {
+            return Err(crate::protocol::voting::VotingError::Crypto(
+                "ballot depends on the cast-as-intended slot flags".into(),
+            ));
+        }
+        Ok::<_, crate::protocol::voting::VotingError>((
+            ballot,
+            HeldDisclosure::Open { all_code, all_sum },
+            control,
         ))
     })
     .await
@@ -876,6 +973,7 @@ async fn vote_handler(
     session.held = Some(HeldVote {
         ballot,
         disclosure,
+        control,
         digest,
         rndcomm: hex::encode(rndcomm),
         emoji: emoji.clone(),
@@ -1018,31 +1116,137 @@ async fn wbb_digest_publications(
     Ok(bb_ids)
 }
 
+/// The control values of the held ballot. No `Debug`: they reveal the vote.
+#[derive(Serialize)]
+struct ControlValuesResponse {
+    digest: BallotDigest,
+    /// List level: control code and control sum (= code + chosen index, mod 100).
+    l1_code: u32,
+    l1_sum: u32,
+    /// Candidate level (trivial in a referendum).
+    l2_code: u32,
+    l2_sum: u32,
+}
+
+/// Sec. 3.8.4 step 9: show the voter the control code and sum of each level.
+/// Refused until the ballot has been cast: showing them earlier would let a
+/// malicious device learn nothing new, but the protocol order is what makes
+/// the later comparison meaningful, so the app enforces it.
+#[tracing::instrument(skip(state, req))]
+async fn control_values_handler(
+    Extension(state): Extension<Arc<VoterState>>,
+    Json(req): Json<PassphraseRequest>,
+) -> Result<Json<ControlValuesResponse>, VoterError> {
+    let session = state.session_for(&req.passphrase).await?;
+    let held = session.held.as_ref().ok_or(VoterError::NoHeldBallot)?;
+    if !session.casts.iter().any(|c| c.digest == held.digest) {
+        return Err(VoterError::NoHeldBallot);
+    }
+    Ok(Json(ControlValuesResponse {
+        digest: held.digest,
+        l1_code: held.control.l1_code,
+        l1_sum: held.control.l1_sum,
+        l2_code: held.control.l2_code,
+        l2_sum: held.control.l2_sum,
+    }))
+}
+
+#[derive(Deserialize)]
+struct ConfirmRequest {
+    passphrase: String,
+    /// The voter's post-cast choice for the list-level value (Sec. 3.8.4
+    /// steps 10-11). When omitted the app tosses the coin itself.
+    #[serde(default)]
+    l1: Option<CaiSlot>,
+    /// Same for the candidate-level value (trivial in a referendum).
+    #[serde(default)]
+    l2: Option<CaiSlot>,
+}
+
+impl std::fmt::Debug for ConfirmRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConfirmRequest")
+            .field("passphrase", &"<redacted>")
+            .field("l1", &self.l1)
+            .field("l2", &self.l2)
+            .finish()
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct ConfirmResponse {
     digest: BallotDigest,
     confirmed_at_ms: u64,
+    /// Which value was opened for each level.
+    l1: CaiSlot,
+    l2: CaiSlot,
+    /// The opened values as published by the ballot boxes - checked by the
+    /// app against its own control values before answering.
+    l1_value: u32,
+    l2_value: u32,
 }
 
-/// V13: send the held CAI disclosure to the BBs (Sec. 3.8.4 steps 8-17).
+/// V13: the voter chooses, AFTER casting, which cast-as-intended value to
+/// open; the app sends only that opening to the BBs (Sec. 3.8.4 steps 8-17).
 #[tracing::instrument(skip(state, req))]
 async fn confirm_handler(
     Extension(state): Extension<Arc<VoterState>>,
-    Json(req): Json<PassphraseRequest>,
+    Json(req): Json<ConfirmRequest>,
 ) -> Result<Json<ConfirmResponse>, VoterError> {
     let mut session = state.session_for(&req.passphrase).await?;
-    let held = session.held.clone().ok_or(VoterError::NoHeldBallot)?;
+    let mut held = session.held.clone().ok_or(VoterError::NoHeldBallot)?;
     if !session.casts.iter().any(|c| c.digest == held.digest) {
         return Err(VoterError::Protocol(
             "ballot must be cast before confirmation".into(),
         ));
     }
 
+    // A missing choice is a coin tossed by the app - still after the cast,
+    // and a pinned earlier choice always wins over a fresh toss.
+    let pinned = held.disclosure.chosen();
+    // The coin RNG is drawn only when a toss is really needed, so an
+    // explicit choice leaves the device's deterministic RNG stream untouched.
+    let mut coin: Option<rand_chacha::ChaCha20Rng> = None;
+    let mut toss = || {
+        let coin = coin.get_or_insert_with(|| state.next_rng("cai-coin"));
+        if coin.next_u32() & 1 == 0 {
+            CaiSlot::Code
+        } else {
+            CaiSlot::Sum
+        }
+    };
+    let l1 = req.l1.or(pinned.map(|p| p.0)).unwrap_or_else(&mut toss);
+    let l2 = req.l2.or(pinned.map(|p| p.1)).unwrap_or_else(&mut toss);
+
+    // Pin the choice and destroy the unused openings on disk BEFORE anything
+    // leaves the device: a retry after a partial failure can then only
+    // resend this same disclosure, never the other slot.
+    let disclosure = held.disclosure.choose(l1, l2)?;
+    session.held = Some(held.clone());
+    state.save_session(&req.passphrase, &session).await?;
+
+    // What an honest ballot box must open for this choice.
+    use evoting::api::prelude::{OpenedCai, OpenedCaiValue};
+    let expect = |slot: CaiSlot, code: u32, sum: u32| match slot {
+        CaiSlot::Code => OpenedCaiValue::Code(code),
+        CaiSlot::Sum => OpenedCaiValue::Sum(sum),
+    };
+    let expected = OpenedCai {
+        l1: expect(l1, held.control.l1_code, held.control.l1_sum),
+        l2: expect(l2, held.control.l2_code, held.control.l2_sum),
+    };
+
     let mut confirmed_at_ms = 0u64;
     for bb in state.trusted_bbs(&session) {
-        let response = bb.cai(&held.digest, &held.disclosure).await?;
+        let response = bb.cai(&held.digest, &disclosure).await?;
+        if response.opened != expected {
+            return Err(VoterError::CaiMismatch);
+        }
         confirmed_at_ms = response.confirmed_at_ms.max(confirmed_at_ms);
     }
+    let value_of = |opened: OpenedCaiValue| match opened {
+        OpenedCaiValue::Code(v) | OpenedCaiValue::Sum(v) => v,
+    };
 
     if let Some(record) = session.casts.iter_mut().find(|c| c.digest == held.digest) {
         record.confirmed_at_ms = Some(confirmed_at_ms);
@@ -1055,6 +1259,10 @@ async fn confirm_handler(
     Ok(Json(ConfirmResponse {
         digest,
         confirmed_at_ms,
+        l1,
+        l2,
+        l1_value: value_of(expected.l1),
+        l2_value: value_of(expected.l2),
     }))
 }
 
@@ -1358,6 +1566,16 @@ enum VoterError {
     PinNotRetrieved,
     #[error("no ballot to operate on - vote (and cast) first")]
     NoHeldBallot,
+    #[error(
+        "a cast-as-intended value was already chosen for this ballot - \
+         opening the other one would reveal the vote"
+    )]
+    CaiAlreadyChosen,
+    #[error(
+        "a ballot box opened a different control value than the one sealed by this app - \
+         do not trust this confirmation"
+    )]
+    CaiMismatch,
     #[error("invalid trusted-authority selection: {0}")]
     BadSelection(String),
     #[error("IO error: {0}")]
@@ -1387,6 +1605,8 @@ impl IntoResponse for VoterError {
             Self::PinNotReady => (StatusCode::CONFLICT, self.to_string()),
             Self::PinNotRetrieved => (StatusCode::BAD_REQUEST, self.to_string()),
             Self::NoHeldBallot => (StatusCode::BAD_REQUEST, self.to_string()),
+            Self::CaiAlreadyChosen => (StatusCode::CONFLICT, self.to_string()),
+            Self::CaiMismatch => (StatusCode::BAD_GATEWAY, self.to_string()),
             Self::BadSelection(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             // Internal failures are logged but not leaked.
             _ => {
@@ -1403,9 +1623,27 @@ impl IntoResponse for VoterError {
 
 // -- Router / startup --------------------------------------------------------
 
+/// The app's script and markup change with the PoC and its API answers are
+/// live: never let the browser serve a stale copy of either.
+async fn no_cache(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+    );
+    response
+}
+
+/// Client-side routes of the Vote App: each serves the same single page,
+/// which shows the matching section (`/menagement` is a tolerated alias).
+const APP_ROUTES: [&str; 4] = ["/enrollment", "/voting", "/management", "/menagement"];
+
 pub fn router(state: Arc<VoterState>) -> Router {
-    Router::new()
-        .route("/api/login", post(login_handler))
+    let index = state.static_dir.join("index.html");
+    let mut app = Router::new();
+    for route in APP_ROUTES {
+        app = app.route_service(route, ServeFile::new(&index));
+    }
+    app.route("/api/login", post(login_handler))
         .route("/api/enroll", post(enroll_handler))
         .route("/api/status", post(status_handler))
         .route("/api/pin/retrieve", post(pin_retrieve_handler))
@@ -1425,8 +1663,10 @@ pub fn router(state: Arc<VoterState>) -> Router {
         .route("/api/vote", post(vote_handler))
         .route("/api/cast", post(cast_handler))
         .route("/api/ballot/status", post(ballot_status_handler))
+        .route("/api/cai/values", post(control_values_handler))
         .route("/api/confirm", post(confirm_handler))
         .fallback_service(ServeDir::new(&state.static_dir).append_index_html_on_directories(true))
+        .layer(axum::middleware::map_response(no_cache))
         .layer(Extension(state))
 }
 

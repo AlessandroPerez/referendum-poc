@@ -28,10 +28,17 @@
     <section class="screen">
       <h2>Log entries</h2>
       <button id="btn-refresh">Refresh</button>
+      <p id="validators-legend" class="legend hidden">
+        Validators <strong id="validators-list"></strong> rebuild the Merkle tree,
+        check it against the signed checkpoint and BLS-sign each entry:
+        <span class="sem sem-red"></span> none yet,
+        <span class="sem sem-yellow"></span> some,
+        <span class="sem sem-green"></span> all.
+      </p>
       <div class="table-wrap">
         <table id="entries">
           <thead>
-            <tr><th>#</th><th>Phase</th><th>Role</th><th>Type</th><th>Signers</th><th>Timestamp</th></tr>
+            <tr><th>#</th><th>Phase</th><th>Role</th><th>Type</th><th>Signers</th><th>Timestamp</th><th class="validators-col">Validators</th></tr>
           </thead>
           <tbody></tbody>
         </table>

@@ -2,10 +2,11 @@
 //!
 //! Serves the read-only bulletin-board web page from `static_dir` and proxies
 //! the WBB read API so the browser needs no CORS or extra trust anchors:
-//!   - `GET /api/entries`      - decoded entry table rows
+//!   - `GET /api/entries`      - decoded entry table rows (with validator ids)
 //!   - `GET /api/entries/{i}`  - one raw sequenced entry
 //!   - `GET /api/phase`        - current phase
 //!   - `GET /api/checkpoint`   - signed checkpoint text
+//!   - `GET /api/validators`   - validator ids registered at the log
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -13,7 +14,8 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Extension, Path},
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
+    middleware,
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -47,6 +49,12 @@ struct EntryRow {
     entity_ids: Vec<String>,
     /// Decoded JSON payload for base64-JSON content fields, raw text otherwise.
     payload: serde_json::Value,
+    /// Hex Merkle leaf hash reported by the log.
+    leaf_hash: Option<String>,
+    /// Validators that verified this leaf's Merkle inclusion and BLS-signed it.
+    validations: Vec<String>,
+    /// Number of validators registered at the log (0 outside the demo).
+    validators_total: usize,
 }
 
 #[tracing::instrument(skip(state))]
@@ -58,6 +66,7 @@ async fn entries_handler(
         .entries()
         .await
         .map_err(|e| UiError::Upstream(e.to_string()))?;
+    let validators_total = entries.validators.len();
     let mut rows = Vec::with_capacity(entries.entries.len());
     for sequenced in entries.entries {
         let entity_ids: Vec<String> = sequenced
@@ -86,9 +95,29 @@ async fn entries_handler(
             threshold: parsed.threshold,
             entity_ids,
             payload,
+            leaf_hash: sequenced.leaf_hash,
+            validations: sequenced
+                .validations
+                .into_iter()
+                .map(|v| v.validator_id)
+                .collect(),
+            validators_total,
         });
     }
     Ok(Json(rows))
+}
+
+async fn validators_handler(
+    Extension(state): Extension<Arc<WbbUiState>>,
+) -> Result<Json<serde_json::Value>, UiError> {
+    let entries = state
+        .wbb_client
+        .entries()
+        .await
+        .map_err(|e| UiError::Upstream(e.to_string()))?;
+    Ok(Json(
+        serde_json::json!({ "validators": entries.validators }),
+    ))
 }
 
 async fn entry_handler(
@@ -149,13 +178,25 @@ impl IntoResponse for UiError {
     }
 }
 
+/// The page polls live data and its script changes with the PoC: never let
+/// the browser serve a stale copy of either.
+async fn no_cache(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+    );
+    response
+}
+
 pub fn router(state: Arc<WbbUiState>) -> Router {
     Router::new()
         .route("/api/entries", get(entries_handler))
         .route("/api/entries/:index", get(entry_handler))
         .route("/api/phase", get(phase_handler))
         .route("/api/checkpoint", get(checkpoint_handler))
+        .route("/api/validators", get(validators_handler))
         .fallback_service(ServeDir::new(&state.static_dir).append_index_html_on_directories(true))
+        .layer(middleware::map_response(no_cache))
         .layer(Extension(state))
 }
 

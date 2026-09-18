@@ -26,7 +26,7 @@ use referendum_poc::{
         PeerSettings, ServiceSettings, Settings, TlsSettings, VoterSettings, WbbSettings,
         WbbUiSettings,
     },
-    protocol::clock::LogicalClock,
+    protocol::clock::Clock,
     protocol::rng::MasterSeed,
     protocol::setup::artifacts::write_artifacts,
     protocol::setup::run_ceremony,
@@ -51,7 +51,20 @@ pub fn build_wbb() -> PathBuf {
     std::fs::create_dir_all(&out_dir).expect("create wbb-bin dir");
     let binary = out_dir.join("sunlight");
 
-    if binary.exists() {
+    let wbb_src = Path::new(&manifest)
+        .parent()
+        .expect("manifest has parent")
+        .join("resources")
+        .join("sunlight_test");
+    // The cached binary is reused only while it is newer than every Go source
+    // of the fork: a stale board silently runs old bulletin-board code.
+    let fresh = |binary: &Path| -> bool {
+        let Ok(built) = std::fs::metadata(binary).and_then(|m| m.modified()) else {
+            return false;
+        };
+        newest_go_source(&wbb_src).is_none_or_older_than(built)
+    };
+    if fresh(&binary) {
         return binary;
     }
 
@@ -65,15 +78,9 @@ pub fn build_wbb() -> PathBuf {
     fs2::FileExt::lock_exclusive(&lock).expect("lock wbb build");
 
     // Recheck under the lock: another test may have built it while we waited.
-    if binary.exists() {
+    if fresh(&binary) {
         return binary;
     }
-
-    let wbb_src = Path::new(&manifest)
-        .parent()
-        .expect("manifest has parent")
-        .join("resources")
-        .join("sunlight_test");
 
     let tmp_binary = out_dir.join("sunlight.tmp");
     let status = Command::new("go")
@@ -94,6 +101,42 @@ pub fn build_wbb() -> PathBuf {
     binary
 }
 
+/// Modification time of the newest `.go` file under `dir` (skipping VCS and
+/// vendored trees), if any.
+fn newest_go_source(dir: &Path) -> NewestSource {
+    fn walk(dir: &Path, newest: &mut Option<std::time::SystemTime>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            if path.is_dir() {
+                if name != ".git" && name != "vendor" && name != "node_modules" {
+                    walk(&path, newest);
+                }
+            } else if path.extension().is_some_and(|e| e == "go") {
+                if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+                    if newest.map_or(true, |n| modified > n) {
+                        *newest = Some(modified);
+                    }
+                }
+            }
+        }
+    }
+    let mut newest = None;
+    walk(dir, &mut newest);
+    NewestSource(newest)
+}
+
+struct NewestSource(Option<std::time::SystemTime>);
+
+impl NewestSource {
+    fn is_none_or_older_than(&self, built: std::time::SystemTime) -> bool {
+        self.0.map_or(true, |source| source < built)
+    }
+}
+
 /// Configuration for spawning a WBB instance.
 pub struct WbbSpawnConfig {
     pub port: u16,
@@ -101,6 +144,9 @@ pub struct WbbSpawnConfig {
     pub phase_manager_key: Option<VerifyingKey>,
     pub grace_period_ms: u64,
     pub max_submit_body_bytes: i64,
+    /// Enforce the WBB's +/- 5 minute freshness window (wall-clock runs).
+    /// Off by default: the suite stamps entries with the logical clock.
+    pub timestamp_validation: bool,
 }
 
 impl WbbSpawnConfig {
@@ -111,7 +157,14 @@ impl WbbSpawnConfig {
             phase_manager_key: None,
             grace_period_ms: 100,
             max_submit_body_bytes: 32 * 1024 * 1024,
+            timestamp_validation: false,
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_timestamp_validation(mut self) -> Self {
+        self.timestamp_validation = true;
+        self
     }
 
     pub fn with_entity(mut self, id: &str, key: VerifyingKey) -> Self {
@@ -255,7 +308,10 @@ fn build_sunlight_yaml(
         yaml.push_str(&pm_key_yaml);
         yaml.push('\n');
     }
-    yaml.push_str("    disable_timestamp_validation: true\n");
+    yaml.push_str(&format!(
+        "    disable_timestamp_validation: {}\n",
+        !config.timestamp_validation
+    ));
     yaml.push_str(&format!(
         "    grace_period_ms: {}\n",
         config.grace_period_ms
@@ -468,7 +524,7 @@ impl ElectionCluster {
             rt_urls: None,
             rt_tokens: None,
             ca_pem: ca.cert_pem().to_string(),
-            clock: LogicalClock::new(base.clock.base_ms, base.clock.tick_ms),
+            clock: Clock::from_settings(&base.clock),
         })
         .await
         .expect("gen credentials");
@@ -641,7 +697,7 @@ impl ElectionCluster {
             ceremony_dir: self.temp.path().to_path_buf(),
             wbb_url: self.wbb_url.clone(),
             ca_pem: self.ca.cert_pem().to_string(),
-            clock: LogicalClock::new(self.base.clock.base_ms, self.base.clock.tick_ms),
+            clock: Clock::from_settings(&self.base.clock),
         }
     }
 
@@ -711,13 +767,20 @@ impl ElectionCluster {
             .voter_post(
                 i,
                 "/api/confirm",
-                serde_json::json!({ "passphrase": self.passphrases[i] }),
+                // The post-cast choice of Sec. 3.8.4 steps 10-11, alternating
+                // per voter so every slot combination is exercised.
+                serde_json::json!({
+                    "passphrase": self.passphrases[i],
+                    "l1": if i % 2 == 0 { "code" } else { "sum" },
+                    "l2": if (i / 2) % 2 == 0 { "sum" } else { "code" },
+                }),
             )
             .await;
         assert!(
             confirm["confirmed_at_ms"].as_u64().unwrap() > 0,
             "cast-as-intended confirmation published"
         );
+        assert_eq!(confirm["l1"], if i % 2 == 0 { "code" } else { "sum" });
         vote
     }
 
@@ -760,7 +823,7 @@ impl ElectionCluster {
             rt_urls: self.ports.rt.iter().map(url).collect(),
             tt_urls: self.ports.tt.iter().map(url).collect(),
             ca_pem: self.ca.cert_pem().to_string(),
-            clock: LogicalClock::new(self.base.clock.base_ms, self.base.clock.tick_ms),
+            clock: Clock::from_settings(&self.base.clock),
             n_acc: self.base.election.n_acc,
             t_tt: self.base.election.t_tt,
         })
@@ -823,6 +886,38 @@ impl ElectionCluster {
 
     pub fn er_base(&self) -> String {
         format!("https://127.0.0.1:{}", self.ports.er)
+    }
+
+    /// Boot a SECOND electoral roll, identical to the cluster's but talking
+    /// to the bulletin board at `board_url` (e.g. a fault-injecting stand-in).
+    /// Returns its base URL.
+    pub async fn spawn_er_with_board(&self, board_url: &str) -> String {
+        let ceremony_dir = self.temp.path().to_path_buf();
+        let port = free_port();
+        let mut settings = election_settings(&ceremony_dir, "er", port, &self.ports, &self.base);
+        settings.wbb.base_url = board_url.to_string();
+        let (addr, tls, state) = er::build_service(
+            settings,
+            ceremony_signing_key(&ceremony_dir, "er"),
+            SecretString::new(read_admin_token(&ceremony_dir)),
+        )
+        .await
+        .expect("build second er");
+        tokio::spawn(async move {
+            serve_rustls(er::router(state), addr, tls)
+                .await
+                .expect("second er server")
+        });
+        let base = format!("https://127.0.0.1:{port}");
+        // Ready as soon as it answers anything over TLS.
+        for _ in 0..200 {
+            let ready = self.client.get(format!("{base}/health")).send().await;
+            if ready.is_ok() {
+                return base;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the second electoral roll did not become ready on {base}")
     }
 
     pub fn ui_base(&self) -> String {

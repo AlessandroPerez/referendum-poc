@@ -26,12 +26,27 @@ pub struct SignedEntry {
     pub signature: Vec<u8>,
 }
 
+/// One validator's BLS signature over a sequenced leaf (demo validators;
+/// absent when the log has no validators configured).
+#[derive(Debug, Clone, Deserialize)]
+pub struct WbbValidation {
+    pub validator_id: String,
+    /// Base64 compressed BLS signature.
+    pub signature: String,
+}
+
 /// One sequenced leaf returned by `GET /entries` or `GET /entries/{index}`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SequencedEntry {
     pub leaf_index: i64,
     pub timestamp: i64,
     pub entry: serde_json::Value,
+    /// Hex Merkle leaf hash, as computed by the log.
+    #[serde(default)]
+    pub leaf_hash: Option<String>,
+    /// Validator signatures collected so far, sorted by validator id.
+    #[serde(default)]
+    pub validations: Vec<WbbValidation>,
 }
 
 /// Response from `GET /entries`.
@@ -39,6 +54,9 @@ pub struct SequencedEntry {
 pub struct EntriesResponse {
     pub count: usize,
     pub entries: Vec<SequencedEntry>,
+    /// Validator ids registered at the log (empty outside the demo).
+    #[serde(default)]
+    pub validators: Vec<String>,
 }
 
 /// Response from `GET /phase`.

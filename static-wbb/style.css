@@ -68,3 +68,41 @@ code {
 .table-wrap { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
 th, td { border: 1px solid var(--border); padding: 0.35rem 0.5rem; text-align: left; }
+
+/* Validator semaphore (demo validators) */
+.legend { font-size: 0.9rem; opacity: 0.85; }
+.sem {
+  display: inline-block;
+  width: 0.8rem;
+  height: 0.8rem;
+  border-radius: 50%;
+  vertical-align: middle;
+  border: 1px solid #0003;
+}
+.sem-red { background: #e01b24; }
+.sem-yellow { background: #f5c211; }
+.sem-green { background: #2ec27e; }
+#entries.no-validators .validators-col,
+#entries.no-validators td:nth-child(7) { display: none; }
+
+/* The entry table carries seven columns (signers, local timestamps and the
+   validator semaphore): give the page room so it fits without scrolling.
+   Every section spans the same full width as the table's. */
+main { max-width: 72rem; }
+#entries td:nth-child(1),
+#entries td:nth-child(6),
+#entries td:nth-child(7) { white-space: nowrap; }
+
+/* Everything inside a section is centered: headings, text, the digest
+   field with its button, and the table cells. */
+.screen { text-align: center; }
+.screen label { text-align: center; }
+.screen input {
+  display: block;
+  max-width: 40rem;
+  margin-inline: auto;
+  text-align: center;
+}
+.screen button { margin-inline: auto; }
+.screen code { text-align: center; }
+#entries th, #entries td { text-align: center; }

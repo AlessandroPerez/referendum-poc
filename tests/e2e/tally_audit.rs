@@ -23,7 +23,7 @@ use referendum_poc::configuration::{
     PeerSettings, ServiceSettings, Settings, TlsSettings, VoterSettings, WbbSettings,
     WbbUiSettings,
 };
-use referendum_poc::protocol::clock::LogicalClock;
+use referendum_poc::protocol::clock::Clock;
 use referendum_poc::protocol::rng::MasterSeed;
 use referendum_poc::protocol::setup::artifacts::write_artifacts;
 use referendum_poc::protocol::setup::run_ceremony;
@@ -112,7 +112,7 @@ async fn full_election_tally_and_audit() {
         rt_urls: None,
         rt_tokens: None,
         ca_pem: ca.cert_pem().to_string(),
-        clock: LogicalClock::new(base.clock.base_ms, base.clock.tick_ms),
+        clock: Clock::from_settings(&base.clock),
     })
     .await
     .expect("gen credentials");
@@ -225,7 +225,7 @@ async fn full_election_tally_and_audit() {
             ceremony_dir: ceremony_dir.to_path_buf(),
             wbb_url: wbb_url.clone(),
             ca_pem: ca.cert_pem().to_string(),
-            clock: LogicalClock::new(base.clock.base_ms, base.clock.tick_ms),
+            clock: Clock::from_settings(&base.clock),
         },
         "setup",
         "voting",
@@ -273,7 +273,7 @@ async fn full_election_tally_and_audit() {
             ceremony_dir: ceremony_dir.to_path_buf(),
             wbb_url: wbb_url.clone(),
             ca_pem: ca.cert_pem().to_string(),
-            clock: LogicalClock::new(base.clock.base_ms, base.clock.tick_ms),
+            clock: Clock::from_settings(&base.clock),
         },
         "voting",
         "tallying",
@@ -301,7 +301,7 @@ async fn full_election_tally_and_audit() {
             .map(|p| Url::parse(&format!("https://127.0.0.1:{p}/")).unwrap())
             .collect(),
         ca_pem: ca.cert_pem().to_string(),
-        clock: LogicalClock::new(base.clock.base_ms, base.clock.tick_ms),
+        clock: Clock::from_settings(&base.clock),
         n_acc: base.election.n_acc,
         t_tt: base.election.t_tt,
     })

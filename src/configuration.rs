@@ -70,10 +70,15 @@ pub struct SeedSettings {
     pub master_seed: Secret<String>,
 }
 
-/// Deterministic logical clock . Timestamps in artifacts are
-/// `base_ms + tick * tick_ms`; never wall-clock.
+/// Time source for artifact timestamps. `mode: logical` (the default) stamps
+/// artifacts with `base_ms + tick * tick_ms`, never wall-clock, so the test
+/// suite and the golden artifacts are reproducible; `mode: wall` stamps them
+/// with real Unix time (demo and deployments), and the WBB then enforces its
+/// +/- 5 minute freshness window.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClockSettings {
+    #[serde(default)]
+    pub mode: crate::protocol::clock::ClockMode,
     #[serde(deserialize_with = "deserialize_number_from_string")]
     pub base_ms: u64,
     #[serde(deserialize_with = "deserialize_number_from_string")]

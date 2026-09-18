@@ -55,7 +55,7 @@ use tokio::sync::Mutex;
 
 use crate::actors::common::{health_router, serve_rustls, with_state};
 use crate::configuration::Settings;
-use crate::protocol::clock::LogicalClock;
+use crate::protocol::clock::Clock;
 use crate::protocol::rng::{operation_rng, ActorSeed};
 use crate::protocol::tally::{load_tt_share, reconstruct_tt_teller};
 use crate::protocol::tls::rustls_config_for_service;
@@ -72,7 +72,7 @@ pub struct TtState {
     entity_id: String,
     signing_key_seed: SecretString,
     service_token: SecretString,
-    clock: LogicalClock,
+    clock: Clock,
     /// Election context for context-bound tally operations.
     election_context: ElectionContext<G>,
     /// Path to this party's `tt-{i}-share.json` DKG share.
@@ -137,8 +137,8 @@ impl TtState {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SignRequest {
     pub data: String,
-    /// Optional logical timestamp in milliseconds. When omitted the server uses
-    /// its own logical clock. The coordinator should supply this so that all
+    /// Optional timestamp in milliseconds. When omitted the server uses
+    /// its own clock. The coordinator should supply this so that all
     /// co-signers share the same timestamp for a given artifact.
     #[serde(default)]
     pub timestamp: Option<i64>,
@@ -471,7 +471,7 @@ pub async fn build_service(
     let entity_id = settings.service.name.to_uppercase();
     let ceremony_dir = ceremony_dir(&settings);
     let service_token = load_service_token(&settings).await?;
-    let clock = LogicalClock::new(settings.clock.base_ms, settings.clock.tick_ms);
+    let clock = Clock::from_settings(&settings.clock);
 
     let election_context = load_election_context(&settings).await?;
     let tt_index = settings

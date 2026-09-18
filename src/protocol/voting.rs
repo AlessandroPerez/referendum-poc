@@ -9,7 +9,9 @@ use dlog_group::group::GroupScalar;
 use dlog_group::ristretto::RistrettoGroup;
 use dlog_sigma_primitives::elgamal::ciphertext::Ciphertext;
 use evoting::api::client::Ballot;
-use evoting::api::prelude::{Choice, ChoiceParameters, DiscloseCAI, ElectionPublicKey, Receipt};
+use evoting::api::prelude::{
+    Choice, ChoiceParameters, DiscloseCAI, ElectionPublicKey, OpenedCai, Receipt,
+};
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha3::{
@@ -127,6 +129,11 @@ pub struct CaiEntry {
     pub digest: BallotDigest,
     pub bb_id: u64,
     pub disclosure: DiscloseCAI<G>,
+    /// The values the disclosure opens in the ballot, as decoded by the
+    /// ballot box (Sec. 3.8.4 steps 13-14). The voter compares them with the
+    /// control values the app showed after casting; the auditor re-derives
+    /// them from the released ballot.
+    pub opened: OpenedCai,
     /// Logical confirmation time (Sec. 3.8.4 step 17).
     pub confirmed_at_ms: u64,
 }

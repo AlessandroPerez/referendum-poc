@@ -18,7 +18,7 @@ use referendum_poc::configuration::{
     get_configuration, CeremonyPaths, DipSettings, ErClientSettings, NsClientSettings,
     PeerSettings, ServiceSettings, Settings, TlsSettings, VoterSettings, WbbSettings,
 };
-use referendum_poc::protocol::clock::LogicalClock;
+use referendum_poc::protocol::clock::Clock;
 use referendum_poc::protocol::rng::MasterSeed;
 use referendum_poc::protocol::setup::artifacts::write_artifacts;
 use referendum_poc::protocol::setup::run_ceremony;
@@ -81,7 +81,7 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
         rt_urls: None,
         rt_tokens: None,
         ca_pem: ca.cert_pem().to_string(),
-        clock: LogicalClock::new(base.clock.base_ms, base.clock.tick_ms),
+        clock: Clock::from_settings(&base.clock),
     })
     .await
     .expect("gen credentials");
@@ -170,6 +170,25 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
         .await
         .unwrap();
     assert!(index.contains("Vote App"), "SPA index must be served");
+    // The three app sections are client-side routes of the same page, and
+    // nothing the voter server sends may be cached by the browser.
+    for route in ["/enrollment", "/voting", "/management"] {
+        let response = client
+            .get(format!("{base_url}{route}"))
+            .send()
+            .await
+            .expect("GET app route");
+        assert!(response.status().is_success(), "{route} must be served");
+        assert_eq!(
+            response.headers()["cache-control"],
+            "no-cache, no-store, must-revalidate"
+        );
+        let page = response.text().await.unwrap();
+        assert!(
+            page.contains("Vote App") && page.contains("data-route=\"voting\""),
+            "{route} must serve the single-page app"
+        );
+    }
 
     // V1 login.
     let login: serde_json::Value = post_json(

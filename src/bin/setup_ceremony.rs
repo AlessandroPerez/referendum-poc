@@ -10,6 +10,7 @@ use clap::Parser;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use referendum_poc::actors::load_settings;
+use referendum_poc::protocol::clock::ClockMode;
 use referendum_poc::protocol::rng::MasterSeed;
 use referendum_poc::protocol::setup::artifacts::write_artifacts;
 use referendum_poc::protocol::setup::run_ceremony;
@@ -29,12 +30,21 @@ struct Args {
     /// Optional 64-hex-character master seed. Overrides any seed in config.
     #[arg(short, long)]
     master_seed: Option<String>,
+
+    /// Time source for every artifact timestamp: `logical` (reproducible,
+    /// the test default) or `wall` (real Unix time; the WBB then enforces
+    /// its freshness window). Overrides `clock.mode` in config.
+    #[arg(long, value_enum)]
+    clock: Option<ClockMode>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let settings = load_settings(&args.config)?;
+    let mut settings = load_settings(&args.config)?;
+    if let Some(mode) = args.clock {
+        settings.clock.mode = mode;
+    }
 
     let master_seed_hex = args
         .master_seed
@@ -72,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
     );
     println!("  seed.bin: {}", paths.seed_bin.display());
     println!("  sunlight.yaml: {}", paths.sunlight_yaml.display());
+    println!("  clock: {:?}", settings.clock.mode);
 
     Ok(())
 }

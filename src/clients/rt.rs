@@ -155,7 +155,7 @@ impl RtClient {
 
     /// `POST /credentials/request` - record a PIN request for `rid`, authorized
     /// by an ER-issued single-use PIN-request token (Sec. 5.3.1.3).
-    /// Returns the sampled tau delay in logical-clock ticks.
+    /// Returns the sampled tau delay in clock ticks.
     pub async fn credentials_request(&self, token: &TokenValue, rid: &str) -> Result<u64, RtError> {
         let url = self.base_url.join("credentials/request")?;
         #[derive(Serialize)]

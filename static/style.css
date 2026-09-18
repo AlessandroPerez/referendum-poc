@@ -1,65 +1,263 @@
+/* Vote App: a phone-style single-page app. One app bar with the section
+   menu, and one scrolling stack of full-height screens per route. */
 :root {
   color-scheme: light dark;
   --accent: #1a5fb4;
+  --accent-soft: #1a5fb422;
   --error: #c01c28;
+  --ok: #26a269;
   --border: #9994;
+  --surface: Canvas;
+  --bar-height: 3.5rem;
 }
 
 * { box-sizing: border-box; }
+
+html, body { height: 100%; }
 
 body {
   font-family: system-ui, sans-serif;
   margin: 0;
   display: flex;
   justify-content: center;
-  padding: 2rem 1rem;
+  background: #8882;
 }
 
-main { width: 100%; max-width: 34rem; }
+/* The app frame: full viewport on a phone, a centered phone-sized column
+   on anything wider. */
+.app {
+  position: relative;
+  width: 100%;
+  max-width: 28rem;
+  height: 100vh;
+  height: 100dvh;
+  display: grid;
+  grid-template-rows: var(--bar-height) 1fr;
+  background: var(--surface);
+  overflow: hidden;
+}
+@media (min-width: 30rem) {
+  .app { border-inline: 1px solid var(--border); box-shadow: 0 0 2rem #0003; }
+}
 
-h1 { margin-bottom: 0; }
-.subtitle { margin-top: 0.25rem; opacity: 0.7; }
+.appbar {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0 1.25rem;
+  line-height: var(--bar-height);
+  background: var(--accent);
+  color: white;
+}
+.appbar-title { font-size: 1.15rem; font-weight: 700; }
+.appbar-sub { font-size: 0.9rem; opacity: 0.85; }
+
+/* One screen per viewport: the scroller snaps from screen to screen. */
+/* Moving to another screen is an instant jump, like an app changing view:
+   no animated scrolling, and the scroller always rests on a whole screen. */
+.scroller {
+  overflow-y: auto;
+  scroll-snap-type: y mandatory;
+  scroll-behavior: auto;
+  overscroll-behavior: contain;
+}
 
 .screen {
-  border: 1px solid var(--border);
-  border-radius: 0.5rem;
-  padding: 1rem;
-  margin: 1rem 0;
+  /* Exactly the visible area below the app bar. */
+  min-height: calc(100vh - var(--bar-height));
+  min-height: calc(100dvh - var(--bar-height));
+  scroll-snap-align: start;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 1.5rem 1.5rem 2rem;
+  border-bottom: 1px solid var(--border);
 }
+.view > .screen:last-of-type { border-bottom: none; }
 
-label { display: block; margin-bottom: 0.25rem; font-size: 0.9rem; }
+.step {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+h2 { margin: 0 0 0.25rem; font-size: 1.6rem; }
+.lead { margin: 0 0 1rem; opacity: 0.8; line-height: 1.45; }
 
-input {
+label { display: block; margin: 0.5rem 0 0.25rem; font-size: 0.85rem; font-weight: 600; }
+
+input, select {
   width: 100%;
-  padding: 0.5rem;
-  margin-bottom: 0.5rem;
+  padding: 0.8rem;
   border: 1px solid var(--border);
-  border-radius: 0.25rem;
+  border-radius: 0.6rem;
+  background: transparent;
+  color: inherit;
   font: inherit;
 }
+input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-button {
-  padding: 0.5rem 1rem;
+button, a.button {
+  display: block;
+  width: 100%;
+  margin-top: 0.75rem;
+  padding: 0.9rem 1rem;
   border: none;
-  border-radius: 0.25rem;
+  border-radius: 0.6rem;
   background: var(--accent);
   color: white;
   font: inherit;
+  font-weight: 600;
+  text-align: center;
+  text-decoration: none;
   cursor: pointer;
 }
-button:hover { filter: brightness(1.1); }
+button:hover, a.button:hover { filter: brightness(1.1); }
+button:active, a.button:active { transform: scale(0.99); }
+button.secondary, a.button.secondary {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+button.danger { background: var(--error); }
 
 code {
   display: block;
-  padding: 0.5rem;
-  margin: 0.5rem 0;
-  border-radius: 0.25rem;
+  padding: 0.75rem;
+  margin: 0.25rem 0;
+  border-radius: 0.6rem;
   background: #8883;
-  font-size: 1.2rem;
+  font-size: 1.15rem;
   letter-spacing: 0.05em;
   word-break: break-all;
+  text-align: center;
+}
+code.big { font-size: 2rem; letter-spacing: 0.2em; padding: 1.25rem 0.75rem; }
+code.small { font-size: 0.8rem; letter-spacing: 0; }
+
+.result { min-height: 1.4em; margin: 0.75rem 0 0; line-height: 1.4; }
+.warning { color: var(--accent); font-weight: 600; }
+
+/* Errors: a toast floating at the bottom of the app. */
+.toast {
+  position: absolute;
+  left: 1rem;
+  right: 1rem;
+  bottom: 1rem;
+  margin: 0;
+  padding: 0.8rem 1rem;
+  border-radius: 0.6rem;
+  background: var(--error);
+  color: white;
+  font-weight: 600;
+  box-shadow: 0 0.25rem 1rem #0005;
 }
 
-.warning { color: var(--accent); font-weight: 600; }
-.error { color: var(--error); font-weight: 600; }
-.hidden { display: none; }
+/* Section menu: a dropdown anchored to the top-right of the app bar. */
+.appbar { position: relative; }
+.menu-button {
+  width: 2.5rem;
+  height: 2.5rem;
+  margin: 0 -0.5rem 0 auto;
+  padding: 0.45rem;
+  align-self: center;
+  border-radius: 50%;
+  background: transparent;
+}
+.menu-button:hover, .menu-button[aria-expanded="true"] { background: #fff3; filter: none; }
+.menu-button svg, .menu-item svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.menu {
+  position: absolute;
+  top: calc(var(--bar-height) - 0.35rem);
+  right: 0.75rem;
+  z-index: 10;
+  min-width: 12rem;
+  padding: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--surface);
+  color: CanvasText;
+  line-height: 1.2;
+  box-shadow: 0 0.5rem 1.5rem #0006;
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 0.5rem;
+  font-weight: 600;
+  text-decoration: none;
+  color: inherit;
+}
+.menu-item svg { width: 1.35rem; height: 1.35rem; flex: none; }
+.menu-item:hover { background: #8882; }
+.menu-item.active { color: var(--accent); background: var(--accent-soft); }
+
+.hidden { display: none !important; }
+
+/* Scroll hint: a chevron at the bottom of a screen that has another
+   visible screen below it. */
+.screen { position: relative; }
+.screen:has(~ .screen:not(.hidden))::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 1rem;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  opacity: 0.35;
+  transform: translateX(-50%) rotate(45deg);
+  animation: hint 1.6s ease-in-out infinite;
+}
+@keyframes hint {
+  50% { transform: translateX(-50%) translateY(0.3rem) rotate(45deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .screen::after { animation: none !important; }
+}
+
+/* Every element of a screen is centered, like a native app's onboarding. */
+.screen { text-align: center; align-items: stretch; }
+.screen label { text-align: center; }
+.screen input { text-align: center; }
+.screen select { text-align: center; text-align-last: center; }
+
+/* Post-cast choice of the cast-as-intended value: a segmented control. */
+.segmented { display: grid; grid-template-columns: 1fr 1fr 1.4fr; gap: 0.4rem; }
+.segmented .seg {
+  margin-top: 0;
+  padding: 0.7rem 0.4rem;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.segmented .seg[aria-checked="true"] { background: var(--accent); color: white; }
+.hint { margin: 0.6rem 0 0; font-size: 0.8rem; line-height: 1.4; opacity: 0.7; }
+button:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
+
+/* Control values shown after casting. */
+.control { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-top: 0.75rem; }
+.control-value {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  font-size: 0.8rem;
+}
+.control-value strong { font-size: 1.8rem; letter-spacing: 0.1em; font-variant-numeric: tabular-nums; }
+.control-value.opened { border-color: var(--ok); background: #26a26922; }
