@@ -4099,11 +4099,7 @@ async fn a_dropped_board_read_does_not_shorten_a_release() {
                         axum::body::Bytes::from_static(b"answer lost"),
                     );
                 }
-                if path.ends_with("entries")
-                    && drop_reads
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                        .is_ok()
-                {
+                if path.ends_with("entries") && take_one(&drop_reads) {
                     return (
                         reqwest::StatusCode::BAD_GATEWAY,
                         axum::body::Bytes::from_static(b"read dropped"),
@@ -4635,11 +4631,7 @@ async fn a_failed_release_is_asked_again_not_tallied_as_empty() {
                         axum::body::Bytes::from_static(b"answer lost"),
                     );
                 }
-                if path.ends_with("entries")
-                    && drop_reads
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                        .is_ok()
-                {
+                if path.ends_with("entries") && take_one(&drop_reads) {
                     return (
                         reqwest::StatusCode::BAD_GATEWAY,
                         axum::body::Bytes::from_static(b"read dropped"),
@@ -4990,11 +4982,7 @@ async fn a_box_that_stays_silent_at_release_stops_the_tally_rather_than_lose_a_b
                         axum::body::Bytes::from_static(b"answer lost"),
                     );
                 }
-                if path.ends_with("entries")
-                    && drop_reads
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                        .is_ok()
-                {
+                if path.ends_with("entries") && take_one(&drop_reads) {
                     return (
                         reqwest::StatusCode::BAD_GATEWAY,
                         axum::body::Bytes::from_static(b"read dropped"),
@@ -5040,11 +5028,7 @@ async fn a_silent_box_that_holds_a_ballot_it_did_not_publish_stops_the_tally() {
             &real,
             cluster.client.clone(),
             std::sync::Arc::new(move |path: &str, _req: &[u8], status, body| {
-                if path.ends_with("entries")
-                    && drop_reads
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                        .is_ok()
-                {
+                if path.ends_with("entries") && take_one(&drop_reads) {
                     return (
                         reqwest::StatusCode::BAD_GATEWAY,
                         axum::body::Bytes::from_static(b"read dropped"),
@@ -5658,4 +5642,19 @@ async fn a_release_written_after_the_tally_started_is_named_not_counted() {
         "{:?}",
         audit.steps
     );
+}
+
+/// Take one from a countdown, if any is left. (A compare-and-swap loop: the
+/// standard `fetch_update` is deprecated on newer toolchains and its
+/// replacement does not exist on older ones.)
+fn take_one(counter: &std::sync::atomic::AtomicUsize) -> bool {
+    use std::sync::atomic::Ordering;
+    let mut current = counter.load(Ordering::SeqCst);
+    while current > 0 {
+        match counter.compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(actual) => current = actual,
+        }
+    }
+    false
 }
