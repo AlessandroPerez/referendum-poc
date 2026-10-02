@@ -1,4 +1,4 @@
-//! Setup-ceremony integration test: ceremony -> cluster boot -> ER publishes 3 setup entries
+//! Setup-ceremony integration test: ceremony -> cluster boot -> ER publishes its setup entries
 //! to the WBB, visible via the read API.
 
 use std::path::PathBuf;
@@ -23,7 +23,7 @@ use super::helpers;
 const MASTER_SEED: [u8; 32] = [0xabu8; 32];
 
 #[tokio::test]
-async fn er_publishes_three_setup_entries_to_wbb() {
+async fn er_publishes_its_setup_entries_to_wbb() {
     helpers::init();
     let _cluster = helpers::cluster_guard().await;
 
@@ -35,14 +35,8 @@ async fn er_publishes_three_setup_entries_to_wbb() {
     let master_seed = MasterSeed::new(MASTER_SEED);
     let mut rng = rand_chacha::ChaCha20Rng::from_seed(MASTER_SEED);
     let ceremony = run_ceremony(&base_settings.election, &mut rng).unwrap();
-    let _paths = write_artifacts(
-        ceremony_dir,
-        &base_settings,
-        &ceremony,
-        &master_seed,
-        &base_settings.dip,
-    )
-    .expect("write ceremony artifacts");
+    let _paths = write_artifacts(ceremony_dir, &base_settings, &ceremony, &master_seed)
+        .expect("write ceremony artifacts");
 
     // 2. Spawn the WBB with the generated sunlight.yaml.
     let ca = ClusterCa::from_seed(&MASTER_SEED).unwrap();
@@ -96,11 +90,11 @@ async fn er_publishes_three_setup_entries_to_wbb() {
         response.text().await
     );
 
-    // 5. Poll the WBB until all 3 setup entries appear.
-    let entries = poll_for_setup_entries(&wbb.client, 3, Duration::from_secs(10))
+    // 5. Poll the WBB until all 5 setup entries appear.
+    let entries = poll_for_setup_entries(&wbb.client, 5, Duration::from_secs(10))
         .await
         .expect("setup entries not published in time");
-    assert_eq!(entries.len(), 3);
+    assert_eq!(entries.len(), 5);
 
     // 6. Verify each entry is signed by ER-1 and has the expected type.
     let er_key = actor_signing_key(&master_seed, "ER-1");
@@ -152,7 +146,9 @@ async fn er_publishes_three_setup_entries_to_wbb() {
     assert!(
         seen_types.contains("election_pub_key")
             && seen_types.contains("pseudonymous_id_count")
-            && seen_types.contains("voter_id_merkle_root"),
+            && seen_types.contains("voter_id_merkle_root")
+            && seen_types.contains("assigned_vids")
+            && seen_types.contains("tt_public_shares"),
         "missing setup entry types: {:?}",
         seen_types
     );

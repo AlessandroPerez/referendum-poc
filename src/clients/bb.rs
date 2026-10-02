@@ -10,7 +10,7 @@ use reqwest::{Client, StatusCode, Url};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{BallotDigest, TokenValue};
+use crate::domain::BallotDigest;
 
 type G = RistrettoGroup;
 
@@ -61,14 +61,14 @@ impl BbClient {
         &self,
         ballot: &Ballot<G>,
         rndcomm: &[u8; 32],
-        casting_token: &TokenValue,
+        casting_token: &crate::protocol::cat::CastingToken,
     ) -> Result<CastResponse, BbError> {
         #[derive(Serialize)]
         #[serde(bound = "")]
         struct Req {
             ballot: Ballot<G>,
             rndcomm: String,
-            casting_token: TokenValue,
+            casting_token: crate::protocol::cat::CastingToken,
         }
         let url = self.base_url.join("ballots")?;
         let response = self
@@ -157,12 +157,20 @@ impl BbClient {
                 "Authorization",
                 format!("Bearer {}", service_token.expose_secret()),
             )
-            .timeout(Duration::from_secs(20))
+            // A release opens every published confirmation against the
+            // ballots the box holds: on a board another box has filled with
+            // junk that is real work, and a release cut off is a release
+            // lost.
+            .timeout(Duration::from_secs(300))
             .send()
             .await
             .map_err(BbError::Network)?;
         let status = response.status();
         let body = response.text().await.map_err(BbError::Network)?;
+        // 202: the box is still preparing its release after the close.
+        if status == reqwest::StatusCode::ACCEPTED {
+            return Err(BbError::ReleasePreparing);
+        }
         if status.is_success() {
             serde_json::from_str(&body).map_err(BbError::Json)
         } else {
@@ -174,6 +182,9 @@ impl BbClient {
 /// Errors from the BB client.
 #[derive(Debug, thiserror::Error)]
 pub enum BbError {
+    /// The box is still computing its release (it answered 202): ask again.
+    #[error("the ballot box is still preparing its release")]
+    ReleasePreparing,
     #[error("network error: {0}")]
     Network(#[from] reqwest::Error),
     #[error("invalid URL path: {0}")]

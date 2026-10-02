@@ -13,7 +13,9 @@ use dlog_group::serde::{PointHelper, ScalarHelper};
 use dlog_sigma_primitives::elgamal::ciphertext::{Ciphertext, ExtendedCiphertext};
 use evoting::api::prelude::{voter_build_acc, RTPublicKey, ShortPublicACC};
 use evoting::api::server::bb::ElectionContext;
-use evoting::api::server::rt::{AccShareBroadcast, RTSecretKeyShare, ThresholdRegistrationTeller};
+use evoting::api::server::rt::{
+    AccShareBroadcast, AccShareCommitments, RTSecretKeyShare, ThresholdRegistrationTeller,
+};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
@@ -97,6 +99,10 @@ pub struct EnrollmentPackage {
     /// One `AccShareBroadcast` per RT.  Any `t_RT` of them suffice for the
     /// voter to rebuild the credential.
     pub share_broadcasts: Vec<AccShareBroadcast<G>>,
+    /// The dealers' public commitments, against which each of those shares is
+    /// checked by the voter's app (Sec. 3.6.1 step 11).
+    #[serde(default = "empty_share_commitments")]
+    pub share_commitments: AccShareCommitments<G>,
 }
 
 impl EnrollmentPackage {
@@ -104,15 +110,24 @@ impl EnrollmentPackage {
         a: <G as GroupPoint>::Point,
         enc_a_ext: ExtendedCiphertext<G>,
         shares: Vec<AccShareBroadcast<G>>,
+        share_commitments: AccShareCommitments<G>,
     ) -> Self {
         Self {
             a,
             enc_a_ext: enc_a_ext.into(),
             share_broadcasts: shares,
+            share_commitments,
         }
     }
 
     /// The subset of the package the ER hands to the voter at login.
+    ///
+    /// `A` and `E[A]` ONLY. The dealers' commitments are deliberately NOT here:
+    /// their constant term is `g3^x`, the credential secret in the exponent,
+    /// which the protocol never puts in the clear (Sec. 3.5.4 step 9 keeps it
+    /// inside `E_pkACC[g1 * g3^x]`). The app gets them from the registration
+    /// tellers with the shares they belong to, which is where Sec. 3.6.1
+    /// step 9 puts the proofs, and the roll never sees them.
     pub fn credential_package(&self) -> CredentialPackage {
         CredentialPackage {
             a: self.a,
@@ -132,6 +147,23 @@ pub struct RtCredentialShare {
     pub a: <G as GroupPoint>::Point,
     /// This teller's share broadcast for the credential.
     pub share: AccShareBroadcast<G>,
+    /// The dealers' commitments for this credential, which the voter's app
+    /// needs to check EACH delivered share (Sec. 3.6.1 step 11). Every teller
+    /// holds the same set - it is what they broadcast to one another in VSS
+    /// round 1 - and delivers it with its share, so the app can take the set
+    /// the tellers agree on. It never passes through the roll: its constant
+    /// term is `g3^x`.
+    #[serde(default = "empty_share_commitments")]
+    pub share_commitments: AccShareCommitments<G>,
+}
+
+/// An empty commitment set, for share files written before they were carried.
+pub fn empty_share_commitments() -> AccShareCommitments<G> {
+    AccShareCommitments {
+        x: Vec::new(),
+        sigma: Vec::new(),
+        r: Vec::new(),
+    }
 }
 
 /// File (under the ceremony's `output/`) with the ER's view of every
@@ -176,6 +208,7 @@ impl EnrollmentPackage {
             .map(|share| RtCredentialShare {
                 a: self.a,
                 share: share.clone(),
+                share_commitments: self.share_commitments.clone(),
             })
     }
 
@@ -324,7 +357,13 @@ pub fn generate_credentials(
         );
         let short = tellers[0].short_public_acc(&public_acc)?;
 
-        packages.push(EnrollmentPackage::new(a, enc_a_ext, share_broadcasts));
+        let share_commitments = AccShareCommitments::from_vss(&vss_broadcasts)?;
+        packages.push(EnrollmentPackage::new(
+            a,
+            enc_a_ext,
+            share_broadcasts,
+            share_commitments,
+        ));
         short_accs.push(short);
     }
 
@@ -384,6 +423,10 @@ mod tests {
             n_acc: 10,
             t_prime: 2,
             max_casts_per_voter: 10,
+            casting_token_ttl_s: 600,
+            min_cast_interval_s: 0,
+            tau_min_s: 2,
+            tau_max_s: 5,
         }
     }
 

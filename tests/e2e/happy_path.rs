@@ -72,7 +72,7 @@ async fn referendum_happy_path() {
         .voter_post(
             0,
             "/api/ballot/status",
-            serde_json::json!({ "passphrase": cluster.passphrases[0] }),
+            serde_json::json!({ "passphrase": cluster.passphrases[0], "pin": pin1 }),
         )
         .await;
     assert_eq!(status["no_bot"], true, "V14: no bot for voter 1");
@@ -83,7 +83,9 @@ async fn referendum_happy_path() {
     let again = cluster
         .client
         .post(format!("{}/api/confirm", cluster.voter_urls[0]))
-        .json(&serde_json::json!({ "passphrase": cluster.passphrases[0] }))
+        .json(&serde_json::json!({
+            "passphrase": cluster.passphrases[0], "pin": pin1, "digest": digests[0],
+        }))
         .send()
         .await
         .unwrap();
@@ -147,7 +149,12 @@ async fn referendum_happy_path() {
     );
     assert_eq!(cluster.entry_type_count("encrypted_ballot").await, 18);
     assert_eq!(cluster.entry_type_count("mixed_ballots").await, 2);
-    assert_eq!(cluster.entry_type_count("re_encryption_proof").await, 4);
+    assert_eq!(cluster.entry_type_count("re_encryption_proof").await, 3);
+    assert_eq!(
+        cluster.entry_type_count("credential_control").await,
+        1,
+        "the control elements are the registration tellers' entry (Sec. 3.4.2)"
+    );
     assert_eq!(cluster.entry_type_count("tally_proof").await, 1);
     assert_eq!(cluster.entry_type_count("tally_result").await, 1);
 

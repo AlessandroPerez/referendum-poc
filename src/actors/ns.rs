@@ -53,10 +53,14 @@ impl NsState {
     /// Register a new (vid, rid) pair. Returns true if it was newly created.
     pub async fn register(&self, vid: Vid, rid: String) -> bool {
         let mut map = self.notifications.lock().await;
-        map.entry(vid.value())
-            .or_default()
-            .insert(rid, Vec::new())
-            .is_none()
+        // Idempotent: registering a pair again must not throw away the
+        // announcements the tellers already made for it.
+        let per_vid = map.entry(vid.value()).or_default();
+        if per_vid.contains_key(&rid) {
+            return false;
+        }
+        per_vid.insert(rid, Vec::new());
+        true
     }
 
     /// Add a notification for (vid, rid) from a specific RT.

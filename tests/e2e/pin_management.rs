@@ -47,11 +47,14 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     let temp = tempfile::tempdir().expect("tempdir");
     let ceremony_dir = temp.path();
     let base = base_settings();
+    // Identifiers are the electoral roll's private random assignment; the
+    // values below are read once the ceremony has written its seed.
     let master_seed = MasterSeed::new(MASTER_SEED);
     let mut rng = rand_chacha::ChaCha20Rng::from_seed(MASTER_SEED);
     let ceremony = run_ceremony(&base.election, &mut rng).unwrap();
-    write_artifacts(ceremony_dir, &base, &ceremony, &master_seed, &base.dip)
+    write_artifacts(ceremony_dir, &base, &ceremony, &master_seed)
         .expect("write ceremony artifacts");
+    let vids_of = helpers::vid_assignment(ceremony_dir, base.election.n_acc);
 
     let ca = ClusterCa::from_seed(&MASTER_SEED).unwrap();
     let wbb_cert = issue_service_cert(&ca, "wbb", &MASTER_SEED).unwrap();
@@ -176,6 +179,19 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let client = reqwest_client_trusting_ca(ca.cert_pem()).unwrap();
 
+    // The roll commits the identifier tree before anyone enrolls: the app
+    // checks the identifier it is given against that root.
+    let setup = client
+        .post(format!("https://127.0.0.1:{}/admin/setup", ports.er))
+        .header(
+            "Authorization",
+            format!("Bearer {}", admin_token(ceremony_dir)),
+        )
+        .send()
+        .await
+        .expect("admin setup");
+    assert!(setup.status().is_success(), "ER setup publication");
+
     // -- 3. Enroll voters 1 and 2 (setup phase) -------------------
     let v1 = voter_urls[0].clone();
     let v2 = voter_urls[1].clone();
@@ -189,7 +205,7 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     let ruse: serde_json::Value = post_json(
         &client,
         &format!("{v1}/api/pin/ruse"),
-        serde_json::json!({ "passphrase": p1 }),
+        serde_json::json!({ "passphrase": p1, "pin": pin1 }),
     )
     .await;
     let ruse_pin = ruse["ruse_pin"].as_u64().expect("ruse pin");
@@ -201,7 +217,7 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     for (pin, expected) in [
         (ruse_pin, true),
         (pin1, false),
-        ((pin1 + 7) % 100_000_000, false),
+        ((pin1 + 7) % 100_000, false),
     ] {
         let verify: serde_json::Value = post_json(
             &client,
@@ -235,7 +251,7 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     let ruse_cast: serde_json::Value = post_json(
         &client,
         &format!("{v1}/api/cast"),
-        serde_json::json!({ "passphrase": p1 }),
+        serde_json::json!({ "passphrase": p1, "pin": ruse_pin }),
     )
     .await;
     assert_eq!(
@@ -254,12 +270,17 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     post_json(
         &client,
         &format!("{v1}/api/cast"),
-        serde_json::json!({ "passphrase": p1 }),
+        serde_json::json!({ "passphrase": p1, "pin": pin1 }),
     )
     .await;
     // Tally-side filtering of the ruse ballot is asserted in the tally tests.
 
-    // -- 6. V6 PIN re-send: fresh rid + retrieval, same PIN ----------------
+    // -- 6. V6 PIN re-send: fresh rid + retrieval, and it delivers the VALID
+    //       PIN even while a ruse is armed (Sec. 3.6.3 footnote 9: "PIN =
+    //       PIN^valid if this originates from a pin re-sending request").
+    //       The decoy is what the RUSE request shows; under coercion the
+    //       voter asks for that instead, and the two look the same on the
+    //       wire (Sec. 3.7.3 step 7, footnote 13). -----------------------
     let resend: serde_json::Value = post_json(
         &client,
         &format!("{v1}/api/pin/resend"),
@@ -269,7 +290,42 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     assert_eq!(
         resend["pin"].as_u64().unwrap(),
         pin1,
-        "re-delivered PIN equals the original (Sec. 3.7.2)"
+        "a re-send delivers the voter's own PIN"
+    );
+    assert_ne!(resend["pin"].as_u64().unwrap(), ruse_pin);
+    // And with the valid PIN goes ITS emoji (Sec. 3.6.3 step 5), the one the
+    // verification screen shows for it.
+    let verify_valid: serde_json::Value = post_json(
+        &client,
+        &format!("{v1}/api/pin/verify"),
+        serde_json::json!({ "passphrase": p1, "pin": pin1 }),
+    )
+    .await;
+    assert_eq!(
+        resend["private_pin_emoji"], verify_valid["private_pin_emoji"],
+        "with the valid PIN goes the valid PIN's emoji"
+    );
+    // The re-send REPLACED the stored credential (Sec. 3.7.2 step 3), so the
+    // decoy is disarmed: the voter arms the same one again for what follows.
+    let rearmed: serde_json::Value = post_json(
+        &client,
+        &format!("{v1}/api/pin/ruse"),
+        serde_json::json!({ "passphrase": p1, "pin": pin1, "ruse_pin": ruse_pin }),
+    )
+    .await;
+    assert_eq!(rearmed["ruse_pin"].as_u64(), Some(ruse_pin));
+    // The real PIN is unharmed: it still casts a counted vote below, and a
+    // voter with no ruse gets their own PIN back (voter 2).
+    let resend2: serde_json::Value = post_json(
+        &client,
+        &format!("{v2}/api/pin/resend"),
+        serde_json::json!({ "passphrase": p2 }),
+    )
+    .await;
+    assert_eq!(
+        resend2["pin"].as_u64().unwrap(),
+        pin2,
+        "without a ruse, the re-delivered PIN is the original (Sec. 3.7.2)"
     );
 
     // -- 7. V8 new-device recovery on the fresh voter-3 server -------------
@@ -290,7 +346,7 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
         serde_json::json!({ "fiscal_id": "VOTER-001", "passphrase": p1 }),
     )
     .await;
-    assert_eq!(recovered["vid"], 1);
+    assert_eq!(recovered["vid"], vids_of[0]);
     assert_eq!(recovered["pin_set"], true);
     // The blob was refreshed while a ruse was active, so the recovered
     // device DISPLAYS the ruse PIN (Sec. 3.7.3 cover story survives recovery) ...
@@ -323,17 +379,21 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     )
     .await;
     let new_vid = revoked["vid"].as_u64().unwrap();
-    assert_eq!(new_vid, 9, "first spare vid is n_voters + 1 ");
+    assert_eq!(new_vid, vids_of[8], "the first spare identifier");
 
-    // The eligible list swaps old vid 2 for spare vid 9 (A7).
-    let eligible: serde_json::Value = get_json(
+    // The eligible list swaps voter 2's old vid for the spare one (A7).
+    let eligible: serde_json::Value = helpers::get_json_with_token(
         &client,
         &format!("https://127.0.0.1:{}/voters/eligible", ports.er),
+        &admin_token(ceremony_dir),
     )
     .await;
     let vids: Vec<u64> = serde_json::from_value(eligible["vids"].clone()).unwrap();
-    assert!(!vids.contains(&2), "revoked vid must not be eligible");
-    assert!(vids.contains(&9), "spare vid must be eligible");
+    assert!(
+        !vids.contains(&vids_of[1]),
+        "revoked vid must not be eligible"
+    );
+    assert!(vids.contains(&vids_of[8]), "spare vid must be eligible");
     assert_eq!(vids.len(), 8, "electorate size is unchanged");
 
     // Exactly one revocation_commitment entry on the WBB.
@@ -402,7 +462,7 @@ async fn pin_lifecycle_ruse_resend_recover_revoke_trusted() {
     assert_eq!(
         resend2["pin"].as_u64().unwrap(),
         pin1,
-        "re-send works with the trusted t_RT subset"
+        "re-send works with the trusted t_RT subset, and delivers the valid PIN"
     );
 }
 
@@ -492,17 +552,6 @@ async fn post_json(
     assert!(
         status.is_success(),
         "POST {url} failed with {status}: {text}"
-    );
-    serde_json::from_str(&text).expect("json body")
-}
-
-async fn get_json(client: &reqwest::Client, url: &str) -> serde_json::Value {
-    let response = client.get(url).send().await.expect("request");
-    let status = response.status();
-    let text = response.text().await.expect("body");
-    assert!(
-        status.is_success(),
-        "GET {url} failed with {status}: {text}"
     );
     serde_json::from_str(&text).expect("json body")
 }

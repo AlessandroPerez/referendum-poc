@@ -5,6 +5,7 @@ mod credential_generation;
 mod enrollment;
 mod golden;
 mod happy_path;
+mod hardening;
 mod helpers;
 mod pin_management;
 mod protocol_flows;

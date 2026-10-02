@@ -144,6 +144,8 @@ pub struct WbbSpawnConfig {
     pub phase_manager_key: Option<VerifyingKey>,
     pub grace_period_ms: u64,
     pub max_submit_body_bytes: i64,
+    /// Validators registered with the board: id -> compressed BLS public key.
+    pub validator_keys: Vec<(String, Vec<u8>)>,
     /// Enforce the WBB's +/- 5 minute freshness window (wall-clock runs).
     /// Off by default: the suite stamps entries with the logical clock.
     pub timestamp_validation: bool,
@@ -158,7 +160,14 @@ impl WbbSpawnConfig {
             grace_period_ms: 100,
             max_submit_body_bytes: 32 * 1024 * 1024,
             timestamp_validation: false,
+            validator_keys: Vec::new(),
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_validator(mut self, id: &str, public_key: Vec<u8>) -> Self {
+        self.validator_keys.push((id.to_string(), public_key));
+        self
     }
 
     #[allow(dead_code)]
@@ -203,8 +212,11 @@ impl WbbProcess {
         std::fs::write(work_dir.join("sunlight.pem"), service_cert_pem)?;
         std::fs::write(work_dir.join("sunlight-key.pem"), service_key_pem)?;
 
-        let seed_path = work_dir.join("seed.bin");
-        std::fs::write(&seed_path, [0u8; 32])?;
+        let seed_path = work_dir.join("wbb-log-seed.bin");
+        // A ceremony directory already holds the board's seed: run on it.
+        if !seed_path.exists() {
+            std::fs::write(&seed_path, [0u8; 32])?;
+        }
 
         let checkpoints = work_dir.join("checkpoints.db");
         init_checkpoints_db(&checkpoints)?;
@@ -312,6 +324,12 @@ fn build_sunlight_yaml(
         "    disable_timestamp_validation: {}\n",
         !config.timestamp_validation
     ));
+    if !config.validator_keys.is_empty() {
+        yaml.push_str("    validator_bls_keys:\n");
+        for (id, key) in &config.validator_keys {
+            yaml.push_str(&format!("      {id}: {}\n", BASE64.encode(key)));
+        }
+    }
     yaml.push_str(&format!(
         "    grace_period_ms: {}\n",
         config.grace_period_ms
@@ -355,16 +373,28 @@ pub async fn cluster_guard() -> tokio::sync::MutexGuard<'static, ()> {
 /// binds it (the port race, observed as `Address already in use` flakes), but
 /// ports outside the ephemeral range are never handed out that way.  The
 /// counter makes successive allocations distinct within a process; each
-/// candidate is still bind-probed so unrelated listeners are skipped.
+/// candidate is still bind-probed so unrelated listeners are skipped. The
+/// range starts at `E2E_PORT_BASE` (default 20000, at most 30000) and spans
+/// 2000 ports, so several copies of the suite can run side by side.
 pub fn free_port() -> u16 {
     use std::sync::atomic::{AtomicU16, Ordering};
-    static NEXT: AtomicU16 = AtomicU16::new(20_000);
+    use std::sync::OnceLock;
+    static BASE: OnceLock<u16> = OnceLock::new();
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let base = *BASE.get_or_init(|| {
+        std::env::var("E2E_PORT_BASE")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .filter(|b| (1024..=30_000).contains(b))
+            .unwrap_or(20_000)
+    });
     loop {
-        let candidate = NEXT.fetch_add(1, Ordering::SeqCst);
-        if candidate >= 30_000 {
-            NEXT.store(20_000, Ordering::SeqCst);
+        let offset = NEXT.fetch_add(1, Ordering::SeqCst);
+        if offset >= 2_000 {
+            NEXT.store(0, Ordering::SeqCst);
             continue;
         }
+        let candidate = base + offset;
         if TcpListener::bind(("127.0.0.1", candidate)).is_ok() {
             return candidate;
         }
@@ -408,6 +438,13 @@ pub struct ElectionOpts {
     pub master_seed: [u8; 32],
     /// Override for the CAT rate limit (`rate_limit_and_cat`).
     pub max_casts_per_voter: Option<usize>,
+    /// Override for the casting tokens' validity, seconds.
+    pub casting_token_ttl_s: Option<u64>,
+    /// Override for the minimum time between two different ballots, seconds.
+    pub min_cast_interval_s: Option<u64>,
+    /// Run every service on the wall clock with this waiting-period range
+    /// `(tau_min_s, tau_max_s)` instead of the reproducible logical clock.
+    pub wall_clock_tau: Option<(u64, u64)>,
 }
 
 impl Default for ElectionOpts {
@@ -415,6 +452,9 @@ impl Default for ElectionOpts {
         Self {
             master_seed: [0xab; 32],
             max_casts_per_voter: None,
+            wall_clock_tau: None,
+            casting_token_ttl_s: None,
+            min_cast_interval_s: None,
         }
     }
 }
@@ -457,16 +497,29 @@ impl ElectionCluster {
         let ceremony_dir = temp.path().to_path_buf();
         let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let mut base = get_configuration(&base_dir).expect("base settings");
+        // The suite asks for the reproducible mode BY NAME; the shipped
+        // configuration is the wall clock.
+        base.clock.mode = referendum_poc::protocol::clock::ClockMode::Logical;
         if let Some(limit) = opts.max_casts_per_voter {
             base.election.max_casts_per_voter = limit;
         }
 
+        if let Some(ttl) = opts.casting_token_ttl_s {
+            base.election.casting_token_ttl_s = ttl;
+        }
+        if let Some(gap) = opts.min_cast_interval_s {
+            base.election.min_cast_interval_s = gap;
+        }
+        if let Some((tau_min_s, tau_max_s)) = opts.wall_clock_tau {
+            base.clock.mode = referendum_poc::protocol::clock::ClockMode::Wall;
+            base.election.tau_min_s = tau_min_s;
+            base.election.tau_max_s = tau_max_s;
+        }
         let master_seed = opts.master_seed;
         let seed = MasterSeed::new(master_seed);
         let mut rng = ChaCha20Rng::from_seed(master_seed);
         let ceremony = run_ceremony(&base.election, &mut rng).expect("ceremony");
-        write_artifacts(&ceremony_dir, &base, &ceremony, &seed, &base.dip)
-            .expect("write ceremony artifacts");
+        write_artifacts(&ceremony_dir, &base, &ceremony, &seed).expect("write ceremony artifacts");
 
         let ca = ClusterCa::from_seed(&master_seed).expect("cluster ca");
         let wbb_cert = issue_service_cert(&ca, "wbb", &master_seed).expect("wbb cert");
@@ -640,6 +693,13 @@ impl ElectionCluster {
         self.temp.path()
     }
 
+    /// The electoral roll's PRIVATE identifier assignment, recomputed from its
+    /// seed: entry `i` is the vid of registry voter `i + 1`; from index
+    /// `n_voters` on come the spare vids, in hand-out order.
+    pub fn vid_assignment(&self) -> Vec<u64> {
+        vid_assignment(self.temp.path(), self.base.election.n_acc)
+    }
+
     /// Spawn a voter-server. `cert_name` must be a ceremony-provisioned TLS
     /// identity (`voter-1`..`voter-n`); a fresh-device server for `new_device`
     /// reuses a cert but gets its own state dir via `state_label`.
@@ -724,12 +784,14 @@ impl ElectionCluster {
         shown["pin"].as_u64().expect("pin")
     }
 
-    pub async fn ruse_pin(&self, i: usize) -> u64 {
+    /// Arm a decoy, authorised with the PIN the app currently holds
+    /// (Sec. 3.7.3 step 5 needs `PIN^valid` to build `x^ruse`).
+    pub async fn ruse_pin(&self, i: usize, pin: u64) -> u64 {
         let ruse = self
             .voter_post(
                 i,
                 "/api/pin/ruse",
-                serde_json::json!({ "passphrase": self.passphrases[i] }),
+                serde_json::json!({ "passphrase": self.passphrases[i], "pin": pin }),
             )
             .await;
         ruse["ruse_pin"].as_u64().expect("ruse pin")
@@ -747,12 +809,13 @@ impl ElectionCluster {
         .await
     }
 
-    /// `POST /api/cast` - returns the full response (receipts).
-    pub async fn cast(&self, i: usize) -> serde_json::Value {
+    /// `POST /api/cast` - returns the full response (receipts). The PIN says
+    /// which held ballot to cast (Sec. 3.7.3: the ruse PIN has its own).
+    pub async fn cast(&self, i: usize, pin: u64) -> serde_json::Value {
         self.voter_post(
             i,
             "/api/cast",
-            serde_json::json!({ "passphrase": self.passphrases[i] }),
+            serde_json::json!({ "passphrase": self.passphrases[i], "pin": pin }),
         )
         .await
     }
@@ -771,6 +834,10 @@ impl ElectionCluster {
                 // per voter so every slot combination is exercised.
                 serde_json::json!({
                     "passphrase": self.passphrases[i],
+                    "pin": pin,
+                    // Sec. 3.8.4 steps 9-11: the confirmation names the
+                    // ballot whose control values were checked.
+                    "digest": vote["digest"],
                     "l1": if i % 2 == 0 { "code" } else { "sum" },
                     "l2": if (i / 2) % 2 == 0 { "sum" } else { "code" },
                 }),
@@ -794,7 +861,7 @@ impl ElectionCluster {
     ) -> serde_json::Value {
         let vote = self.vote(i, option, pin).await;
         assert!(!vote["emoji"].as_array().unwrap().is_empty());
-        let cast = self.cast(i).await;
+        let cast = self.cast(i, pin).await;
         assert_eq!(
             cast["receipts"].as_array().unwrap().len(),
             2,
@@ -814,21 +881,155 @@ impl ElectionCluster {
 
     /// Run the full Sec. 3.9 tally driver over HTTPS.
     pub async fn tally(&self) -> TallyOutcome {
+        self.try_tally().await.expect("tally pipeline")
+    }
+
+    /// The tally pipeline, returning its error instead of panicking.
+    pub async fn try_tally(
+        &self,
+    ) -> Result<TallyOutcome, referendum_poc::actors::admin::AdminError> {
+        let er_url = Url::parse(&format!("https://127.0.0.1:{}/", self.ports.er)).unwrap();
+        self.try_tally_with_roll(er_url).await
+    }
+
+    /// The tally, asking `er_url` for the eligible list (e.g. a stand-in
+    /// electoral roll that lies about it).
+    pub async fn try_tally_with_roll(
+        &self,
+        er_url: Url,
+    ) -> Result<TallyOutcome, referendum_poc::actors::admin::AdminError> {
+        let url = |p: &u16| Url::parse(&format!("https://127.0.0.1:{p}/")).unwrap();
+        self.try_tally_with(er_url, self.ports.bb.iter().map(url).collect())
+            .await
+    }
+
+    /// The tally, releasing ballots from `bb_urls` in place of the cluster's
+    /// ballot boxes (e.g. stand-ins that withhold ballots).
+    pub async fn try_tally_with_boxes(
+        &self,
+        bb_urls: Vec<Url>,
+    ) -> Result<TallyOutcome, referendum_poc::actors::admin::AdminError> {
+        let er_url = Url::parse(&format!("https://127.0.0.1:{}/", self.ports.er)).unwrap();
+        self.try_tally_with(er_url, bb_urls).await
+    }
+
+    /// The tally over `bb_urls`, with the operator proceeding without the
+    /// boxes in `proceed_without` should they give no release.
+    pub async fn try_tally_with_boxes_without(
+        &self,
+        bb_urls: Vec<Url>,
+        proceed_without: Vec<u64>,
+    ) -> Result<TallyOutcome, referendum_poc::actors::admin::AdminError> {
+        let url = |p: &u16| Url::parse(&format!("https://127.0.0.1:{p}/")).unwrap();
+        self.try_tally_with_all(
+            url(&self.ports.er),
+            bb_urls,
+            self.ports.tt.iter().map(url).collect(),
+            self.wbb_url.clone(),
+            proceed_without,
+        )
+        .await
+    }
+
+    /// The tally, driving `tt_urls` in place of the cluster's tabulation
+    /// tellers (e.g. a stand-in that fails part-way through).
+    pub async fn try_tally_with_tellers(
+        &self,
+        tt_urls: Vec<Url>,
+    ) -> Result<TallyOutcome, referendum_poc::actors::admin::AdminError> {
+        let url = |p: &u16| Url::parse(&format!("https://127.0.0.1:{p}/")).unwrap();
+        let er_url = url(&self.ports.er);
+        self.try_tally_with_all(
+            er_url,
+            self.ports.bb.iter().map(url).collect(),
+            tt_urls,
+            self.wbb_url.clone(),
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// The tally, driving `rt_urls` in place of the cluster's registration
+    /// tellers (e.g. a stand-in that states the wrong control key share).
+    pub async fn try_tally_with_rts(
+        &self,
+        rt_urls: Vec<Url>,
+    ) -> Result<TallyOutcome, referendum_poc::actors::admin::AdminError> {
         let url = |p: &u16| Url::parse(&format!("https://127.0.0.1:{p}/")).unwrap();
         run_tally(TallyConfig {
             ceremony_dir: self.temp.path().to_path_buf(),
-            wbb_url: self.wbb_url.clone(),
             er_url: url(&self.ports.er),
             bb_urls: self.ports.bb.iter().map(url).collect(),
-            rt_urls: self.ports.rt.iter().map(url).collect(),
+            rt_urls,
             tt_urls: self.ports.tt.iter().map(url).collect(),
+            wbb_url: self.wbb_url.clone(),
             ca_pem: self.ca.cert_pem().to_string(),
             clock: Clock::from_settings(&self.base.clock),
             n_acc: self.base.election.n_acc,
             t_tt: self.base.election.t_tt,
+            t_rt: self.base.election.t_rt,
+            proceed_without: Vec::new(),
         })
         .await
-        .expect("tally pipeline")
+    }
+
+    /// The tally, talking to the board through `wbb_url` (e.g. a stand-in
+    /// that loses requests).
+    pub async fn try_tally_with_board(
+        &self,
+        wbb_url: Url,
+    ) -> Result<TallyOutcome, referendum_poc::actors::admin::AdminError> {
+        let url = |p: &u16| Url::parse(&format!("https://127.0.0.1:{p}/")).unwrap();
+        self.try_tally_with_all(
+            url(&self.ports.er),
+            self.ports.bb.iter().map(url).collect(),
+            self.ports.tt.iter().map(url).collect(),
+            wbb_url,
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn try_tally_with(
+        &self,
+        er_url: Url,
+        bb_urls: Vec<Url>,
+    ) -> Result<TallyOutcome, referendum_poc::actors::admin::AdminError> {
+        let url = |p: &u16| Url::parse(&format!("https://127.0.0.1:{p}/")).unwrap();
+        self.try_tally_with_all(
+            er_url,
+            bb_urls,
+            self.ports.tt.iter().map(url).collect(),
+            self.wbb_url.clone(),
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn try_tally_with_all(
+        &self,
+        er_url: Url,
+        bb_urls: Vec<Url>,
+        tt_urls: Vec<Url>,
+        wbb_url: Url,
+        proceed_without: Vec<u64>,
+    ) -> Result<TallyOutcome, referendum_poc::actors::admin::AdminError> {
+        let url = |p: &u16| Url::parse(&format!("https://127.0.0.1:{p}/")).unwrap();
+        run_tally(TallyConfig {
+            ceremony_dir: self.temp.path().to_path_buf(),
+            wbb_url,
+            er_url,
+            bb_urls,
+            rt_urls: self.ports.rt.iter().map(url).collect(),
+            tt_urls,
+            ca_pem: self.ca.cert_pem().to_string(),
+            clock: Clock::from_settings(&self.base.clock),
+            n_acc: self.base.election.n_acc,
+            t_tt: self.base.election.t_tt,
+            t_rt: self.base.election.t_rt,
+            proceed_without,
+        })
+        .await
     }
 
     /// Entity verifying keys as the auditor CLI would load them.
@@ -857,9 +1058,18 @@ impl ElectionCluster {
     }
 
     pub fn audit_config(&self) -> AuditConfig {
+        // The harness board runs on the seed file in the cluster directory:
+        // pin its log key from that seed, never from the board.
+        let seed: [u8; 32] = std::fs::read(self.temp.path().join("wbb-log-seed.bin"))
+            .expect("board seed")
+            .try_into()
+            .expect("32-byte board seed");
         AuditConfig {
             wbb_url: self.wbb_url.clone(),
             ca_pem: self.ca.cert_pem().to_string(),
+            log_origin: referendum_poc::protocol::tlog::log_origin_of(&self.wbb_url),
+            log_key: referendum_poc::protocol::tlog::derive_log_public_key(&seed).expect("log key"),
+            validator_keys: Vec::new(),
             entity_keys: self.entity_keys(),
             n_tt: self.base.election.n_tt,
             t_tt: self.base.election.t_tt,
@@ -920,6 +1130,131 @@ impl ElectionCluster {
         panic!("the second electoral roll did not become ready on {base}")
     }
 
+    /// Boot a SECOND copy of ballot box `name` (`bb-1`, ...), with the same
+    /// key and identity, publishing to the bulletin board at `board_url`
+    /// (e.g. a stand-in that refuses one kind of entry). Returns its base URL.
+    pub async fn spawn_bb_with_board(&self, name: &str, board_url: &str) -> String {
+        let ceremony_dir = self.temp.path().to_path_buf();
+        let port = free_port();
+        let mut settings = election_settings(&ceremony_dir, name, port, &self.ports, &self.base);
+        settings.wbb.base_url = board_url.to_string();
+        let (addr, tls, state) =
+            bb::build_service(settings, ceremony_signing_key(&ceremony_dir, name))
+                .await
+                .expect("build second bb");
+        tokio::spawn(async move {
+            serve_rustls(bb::router(state), addr, tls)
+                .await
+                .expect("second bb server")
+        });
+        let base = format!("https://127.0.0.1:{port}");
+        for _ in 0..200 {
+            if self
+                .client
+                .get(format!("{base}/health"))
+                .send()
+                .await
+                .is_ok()
+            {
+                return base;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the second ballot box did not become ready on {base}")
+    }
+
+    /// The state directory of a voter server started by this cluster.
+    pub fn voter_state_dir(&self, voter_base: &str) -> PathBuf {
+        let port = voter_base.rsplit(':').next().expect("port");
+        self.temp.path().join(format!("voter-state-{port}"))
+    }
+
+    /// Boot a SECOND voter server that talks to the electoral roll at
+    /// `er_url` (e.g. a stand-in that lies about the identifier it assigns).
+    pub async fn spawn_voter_with_er(&self, er_url: &str) -> String {
+        self.spawn_voter_with(Some(er_url), None, &[]).await
+    }
+
+    /// A voter server whose notification service is `ns_url` (e.g. a stand-in
+    /// that fails a registration).
+    pub async fn spawn_voter_with_ns(&self, ns_url: &str) -> String {
+        self.spawn_voter_with(None, Some(ns_url), &[]).await
+    }
+
+    /// A voter server whose peer `name` (`bb-1`, `rt-3`, ...) is reached
+    /// through `url` instead of the cluster's service (e.g. a stand-in that
+    /// lies).
+    pub async fn spawn_voter_with_peers(&self, peers: &[(&str, String)]) -> String {
+        self.spawn_voter_with(None, None, peers).await
+    }
+
+    pub async fn spawn_voter_with(
+        &self,
+        er_url: Option<&str>,
+        ns_url: Option<&str>,
+        peers: &[(&str, String)],
+    ) -> String {
+        self.spawn_voter_on_board(None, er_url, ns_url, peers).await
+    }
+
+    /// As `spawn_voter_with`, the app also reading the board at `wbb_url`
+    /// (e.g. a stand-in that delays its answers).
+    pub async fn spawn_voter_on_board(
+        &self,
+        wbb_url: Option<&str>,
+        er_url: Option<&str>,
+        ns_url: Option<&str>,
+        peers: &[(&str, String)],
+    ) -> String {
+        let ceremony_dir = self.temp.path().to_path_buf();
+        let port = free_port();
+        let mut settings =
+            election_settings(&ceremony_dir, "voter-1", port, &self.ports, &self.base);
+        if let Some(wbb_url) = wbb_url {
+            settings.wbb.base_url = wbb_url.to_string();
+        }
+        if let Some(er_url) = er_url {
+            settings.er.base_url = er_url.to_string();
+        }
+        if let Some(ns_url) = ns_url {
+            settings.ns.base_url = ns_url.to_string();
+        }
+        for (name, url) in peers {
+            let peer = settings
+                .peers
+                .iter_mut()
+                .find(|p| p.name == *name)
+                .unwrap_or_else(|| panic!("no peer {name}"));
+            peer.base_url = url.clone();
+        }
+        settings.voter.state_dir = ceremony_dir
+            .join(format!("voter-state-{port}"))
+            .display()
+            .to_string();
+        let (addr, tls, state) = voter::build_service(settings)
+            .await
+            .expect("build second voter server");
+        tokio::spawn(async move {
+            serve_rustls(voter::router(state), addr, tls)
+                .await
+                .expect("second voter server")
+        });
+        let base = format!("https://127.0.0.1:{port}");
+        for _ in 0..200 {
+            if self
+                .client
+                .get(format!("{base}/health"))
+                .send()
+                .await
+                .is_ok()
+            {
+                return base;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the second voter server did not become ready on {base}")
+    }
+
     pub fn ui_base(&self) -> String {
         format!("https://127.0.0.1:{}", self.ports.wbb_ui)
     }
@@ -940,7 +1275,7 @@ fn read_admin_token(ceremony_dir: &Path) -> String {
 }
 
 /// V1-V4: login, enroll, wait for PIN readiness, retrieve the PIN.
-async fn enroll_on(client: &reqwest::Client, base_url: &str, fiscal_id: &str) -> String {
+pub async fn enroll_on(client: &reqwest::Client, base_url: &str, fiscal_id: &str) -> String {
     let login = post_json(
         client,
         &format!("{base_url}/api/login"),
@@ -985,6 +1320,29 @@ pub async fn wait_pin_ready(client: &reqwest::Client, base_url: &str, passphrase
     }
 }
 
+/// Wait until an enrollment's background step (device registration and PIN
+/// request) has finished, successfully or not: the status screen then no
+/// longer reports a PIN request in progress unless one is really open.
+pub async fn wait_enrollment_settled(client: &reqwest::Client, base_url: &str, passphrase: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = post_json(
+            client,
+            &format!("{base_url}/api/status"),
+            serde_json::json!({ "passphrase": passphrase }),
+        )
+        .await;
+        if status["pin_request_open"] == false || status["pin_ready"] == true {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "enrollment never settled"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 pub async fn post_json(
     client: &reqwest::Client,
     url: &str,
@@ -996,6 +1354,28 @@ pub async fn post_json(
     assert!(
         status.is_success(),
         "POST {url} failed with {status}: {text}"
+    );
+    serde_json::from_str(&text).expect("json body")
+}
+
+/// GET with a bearer token (for endpoints the roll keeps private, such as
+/// the live eligible list).
+pub async fn get_json_with_token(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> serde_json::Value {
+    let response = client
+        .get(url)
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("request");
+    let status = response.status();
+    let text = response.text().await.expect("body");
+    assert!(
+        status.is_success(),
+        "GET {url} failed with {status}: {text}"
     );
     serde_json::from_str(&text).expect("json body")
 }
@@ -1083,4 +1463,100 @@ fn election_settings(
                 .to_string(),
         },
     }
+}
+
+/// See [`ElectionCluster::vid_assignment`]; for tests that run their own ceremony.
+#[allow(dead_code)]
+pub fn vid_assignment(ceremony_dir: &Path, n_acc: usize) -> Vec<u64> {
+    let seed: [u8; 32] = std::fs::read(ceremony_dir.join("er-seed.bin"))
+        .expect("ER seed")
+        .try_into()
+        .expect("32-byte ER seed");
+    referendum_poc::protocol::setup::assign_vids(
+        &referendum_poc::protocol::rng::ActorSeed::from_bytes(seed),
+        n_acc,
+    )
+}
+
+/// What a stand-in does with a forwarded response:
+/// `(path, request_body, status, response_body) -> what the caller sees`.
+pub type Rewrite = std::sync::Arc<
+    dyn Fn(
+            &str,
+            &[u8],
+            reqwest::StatusCode,
+            axum::body::Bytes,
+        ) -> (reqwest::StatusCode, axum::body::Bytes)
+        + Send
+        + Sync,
+>;
+/// Decides BEFORE forwarding: `Some(response)` answers without forwarding
+/// (a request lost on the wire), `None` forwards.
+pub type Intercept = std::sync::Arc<
+    dyn Fn(&str, &[u8]) -> Option<(reqwest::StatusCode, axum::body::Bytes)> + Send + Sync,
+>;
+
+/// A stand-in in front of a real service: forwards every request (method,
+/// path, query, authorization and content type, body) and lets `intercept`
+/// short-circuit a request or `rewrite` change what the caller sees.
+#[derive(Clone)]
+struct StandIn {
+    real: Url,
+    client: reqwest::Client,
+    rewrite: Rewrite,
+    intercept: Option<Intercept>,
+}
+
+pub fn passthrough() -> Rewrite {
+    std::sync::Arc::new(|_, _, status, body| (status, body))
+}
+
+/// Spawn a stand-in in front of `real` and return its (plain HTTP) URL.
+pub async fn spawn_stand_in(
+    real: &Url,
+    client: reqwest::Client,
+    rewrite: Rewrite,
+    intercept: Option<Intercept>,
+) -> Url {
+    use axum::{extract::State, Router};
+
+    let stand_in = StandIn {
+        real: real.clone(),
+        client,
+        rewrite,
+        intercept,
+    };
+    let app = Router::new()
+        .fallback(
+            |State(s): State<StandIn>, request: axum::extract::Request| async move {
+                let (parts, body) = request.into_parts();
+                let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+                let path = parts.uri.path().trim_start_matches('/').to_string();
+                if let Some(intercept) = &s.intercept {
+                    if let Some(short) = intercept(&path, &body) {
+                        return short;
+                    }
+                }
+                let mut target = s.real.join(&path).unwrap();
+                target.set_query(parts.uri.query());
+                let mut forward = s
+                    .client
+                    .request(parts.method.clone(), target)
+                    .body(body.clone());
+                for name in ["authorization", "content-type"] {
+                    if let Some(value) = parts.headers.get(name) {
+                        forward = forward.header(name, value);
+                    }
+                }
+                let response = forward.send().await.unwrap();
+                let status = response.status();
+                let bytes = response.bytes().await.unwrap();
+                (s.rewrite)(&path, &body, status, bytes)
+            },
+        )
+        .with_state(stand_in);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    url
 }

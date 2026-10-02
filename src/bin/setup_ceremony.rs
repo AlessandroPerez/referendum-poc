@@ -60,13 +60,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let ceremony = run_ceremony(&settings.election, &mut rng)?;
-    let paths = write_artifacts(
-        &args.output,
-        &settings,
-        &ceremony,
-        &master_seed,
-        &settings.dip,
-    )?;
+    let paths = write_artifacts(&args.output, &settings, &ceremony, &master_seed)?;
 
     println!(
         "Ceremony artifacts written to {}",

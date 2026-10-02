@@ -15,9 +15,8 @@ use secrecy::ExposeSecret;
 use serde::de::Error as DeError;
 
 use crate::actors::common::actor_signing_key;
-use crate::configuration::{DipSettings, ElectionSettings, Settings};
+use crate::configuration::{ElectionSettings, Settings};
 use crate::protocol::clock::ClockMode;
-use crate::protocol::merkle::voter_id_merkle_root;
 use crate::protocol::rng::MasterSeed;
 use crate::protocol::setup::CeremonyOutput;
 use crate::protocol::tls::{issue_service_cert, ClusterCa};
@@ -56,18 +55,47 @@ pub enum ArtifactError {
 }
 
 /// Write every artifact required to boot the cluster.
+/// The bulletin board's own 32-byte seed (its log key derives from it).
+pub const WBB_LOG_SEED_FILE: &str = "wbb-log-seed.bin";
+
+/// File holding the pinned bulletin-board log public key (base64 PKIX).
+pub const WBB_LOG_PUBLIC_KEY_FILE: &str = "wbb-log-public-key.b64";
+
 pub fn write_artifacts(
     output_dir: &Path,
     base_settings: &Settings,
     ceremony: &CeremonyOutput,
     master_seed: &MasterSeed,
-    dip: &DipSettings,
 ) -> Result<ArtifactPaths, ArtifactError> {
     fs::create_dir_all(output_dir)?;
+    // Only into an EMPTY directory: a re-run over a used one would rewrite
+    // every seed and key beside ledgers that paced the old ones (the ledger
+    // itself refuses to be re-created, but by then the seeds are gone).
+    if fs::read_dir(output_dir)?.next().is_some() {
+        return Err(ArtifactError::Io(std::io::Error::other(format!(
+            "{} is not empty: the setup ceremony writes only into an empty directory",
+            output_dir.display()
+        ))));
+    }
 
     // 1. Master seed.
     let seed_bin = output_dir.join("seed.bin");
     master_seed.expose(|seed| fs::write(&seed_bin, seed.as_slice()))?;
+
+    // 1b. The bulletin board gets a seed OF ITS OWN, derived one-way from the
+    // master seed: the board operator must not hold the master seed, from
+    // which every entity key, the cluster CA and the electoral roll's private
+    // identifier assignment derive. The board derives its log signing key
+    // from this seed; the PUBLIC key is pinned here, so verifiers check
+    // signed tree heads against a key fixed at the ceremony instead of one
+    // the board tells them.
+    let wbb_log_seed = master_seed.expose(|seed| derive_service_seed(seed, "wbb-log"));
+    let wbb_log_seed_bin = output_dir.join(WBB_LOG_SEED_FILE);
+    fs::write(&wbb_log_seed_bin, wbb_log_seed)?;
+    let log_key = crate::protocol::tlog::derive_log_public_key(&wbb_log_seed)
+        .and_then(|key| crate::protocol::tlog::log_key_to_base64(&key))
+        .map_err(|e| ArtifactError::Yaml(DeError::custom(e.to_string())))?;
+    fs::write(output_dir.join(WBB_LOG_PUBLIC_KEY_FILE), log_key)?;
 
     // 2. Election context JSON + public keys needed by services.
     let election_context_json = output_dir.join("election_context.json");
@@ -147,6 +175,23 @@ pub fn write_artifacts(
         // not derived from the WBB entry-signing keys.
         let op_seed = master_seed.actor_seed(name);
         fs::write(output_dir.join(format!("{name}-seed.bin")), op_seed.bytes())?;
+        // A registration teller's nonce counters are born HERE, with the
+        // seed they pace, sealed under that seed: a teller that later finds
+        // no ledger knows the counters were lost, and refuses to draw from
+        // zero over a seed that has already been used (Sec. 3.9 step 15, A7).
+        if name.starts_with("rt-") {
+            crate::protocol::rng::NonceLedger::create_blocking(
+                &output_dir.join(format!("{name}-nonce-ledger.json")),
+                &op_seed,
+            )?;
+        }
+        if name.starts_with("tt-") {
+            crate::actors::tt::create_ledger_blocking(
+                &output_dir.join(format!("{name}-ledger.json")),
+                &op_seed,
+            )
+            .map_err(|e| ArtifactError::Io(std::io::Error::other(e.to_string())))?;
+        }
     }
 
     // ER admin token is a separate secret file.
@@ -192,7 +237,7 @@ pub fn write_artifacts(
     let yaml = build_sunlight_yaml(
         host,
         wbb_port,
-        &seed_bin,
+        &wbb_log_seed_bin,
         &checkpoints_db,
         output_dir,
         base_settings,
@@ -241,6 +286,41 @@ pub fn write_artifacts(
         rt_share_files.push(path);
     }
 
+    // The tellers' PUBLIC key shares H_i, one file for everyone (the ER
+    // publishes it at setup; the tally driver and the auditor hold every
+    // partial decryption to it).
+    let public_shares: Vec<crate::protocol::tally::TellerPublicShare> = ceremony
+        .tt_tellers
+        .iter()
+        .map(|tt| crate::protocol::tally::TellerPublicShare {
+            id: tt.share.id,
+            h: tt
+                .share
+                .public_key_share(&ceremony.election_context.pk.params.elgamal),
+        })
+        .collect();
+    fs::write(
+        output_dir.join("tt-public-shares.json"),
+        serde_json::to_string_pretty(&public_shares)?,
+    )?;
+
+    // The registration tellers' PUBLIC control key shares `pk_RT_i = g3^{y_i}`
+    // (Sec. 3.9 step 15). Published like the tabulation tellers' shares, so a
+    // teller's credential-control share is held to the key pinned for IT, not
+    // to one it states for itself.
+    let rt_public_shares: Vec<crate::protocol::tally::TellerPublicShare> = ceremony
+        .rt_tellers
+        .iter()
+        .map(|rt| crate::protocol::tally::TellerPublicShare {
+            id: rt.id,
+            h: rt.control_key_share(),
+        })
+        .collect();
+    fs::write(
+        output_dir.join("rt-public-shares.json"),
+        serde_json::to_string_pretty(&rt_public_shares)?,
+    )?;
+
     let mut tt_share_files = Vec::new();
     for (i, tt) in ceremony.tt_tellers.iter().enumerate() {
         let path = output_dir.join(format!("tt-{}-share.json", i + 1));
@@ -253,15 +333,8 @@ pub fn write_artifacts(
         tt_share_files.push(path);
     }
 
-    // 7. Voter Merkle root (for inspection, not required by services).
-    let vids = crate::protocol::setup::assign_vids(base_settings.election.n_voters);
-    let voter_ids: Vec<_> = dip.voters.iter().map(|v| v.id.clone()).collect();
-    let pairs = crate::protocol::setup::voter_pairs(&voter_ids, &vids);
-    let root = voter_id_merkle_root(&pairs);
-    fs::write(
-        output_dir.join("voter_id_merkle_root.txt"),
-        hex::encode(root),
-    )?;
+    // (The voter-identifier Merkle root is the electoral roll's to compute
+    // and publish: the identifier assignment is private to it, Sec. 3.5.3.)
 
     restrict_secret_permissions(output_dir)?;
 

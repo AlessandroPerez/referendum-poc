@@ -40,10 +40,22 @@ impl DipState {
 
     fn authenticate(&self, fiscal_id: &str) -> Option<DipAssertion> {
         let voter = self.registry.iter().find(|v| v.id == fiscal_id)?;
+        let nonce = {
+            use rand::RngCore as _;
+            let mut bytes = [0u8; 16];
+            rand::rngs::OsRng.fill_bytes(&mut bytes);
+            hex::encode(bytes)
+        };
         Some(DipAssertion {
             fiscal_id: fiscal_id.to_string(),
             name: voter.name.clone(),
             assurance: "high".to_string(),
+            audience: ASSERTION_AUDIENCE.to_string(),
+            nonce,
+            issued_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
         })
     }
 
@@ -68,7 +80,22 @@ pub struct DipAssertion {
     pub fiscal_id: String,
     pub name: String,
     pub assurance: String,
+    /// Who this login is for: the electoral roll and nobody else (thesis
+    /// A5: "logins are restricted to the intended relying party").
+    #[serde(default)]
+    pub audience: String,
+    /// One-time value: the roll accepts each assertion once, so an
+    /// observed login cannot be replayed to revoke or re-register.
+    #[serde(default)]
+    pub nonce: String,
+    /// Issue time, Unix ms; the roll refuses stale assertions on the wall
+    /// clock.
+    #[serde(default)]
+    pub issued_at_ms: u64,
 }
+
+/// The audience every assertion of this identity provider is issued for.
+pub const ASSERTION_AUDIENCE: &str = "electoral-roll";
 
 /// Full DIP authentication response, including a base64 Ed25519 signature.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -58,7 +58,7 @@ async fn full_election_tally_and_audit() {
     let master_seed = MasterSeed::new(MASTER_SEED);
     let mut rng = rand_chacha::ChaCha20Rng::from_seed(MASTER_SEED);
     let ceremony = run_ceremony(&base.election, &mut rng).unwrap();
-    write_artifacts(ceremony_dir, &base, &ceremony, &master_seed, &base.dip)
+    write_artifacts(ceremony_dir, &base, &ceremony, &master_seed)
         .expect("write ceremony artifacts");
 
     let ca = ClusterCa::from_seed(&MASTER_SEED).unwrap();
@@ -250,7 +250,7 @@ async fn full_election_tally_and_audit() {
     let ruse: serde_json::Value = post_json(
         &client,
         &format!("{v3}/api/pin/ruse"),
-        serde_json::json!({ "passphrase": p3 }),
+        serde_json::json!({ "passphrase": p3, "pin": pin3 }),
     )
     .await;
     let ruse_pin = ruse["ruse_pin"].as_u64().expect("ruse pin");
@@ -258,9 +258,9 @@ async fn full_election_tally_and_audit() {
     vote_and_cast(&client, v3, p3, "reject", ruse_pin).await;
 
     let wrong_pin = {
-        let mut candidate = (pin3 + 1) % 100_000_000;
+        let mut candidate = (pin3 + 1) % 100_000;
         if candidate == ruse_pin {
-            candidate = (candidate + 1) % 100_000_000;
+            candidate = (candidate + 1) % 100_000;
         }
         candidate
     };
@@ -304,6 +304,8 @@ async fn full_election_tally_and_audit() {
         clock: Clock::from_settings(&base.clock),
         n_acc: base.election.n_acc,
         t_tt: base.election.t_tt,
+        t_rt: base.election.t_rt,
+        proceed_without: Vec::new(),
     })
     .await
     .expect("tally pipeline");
@@ -344,8 +346,13 @@ async fn full_election_tally_and_audit() {
     assert_eq!(type_count("mixed_ballots"), 2, "vote + credential mixes");
     assert_eq!(
         type_count("re_encryption_proof"),
-        4,
-        "ox, controls, acc_checks, credential fingerprints"
+        3,
+        "ox, acc_checks, credential fingerprints - written by the TTs"
+    );
+    assert_eq!(
+        type_count("credential_control"),
+        1,
+        "the control elements - written by the RTs (Sec. 3.4.2)"
     );
     assert_eq!(type_count("tally_proof"), 1);
     assert_eq!(type_count("tally_result"), 1);
@@ -374,9 +381,19 @@ async fn full_election_tally_and_audit() {
             signing_key(ceremony_dir, &format!("bb-{i}")).verifying_key(),
         ));
     }
+    // The log key is the one the CEREMONY pinned, never asked of the board:
+    // the board above runs on the ceremony's own log seed.
+    let pinned = std::fs::read_to_string(ceremony_dir.join("wbb-log-public-key.b64"))
+        .expect("the ceremony pins the log key");
+    let log_key =
+        referendum_poc::protocol::tlog::log_key_from_base64(&pinned).expect("pinned log key");
+    let log_origin = referendum_poc::protocol::tlog::log_origin_of(&wbb_url);
     let report = run_audit(AuditConfig {
         wbb_url,
+        log_origin,
         ca_pem: ca.cert_pem().to_string(),
+        log_key,
+        validator_keys: Vec::new(),
         entity_keys,
         n_tt: base.election.n_tt,
         t_tt: base.election.t_tt,
@@ -411,7 +428,7 @@ async fn vote_and_cast(
     let cast: serde_json::Value = post_json(
         client,
         &format!("{base_url}/api/cast"),
-        serde_json::json!({ "passphrase": passphrase }),
+        serde_json::json!({ "passphrase": passphrase, "pin": pin }),
     )
     .await;
     assert_eq!(
@@ -424,7 +441,10 @@ async fn vote_and_cast(
     let confirm: serde_json::Value = post_json(
         client,
         &format!("{base_url}/api/confirm"),
-        serde_json::json!({ "passphrase": passphrase }),
+        serde_json::json!({
+            "passphrase": passphrase, "pin": pin, "digest": vote["digest"],
+            "l1": "code", "l2": "sum",
+        }),
     )
     .await;
     assert!(confirm["confirmed_at_ms"].as_u64().unwrap() > 0);

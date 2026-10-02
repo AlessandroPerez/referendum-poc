@@ -71,8 +71,9 @@ impl FromStr for Vid {
 
 // region: ---PinCode
 
-/// The voting PIN (library constraint `MAX_PIN = 10^8`: at most 8 decimal
-/// digits, leading zeros allowed).
+/// The voting PIN (library constraint `MAX_PIN = 10^5`: five decimal digits,
+/// leading zeros allowed, always DISPLAYED as five - Sec. 5.2, and Sec. 3.7.3
+/// step 3 wants a ruse PIN "of the same length as PIN").
 ///
 /// The PIN is a secret: `Debug` is redacted. `Display` reveals it - that is
 /// the deliberate voter-facing "show PIN" path (Sec. 3.6.3), never used in logs.
@@ -81,12 +82,13 @@ impl FromStr for Vid {
 pub struct PinCode(u32);
 
 impl PinCode {
-    /// 10^8 - mirrors `evoting::constants::MAX_PIN`.
-    pub const MAX: u32 = 100_000_000;
+    /// 10^5 - mirrors `evoting::constants::MAX_PIN`. Sec. 5.2: "the voter
+    /// must type in a five digits PIN".
+    pub const MAX: u32 = 100_000;
 
     pub fn new(value: u32) -> Result<Self, String> {
         if value >= Self::MAX {
-            return Err(format!("pin must be < 10^8, got {value}"));
+            return Err(format!("pin must be < 10^5, got {value}"));
         }
         Ok(Self(value))
     }
@@ -114,8 +116,8 @@ impl FromStr for PinCode {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.is_empty() || s.len() > 8 || !s.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(format!("pin must be 1 to 8 ASCII digits, got {s:?}"));
+        if s.is_empty() || s.len() > 5 || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("pin must be 1 to 5 ASCII digits, got {s:?}"));
         }
         let value: u32 = s
             .parse()
@@ -126,7 +128,7 @@ impl FromStr for PinCode {
 
 impl fmt::Display for PinCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:08}", self.0)
+        write!(f, "{:05}", self.0)
     }
 }
 
@@ -489,31 +491,31 @@ mod tests {
     // --- PinCode
 
     #[test]
-    fn pin_accepts_eight_digits_with_leading_zeros() {
-        let pin: PinCode = "00012345".parse().expect("must parse");
-        assert_eq!(pin.value(), 12345);
-        assert_eq!(pin.to_string(), "00012345");
+    fn pin_accepts_five_digits_with_leading_zeros() {
+        let pin: PinCode = "00123".parse().expect("must parse");
+        assert_eq!(pin.value(), 123);
+        assert_eq!(pin.to_string(), "00123");
     }
 
     #[test]
     fn pin_rejects_malformed() {
-        for bad in ["", "123456789", "1234abcd", "-1", " 1234"] {
+        for bad in ["", "123456", "1abcd", "-1", " 1234"] {
             assert!(bad.parse::<PinCode>().is_err(), "must reject {bad:?}");
         }
-        assert!(PinCode::new(100_000_000).is_err());
+        assert!(PinCode::new(100_000).is_err());
     }
 
     #[test]
     fn pin_debug_is_redacted() {
-        let pin = PinCode::new(12345678).unwrap();
+        let pin = PinCode::new(12345).unwrap();
         assert_eq!(format!("{pin:?}"), "PinCode([redacted])");
-        assert_eq!(pin.to_string(), "12345678");
+        assert_eq!(pin.to_string(), "12345");
     }
 
     #[test]
     fn pin_serde_validates() {
-        assert!(serde_json::from_str::<PinCode>("12345678").is_ok());
-        assert!(serde_json::from_str::<PinCode>("100000000").is_err());
+        assert!(serde_json::from_str::<PinCode>("12345").is_ok());
+        assert!(serde_json::from_str::<PinCode>("100000").is_err());
     }
 
     // --- TokenValue

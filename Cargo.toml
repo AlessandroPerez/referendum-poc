@@ -72,7 +72,7 @@ url = "2"
 
 # Serde
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 serde_cbor = "0.10"
 serde-aux = "4"
 serde_yaml = "0.9"
@@ -104,7 +104,11 @@ ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 base64 = "0.22"
 hex = "0.4"
 rcgen = "0.13"
-p256 = { version = "0.13", features = ["arithmetic", "pkcs8", "pem"] }
+p256 = { version = "0.13", features = ["arithmetic", "ecdsa", "pkcs8", "pem"] }
+hmac = "0.12"
+# BLS12-381 (validator signatures). `portable` avoids ADX-only assembly so the
+# build also runs on older x86-64 CPUs.
+blst = { version = "0.3", default-features = false, features = ["portable"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 ring = "0.17"
 curve25519-dalek = "4"

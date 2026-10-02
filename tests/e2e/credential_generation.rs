@@ -38,14 +38,8 @@ async fn admin_generates_credentials_and_publishes_acc_pub_key() {
     let master_seed = MasterSeed::new(MASTER_SEED);
     let mut rng = rand_chacha::ChaCha20Rng::from_seed(MASTER_SEED);
     let ceremony = run_ceremony(&base_settings.election, &mut rng).unwrap();
-    let _paths = write_artifacts(
-        ceremony_dir,
-        &base_settings,
-        &ceremony,
-        &master_seed,
-        &base_settings.dip,
-    )
-    .expect("write ceremony artifacts");
+    let _paths = write_artifacts(ceremony_dir, &base_settings, &ceremony, &master_seed)
+        .expect("write ceremony artifacts");
 
     // 2. Spawn the WBB with the RT entity keys registered.
     let ca = ClusterCa::from_seed(&MASTER_SEED).unwrap();
@@ -248,7 +242,7 @@ async fn admin_generates_credentials_and_publishes_acc_pub_key() {
 }
 
 #[tokio::test]
-async fn rt_server_signs_and_generates_decoys() {
+async fn rt_server_signs_with_its_service_token() {
     helpers::init();
     let _cluster = helpers::cluster_guard().await;
 
@@ -259,14 +253,8 @@ async fn rt_server_signs_and_generates_decoys() {
     let master_seed = MasterSeed::new(MASTER_SEED);
     let mut rng = rand_chacha::ChaCha20Rng::from_seed(MASTER_SEED);
     let ceremony = run_ceremony(&base_settings.election, &mut rng).unwrap();
-    write_artifacts(
-        ceremony_dir,
-        &base_settings,
-        &ceremony,
-        &master_seed,
-        &base_settings.dip,
-    )
-    .expect("write ceremony artifacts");
+    write_artifacts(ceremony_dir, &base_settings, &ceremony, &master_seed)
+        .expect("write ceremony artifacts");
 
     let ca = ClusterCa::from_seed(&MASTER_SEED).unwrap();
     let port = helpers::free_port();
@@ -321,19 +309,6 @@ async fn rt_server_signs_and_generates_decoys() {
     assert_eq!(sign_resp["entity_id"], "RT-1");
     assert!(!sign_resp["signature"].as_str().unwrap().is_empty());
     assert_ne!(sign_resp["timestamp"].as_i64().unwrap(), 1);
-
-    // /decoy with token succeeds.
-    let decoy_resp: serde_json::Value = client
-        .post(base.join("decoy").unwrap())
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(decoy_resp["builder"].is_object());
-    assert!(decoy_resp["pin"].as_u64().unwrap() <= u32::MAX as u64);
 
     handle.abort();
 }

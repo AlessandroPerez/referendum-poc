@@ -90,6 +90,7 @@ for i in $(seq 1 "$N_VALIDATORS"); do
     "$ROOT/target/wbb-bin/wbb-validator" -name "V-$i" \
         -seed-file "$OUT/validator-$i-seed.bin" \
         -log https://127.0.0.1:8090/wbb -cacert "$OUT/ca.pem" \
+        -log-key "$OUT/wbb-log-public-key.b64" \
         -interval 1s -delay "$((2 + 2 * i))s" \
         >"$OUT/validator-$i.log" 2>&1 &
     pids+=($!)
@@ -132,7 +133,7 @@ start_service tt-2 8022 tt-server
 start_service tt-3 8023 tt-server
 start_service bb-1 8031 bb-server
 start_service bb-2 8032 bb-server
-# Three voter apps: the tally's verifiable mixes need at least 3 ballots.
+# Three voter apps: the tally's verifiable mixes need at least 2 ballots.
 for i in 1 2 3; do
     start_service "voter-$i" "900$i" voter-server \
         APP_VOTER__STATIC_DIR="$ROOT/static" \
@@ -180,7 +181,7 @@ cat <<EOF
  Try: log in with a fiscal id, enroll, wait for the PIN, vote, cast, and
  press CONFIRM (the cast-as-intended disclosure - unconfirmed ballots are
  discarded at tally, manuscript 3.9 step 2).
- Cast+confirm at least 3 ballots (the verifiable mixes require it), then:
+ Cast+confirm at least 2 ballots (a verifiable mix needs two), then:
    ./target/debug/election-admin -c "$OUT" close-voting
    ./target/debug/election-admin -c "$OUT" tally
    ./target/debug/election-admin -c "$OUT" results

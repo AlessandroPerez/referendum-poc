@@ -1,7 +1,7 @@
 //! Referendum PoC - Vote App protocol (PhD thesis ch. 3 + Sec. 3.11 referendum
 //! optimization) implemented on the `evoting-rs` cryptographic library.
 //!
-//! Style guide Sec. 01: slim binaries, fat library. All business logic lives here;
+//! Slim binaries, fat library. All business logic lives here;
 //! the binaries in `src/bin/` only parse configuration and delegate.
 //!
 //! Requirements trace to the PhD thesis: Ch. 3 (Vote App protocol, Sec. 3.11

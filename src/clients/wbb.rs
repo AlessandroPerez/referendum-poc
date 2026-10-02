@@ -26,6 +26,28 @@ pub struct SignedEntry {
     pub signature: Vec<u8>,
 }
 
+impl SignedEntry {
+    /// Check this entry's signature against `key`, the verifying key pinned
+    /// for `self.entity_id` (the message is what the board verifies:
+    /// SHA-256 over data, entity id and timestamp).
+    pub fn verify(&self, key: &ed25519_dalek::VerifyingKey) -> bool {
+        use ed25519_dalek::{Signature, Verifier as _};
+        let message = entry_message(&self.data, &self.entity_id, self.timestamp);
+        Signature::from_slice(&self.signature)
+            .map(|sig| key.verify(&message, &sig).is_ok())
+            .unwrap_or(false)
+    }
+}
+
+/// The bytes an entry signature covers.
+fn entry_message(data: &[u8], entity_id: &str, timestamp: i64) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.update(entity_id.as_bytes());
+    hasher.update(format!("{timestamp}").as_bytes());
+    hasher.finalize().into()
+}
+
 /// One validator's BLS signature over a sequenced leaf (demo validators;
 /// absent when the log has no validators configured).
 #[derive(Debug, Clone, Deserialize)]
@@ -47,6 +69,29 @@ pub struct SequencedEntry {
     /// Validator signatures collected so far, sorted by validator id.
     #[serde(default)]
     pub validations: Vec<WbbValidation>,
+}
+
+/// One sequenced leaf with the entry's EXACT bytes as served (not re-encoded):
+/// the Merkle leaf hash is computed over those bytes.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawSequencedEntry {
+    pub leaf_index: i64,
+    pub timestamp: i64,
+    pub entry: Box<serde_json::value::RawValue>,
+    /// Hex Merkle leaf hash as claimed by the board (cross-checked, never trusted).
+    #[serde(default)]
+    pub leaf_hash: Option<String>,
+    #[serde(default)]
+    pub validations: Vec<WbbValidation>,
+}
+
+/// `GET /entries` with exact entry bytes.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawEntriesResponse {
+    pub count: usize,
+    pub entries: Vec<RawSequencedEntry>,
+    #[serde(default)]
+    pub validators: Vec<String>,
 }
 
 /// Response from `GET /entries`.
@@ -83,6 +128,11 @@ impl WbbClient {
             base_url.set_path(&format!("{path}/"));
         }
         Self { client, base_url }
+    }
+
+    /// The board's base URL (with a trailing slash).
+    pub fn base_url(&self) -> &Url {
+        &self.base_url
     }
 
     /// Submit a signed entry. Returns the raw JSON response.
@@ -137,6 +187,52 @@ impl WbbClient {
         .await;
 
         result.map_err(|_| WbbError::NotIncluded)?
+    }
+
+    /// `POST /validations` - a validator's BLS signature over one leaf.
+    pub async fn submit_validation(
+        &self,
+        validator_id: &str,
+        leaf_index: i64,
+        signature: &[u8],
+    ) -> Result<serde_json::Value, WbbError> {
+        let url = self.base_url.join("validations")?;
+        let response = self
+            .client
+            .post(url)
+            .json(&serde_json::json!({
+                "validator_id": validator_id,
+                "leaf_index": leaf_index,
+                "signature": BASE64.encode(signature),
+            }))
+            .send()
+            .await
+            .map_err(WbbError::Network)?;
+        let status = response.status();
+        let body = response.text().await.map_err(WbbError::Network)?;
+        if status.is_success() {
+            serde_json::from_str(&body).map_err(WbbError::Json)
+        } else {
+            Err(WbbError::Http(status, body))
+        }
+    }
+
+    /// `GET /entries`, keeping every entry's exact bytes (for log verification).
+    pub async fn entries_raw(&self) -> Result<RawEntriesResponse, WbbError> {
+        let url = self.base_url.join("entries")?;
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(WbbError::Network)?;
+        let status = response.status();
+        let body = response.text().await.map_err(WbbError::Network)?;
+        if status == StatusCode::OK {
+            serde_json::from_str(&body).map_err(WbbError::Json)
+        } else {
+            Err(WbbError::Http(status, body))
+        }
     }
 
     /// `GET /entries`.
@@ -234,11 +330,7 @@ impl WbbClient {
 ///
 /// Message: `SHA256(data || entity_id || decimal(timestamp_ms))`.
 pub fn sign_entry(data: &[u8], entity_id: &str, timestamp: i64, key: &SigningKey) -> SignedEntry {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher.update(entity_id.as_bytes());
-    hasher.update(format!("{timestamp}").as_bytes());
-    let message = hasher.finalize();
+    let message = entry_message(data, entity_id, timestamp);
     let signature = key.sign(&message).to_bytes().to_vec();
 
     SignedEntry {

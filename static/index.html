@@ -70,8 +70,12 @@
         <section id="screen-pin" class="screen hidden">
           <p class="step">Step 4 of 5</p>
           <h2>Your PIN</h2>
-          <p class="lead">This is your 8-digit voting PIN. Memorise it and keep it secret.</p>
-          <code id="pin" class="big"></code>
+          <p class="lead">This is your 5-digit voting PIN. Memorise it and keep it secret.</p>
+          <code id="pin" class="big copy-on-click" data-copy-name="PIN" title="Tap to copy" role="button" tabindex="0"></code>
+          <label>Your PIN emoji</label>
+          <code id="pin-emoji"></code>
+          <p class="hint">Remember these symbols too. Whenever you type this PIN, the app must
+            show the same ones: that is how you know it used the PIN you typed.</p>
           <button id="btn-pin-next" class="secondary">Continue</button>
         </section>
 
@@ -83,6 +87,7 @@
           <input id="pin-input" inputmode="numeric" autocomplete="off">
           <button id="btn-verify">Verify</button>
           <p id="verify-label" class="result"></p>
+          <code id="verify-emoji" class="hidden"></code>
           <a id="link-to-voting" class="button secondary hidden" href="/voting" data-route="voting">Go to voting</a>
         </section>
       </div>
@@ -103,9 +108,10 @@
           <p class="lead">Election phase: <strong id="phase-label">...</strong></p>
           <label for="vote-option">Your choice</label>
           <select id="vote-option">
-            <option value="blank">Scheda bianca (blank)</option>
-            <option value="approve">Si (approve)</option>
-            <option value="reject">No (reject)</option>
+            <option value="" disabled selected>Choose...</option>
+            <option value="blank">Blank</option>
+            <option value="approve">Approve</option>
+            <option value="reject">Reject</option>
           </select>
           <label for="vote-pin">PIN</label>
           <input id="vote-pin" inputmode="numeric" autocomplete="off">
@@ -115,11 +121,17 @@
         <section id="screen-cast" class="screen hidden">
           <p class="step">Step 2 of 3</p>
           <h2>Cast your ballot</h2>
-          <p class="lead">Your encrypted ballot is ready. Keep the digest: it finds your ballot on the public bulletin board.</p>
+          <p class="lead">Your encrypted ballot is ready. COPY the digest now: it is what finds your
+            ballot on the public bulletin board, and this app does not keep it for you - nothing
+            about a ballot is written to this device.</p>
           <label>Ballot digest</label>
-          <code id="ballot-digest" class="small"></code>
+          <code id="ballot-digest" class="small copy-on-click" data-copy-name="Ballot digest" title="Tap to copy" role="button" tabindex="0"></code>
           <label>Emoji receipt</label>
           <code id="ballot-emoji"></code>
+          <label>PIN emoji - must match the one you remember</label>
+          <code id="ballot-private-emoji"></code>
+          <label>Public PIN emoji - the bulletin board must show the same</label>
+          <code id="ballot-public-emoji"></code>
           <button id="btn-cast">Cast to ballot boxes</button>
           <p id="cast-label" class="result"></p>
         </section>
@@ -127,24 +139,18 @@
         <section id="screen-check" class="screen hidden">
           <p class="step">Step 3 of 3</p>
           <h2>Check and confirm</h2>
-          <p class="lead">Check that the ballot boxes published your ballot, then confirm it.
-            A ballot that is cast but never confirmed is <strong>not counted</strong>.</p>
+          <p class="lead">Check publication, then confirm. An unconfirmed ballot is
+            <strong>not counted</strong>.</p>
           <button id="btn-publication">Check publication</button>
           <p id="publication-label" class="result"></p>
-          <div id="control-box" class="control hidden">
-            <div class="control-value"><span>Control code</span><strong id="control-code">--</strong></div>
-            <div class="control-value"><span>Control sum</span><strong id="control-sum">--</strong></div>
+          <div id="control-box" class="control hidden" role="radiogroup" aria-labelledby="cai-label">
+            <div class="control-value" role="radio" aria-checked="false" data-slot="code" tabindex="0"><span>Control code</span><strong id="control-code">--</strong></div>
+            <div class="control-value" role="radio" aria-checked="false" data-slot="sum" tabindex="0"><span>Control sum</span><strong id="control-sum">--</strong></div>
           </div>
           <p id="control-check" class="hint"></p>
-          <label id="cai-label">Which control value should be opened?</label>
-          <div id="cai-choice" class="segmented" role="radiogroup" aria-labelledby="cai-label">
-            <button type="button" class="seg" role="radio" aria-checked="false" data-slot="code">Code</button>
-            <button type="button" class="seg" role="radio" aria-checked="false" data-slot="sum">Sum</button>
-            <button type="button" class="seg toss" data-slot="toss">Toss a coin</button>
-          </div>
-          <p class="hint">Note the two numbers. Choose which one to open only now, after casting:
-            the app could not know your choice when it sealed the ballot, so it could not have
-            altered your vote unnoticed. Only one can ever be opened - both would reveal your vote.</p>
+          <p class="hint">If the sum is right, pick ONE value to open - toss a coin. Never both:
+            together they reveal your vote.</p>
+          <p id="cai-label" class="hint">Tap the value to open.</p>
           <button id="btn-confirm" disabled>Confirm (cast as intended)</button>
           <p id="confirm-label" class="result"></p>
         </section>
@@ -165,8 +171,25 @@
           <h2>PIN tools</h2>
           <p class="lead">A ruse PIN looks and verifies like the real one, but every ballot cast
             with it is discarded at tally. Hand it over if you are being coerced.</p>
+          <p class="lead">Leave the box empty and the app draws one for you. Type a value to
+            choose it yourself - the one you already gave someone, so that it keeps working
+            after a re-send or a revocation. Whatever you type becomes the decoy, and this
+            app will not tell you whether it matches your own PIN - an app that could tell you
+            would also tell anyone testing PINs on your device. If you do type your own, nothing
+            is lost: that decoy is your real credential, so its ballots still count, and arming
+            any other value gives you a decoy again.</p>
+          <label for="ruse-current-pin">Your PIN</label>
+          <input id="ruse-current-pin" inputmode="numeric" maxlength="5" placeholder="5 digits" />
+          <p class="hint">Arming a decoy replaces the credential this app checks your PIN
+            against, so it is you who has to ask for it: type the PIN this app holds.</p>
+          <label for="ruse-pin-input">Ruse PIN (optional)</label>
+          <input id="ruse-pin-input" inputmode="numeric" maxlength="5" placeholder="5 digits" />
           <button id="btn-ruse">Get a ruse PIN</button>
           <code id="ruse-pin" class="big hidden"></code>
+          <code id="ruse-emoji" class="hidden"></code>
+          <p class="hint">"Re-send my PIN" delivers YOUR PIN again. If someone is watching and you
+            want them to see a PIN that is not yours, use the ruse PIN above instead: the two
+            requests look the same to everyone outside this device.</p>
           <button id="btn-resend" class="secondary">Re-send my PIN</button>
           <p id="pin-tools-label" class="result"></p>
         </section>
@@ -174,7 +197,8 @@
         <section id="screen-revoke" class="screen locked">
           <h2>Revoke credential</h2>
           <p class="lead">Deletes your current voting identity: every ballot cast with it becomes
-            void and you are issued a new pseudonymous id and a new PIN.</p>
+            void - including one you have already confirmed and seen counted - and you are issued
+            a new pseudonymous id and a new PIN. Vote again afterwards.</p>
           <button id="btn-revoke" class="danger">Revoke credential</button>
           <p id="revoke-label" class="result"></p>
         </section>

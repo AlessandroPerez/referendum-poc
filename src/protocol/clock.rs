@@ -21,9 +21,12 @@ use crate::configuration::ClockSettings;
 #[serde(rename_all = "lowercase")]
 pub enum ClockMode {
     /// `base_ms + tick * tick_ms`, advanced by the driver (reproducible).
-    #[default]
+    /// The TEST HARNESS's mode: every nonce a teller draws is a function of
+    /// its seed and a counter, so a rolled-back ledger replays them. Never
+    /// the default, and never a real election.
     Logical,
-    /// Real Unix time in milliseconds.
+    /// Real Unix time in milliseconds - and fresh entropy in every nonce.
+    #[default]
     Wall,
 }
 
@@ -128,12 +131,12 @@ impl Clock {
         }
     }
 
-    /// Sample a tau delay (in ticks) from `{min..=max}` using the provided RNG.
-    ///
-    /// tau is drawn from {2..5} ticks for PIN-request notifications.
+    /// Sample the waiting period tau with `min <= tau < max` (Sec. 5.3.1.3
+    /// step 2), in seconds - one clock tick on the logical clock. The range
+    /// must be non-empty: services validate their configuration at startup.
     pub fn sample_tau<R: Rng>(&self, rng: &mut R, min: u64, max: u64) -> u64 {
-        assert!(min <= max, "tau range must be non-empty");
-        rng.gen_range(min..=max)
+        assert!(min < max, "tau range must be non-empty");
+        rng.gen_range(min..max)
     }
 }
 
@@ -212,7 +215,7 @@ mod tests {
         let clock = Clock::logical(0, 1);
         let mut rng = ChaCha20Rng::from_seed([7u8; 32]);
         let tau = clock.sample_tau(&mut rng, 2, 5);
-        assert!((2..=5).contains(&tau));
+        assert!((2..5).contains(&tau), "tau_min <= tau < tau_max");
 
         let mut rng2 = ChaCha20Rng::from_seed([7u8; 32]);
         assert_eq!(clock.sample_tau(&mut rng2, 2, 5), tau);

@@ -77,7 +77,8 @@ pub struct SeedSettings {
 /// +/- 5 minute freshness window.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClockSettings {
-    #[serde(default)]
+    /// Stated explicitly in every configuration: the reproducible logical
+    /// clock must be asked for, never fallen into.
     pub mode: crate::protocol::clock::ClockMode,
     #[serde(deserialize_with = "deserialize_number_from_string")]
     pub base_ms: u64,
@@ -175,6 +176,49 @@ pub struct ElectionSettings {
     pub t_prime: usize,
     #[serde(deserialize_with = "deserialize_number_from_string")]
     pub max_casts_per_voter: usize,
+    /// How long a casting token stays valid (Sec. 5.3.1.6 step 4), seconds.
+    #[serde(default = "default_casting_token_ttl_s")]
+    pub casting_token_ttl_s: u64,
+    /// Casting policy (Sec. 5.3.1.6 step 4, "has not voted too recently"):
+    /// minimum seconds between casting tokens for two DIFFERENT ballots of
+    /// one voter. 0 disables it.
+    #[serde(default)]
+    pub min_cast_interval_s: u64,
+    /// Bounds, in seconds, of the random waiting period tau a registration
+    /// teller lets pass between a PIN request and the PIN's availability:
+    /// `tau_min_s <= tau < tau_max_s` (Sec. 5.3.1.3 step 2). Enforced on the
+    /// wall clock only.
+    #[serde(default = "default_tau_min_s")]
+    pub tau_min_s: u64,
+    #[serde(default = "default_tau_max_s")]
+    pub tau_max_s: u64,
+}
+
+impl ElectionSettings {
+    /// The waiting-period bounds as `(min, max)` with `min <= tau < max`
+    /// (Sec. 5.3.1.3 step 2), or an error when the range is empty.
+    pub fn tau_range(&self) -> Result<(u64, u64), String> {
+        if self.tau_min_s < self.tau_max_s {
+            Ok((self.tau_min_s, self.tau_max_s))
+        } else {
+            Err(format!(
+                "election.tau_min_s ({}) must be smaller than election.tau_max_s ({})",
+                self.tau_min_s, self.tau_max_s
+            ))
+        }
+    }
+}
+
+fn default_casting_token_ttl_s() -> u64 {
+    600
+}
+
+fn default_tau_min_s() -> u64 {
+    2
+}
+
+fn default_tau_max_s() -> u64 {
+    5
 }
 
 /// Runtime environment selector (`APP_ENVIRONMENT`: `local` | `production`).
@@ -255,6 +299,13 @@ mod tests {
         assert_eq!(settings.election.n_rt, 3);
         assert_eq!(settings.election.t_rt, 2);
         assert_eq!(settings.election.n_acc, 10);
+        // The shipped configuration runs on the wall clock: the reproducible
+        // logical mode is asked for by name, never inherited.
+        assert_eq!(
+            settings.clock.mode,
+            crate::protocol::clock::ClockMode::Wall,
+            "configuration/base.yaml must ship `mode: wall`"
+        );
     }
 
     #[test]

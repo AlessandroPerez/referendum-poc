@@ -23,9 +23,10 @@ use crate::domain::{BallotDigest, CommB, ReferendumOption};
 
 type G = RistrettoGroup;
 
-/// Minimum number of distinct BBs that must publish a ballot digest for the
-/// ballot to count as accepted without bot (Sec. 3.8.5).  A protocol constant, not
-/// a deployment knob: the bot check is defined as "at least two".
+/// The number of distinct ballot boxes that must publish a ballot digest for
+/// the voter to be spared the bottom symbol of Sec. 3.8.4 step 5 ("at least
+/// one BB has failed"; Sec. 3.8.5 1(d)). A signal to the voter, who may cast
+/// again - not a counting condition (see [`counted_digests`]).
 pub const NO_BOT_MIN_BBS: usize = 2;
 
 /// Errors from the voting helpers.
@@ -109,6 +110,9 @@ pub struct BallotDigestEntry {
     pub digest: BallotDigest,
     /// User-facing emoji receipt (`Ballot::to_emoji`, Deviation 2).
     pub emoji: Vec<String>,
+    /// PublicPINEmoji: visual digest of `H(E[o^x])` of the received ballot
+    /// (Sec. 3.8.4 step 2), for the voter to compare with their app's.
+    pub public_pin_emoji: Vec<String>,
     pub receipt: Receipt,
 }
 
@@ -166,6 +170,91 @@ pub struct ParsedWbbData {
     pub content: String,
 }
 
+/// The entity ids that signed a bulletin-board entry (`entity_id` on a
+/// single-signer entry, `entity_ids` on a co-signed one).
+pub fn entry_signer_ids(entry: &serde_json::Value) -> Vec<String> {
+    // An honest entry carries ONE form. The board verifies one of them and
+    // logs whatever else the submitter sent along, so an entry carrying both
+    // is ambiguous on purpose: it counts as signed by nobody - here, in the
+    // auditor and in both UIs alike.
+    let single = entry.get("entity_id").and_then(|v| v.as_str());
+    let co_signers: Vec<String> = entry
+        .get("entity_ids")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    match (single, co_signers.is_empty()) {
+        (Some(id), true) => vec![id.to_string()],
+        (None, false) => co_signers,
+        _ => Vec::new(),
+    }
+}
+
+/// The ballot boxes that published BOTH a ballot's digest and a confirmation
+/// of it - the boxes that vouch for it completely. Shown to the voter; the
+/// count of them is NOT what decides whether the ballot counts (see
+/// [`counted_digests`]).
+pub fn counting_ballot_boxes(published: &[u64], confirmed: &[u64]) -> Vec<u64> {
+    let mut both: Vec<u64> = published
+        .iter()
+        .copied()
+        .filter(|bb| confirmed.contains(bb))
+        .collect();
+    both.sort_unstable();
+    both.dedup();
+    both
+}
+
+/// The digests the board says COUNT (Sec. 3.9 steps 3 and 5, Sec. 3.10
+/// 1(c)-(d)): a `ballot_digest` entry published during voting by at least
+/// ONE ballot box, and a `cast_intended_proof` entry published by at least
+/// ONE ballot box - each entry signed by the box it names, not necessarily
+/// the same box. One honest box is what the thesis relies on (A9): a rule
+/// that needed two would hand any single dishonest box a veto over any
+/// ballot, with nothing on the board to tell it from a voter who never
+/// confirmed. Whether a published disclosure is VALID can only be checked
+/// against the released ballot, at tally (`tally::valid_disclosures`); the
+/// bottom symbol of Sec. 3.8.4 step 5 - fewer than [`NO_BOT_MIN_BBS`]
+/// boxes published the digest - is a warning to the voter, not a discard.
+/// `publications` and `confirmations` carry one `(digest, bb_id)` per such
+/// entry. Used by the voter app, the tally driver and the auditor alike.
+pub fn counted_digests(
+    publications: impl IntoIterator<Item = (BallotDigest, u64)>,
+    confirmations: impl IntoIterator<Item = (BallotDigest, u64)>,
+) -> std::collections::HashSet<BallotDigest> {
+    let published: std::collections::HashSet<BallotDigest> =
+        publications.into_iter().map(|(digest, _)| digest).collect();
+    let confirmed: std::collections::HashSet<BallotDigest> = confirmations
+        .into_iter()
+        .map(|(digest, _)| digest)
+        .collect();
+    published.intersection(&confirmed).copied().collect()
+}
+
+/// True when `entry` is a result the tabulation tellers really co-signed:
+/// the published counts of an election are only what `t_TT` of them put their
+/// name to (Sec. 3.4.2 write policy), so neither app shows a `tally_result`
+/// entry on the board's word alone.
+/// Tabulation tellers that must co-sign a published result: the fixed
+/// Sec. 3.4.2 write policy, not a configurable threshold.
+pub const RESULT_SIGNERS: usize = 3;
+
+pub fn signed_by_tellers(entry: &serde_json::Value, t_tt: usize) -> bool {
+    let signers: std::collections::BTreeSet<String> = entry_signer_ids(entry)
+        .into_iter()
+        .filter(|id| id.starts_with("TT-"))
+        .collect();
+    signers.len() >= t_tt
+}
+
+/// True when `entry` is signed by ballot box `bb_id` itself. What a ballot
+/// box says in a payload counts - for the auditor, the voter app and the
+/// public board page alike - only under that ballot box's own signature:
+/// a payload naming ANOTHER ballot box is nobody's statement.
+pub fn signed_by_ballot_box(entry: &serde_json::Value, bb_id: u64) -> bool {
+    let expected = format!("BB-{bb_id}");
+    entry_signer_ids(entry).contains(&expected)
+}
+
 /// Parse the decoded `data` bytes of a WBB entry into its 5 CSV fields.
 pub fn parse_wbb_data(data: &[u8]) -> Option<ParsedWbbData> {
     let text = std::str::from_utf8(data).ok()?;
@@ -201,6 +290,33 @@ impl ParsedWbbData {
 /// current phase (Sec. 3.4.2, fork `http.go`).
 pub fn phase_transition_data_string(from: &str, to: &str) -> String {
     format!("{from},PM,phase_transition,1,{to}")
+}
+
+#[cfg(test)]
+mod signer_rule_tests {
+    use super::*;
+
+    #[test]
+    fn an_entry_with_both_signer_forms_is_signed_by_nobody() {
+        let single = serde_json::json!({ "entity_id": "BB-1" });
+        let co = serde_json::json!({ "entity_ids": ["RT-1", "RT-2"] });
+        let shadowed = serde_json::json!({ "entity_id": "BB-1", "entity_ids": ["BB-2"] });
+        assert_eq!(entry_signer_ids(&single), ["BB-1"]);
+        assert_eq!(entry_signer_ids(&co), ["RT-1", "RT-2"]);
+        assert!(entry_signer_ids(&shadowed).is_empty());
+        assert!(signed_by_ballot_box(&single, 1));
+        assert!(!signed_by_ballot_box(&shadowed, 1) && !signed_by_ballot_box(&shadowed, 2));
+        // An empty list next to a single signer is not a second form.
+        let padded = serde_json::json!({ "entity_id": "BB-1", "entity_ids": [] });
+        assert_eq!(entry_signer_ids(&padded), ["BB-1"]);
+    }
+
+    #[test]
+    fn a_ballot_counts_with_boxes_that_published_and_confirmed() {
+        assert_eq!(counting_ballot_boxes(&[1, 2], &[2, 1, 1]), [1, 2]);
+        assert_eq!(counting_ballot_boxes(&[1, 2], &[2]), [2]);
+        assert_eq!(counting_ballot_boxes(&[1], &[2]), Vec::<u64>::new());
+    }
 }
 
 #[cfg(test)]

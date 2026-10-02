@@ -32,8 +32,10 @@ const MASTER_SEED: [u8; 32] = [0xabu8; 32];
 
 /// The deterministic 8-digit PIN for voter 1 under `MASTER_SEED` .
 /// If this changes, the credential derivation pipeline changed - that is a
-/// determinism regression, not a value to casually update.
-const EXPECTED_PIN_VOTER_1: usize = 25149446;
+/// determinism regression, not a value to casually update. (It last changed
+/// when identifiers became a random assignment, Sec. 3.5.3: voter 1 no longer
+/// holds credential 1, so its PIN is another credential's.)
+const EXPECTED_PIN_VOTER_1: usize = 51525;
 
 #[tokio::test]
 async fn voter_enrolls_and_verifies_deterministic_pin() {
@@ -44,11 +46,14 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
     let temp = tempfile::tempdir().expect("tempdir");
     let ceremony_dir = temp.path();
     let base = base_settings();
+    // Identifiers are the electoral roll's private random assignment; the
+    // values below are read once the ceremony has written its seed.
     let master_seed = MasterSeed::new(MASTER_SEED);
     let mut rng = rand_chacha::ChaCha20Rng::from_seed(MASTER_SEED);
     let ceremony = run_ceremony(&base.election, &mut rng).unwrap();
-    write_artifacts(ceremony_dir, &base, &ceremony, &master_seed, &base.dip)
+    write_artifacts(ceremony_dir, &base, &ceremony, &master_seed)
         .expect("write ceremony artifacts");
+    let vids_of = helpers::vid_assignment(ceremony_dir, base.election.n_acc);
 
     // -- 2. WBB (needed by gen-credentials for the acc_pub_key entry) ------
     let ca = ClusterCa::from_seed(&MASTER_SEED).unwrap();
@@ -59,6 +64,9 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
         let key = signing_key(ceremony_dir, &format!("rt-{i}"));
         wbb_config = wbb_config.with_entity(&format!("RT-{i}"), key.verifying_key());
     }
+    // The roll publishes the identifier tree here too: the app checks the
+    // identifier it is given against that root before enrolling.
+    wbb_config = wbb_config.with_entity("ER-1", signing_key(ceremony_dir, "er").verifying_key());
     let _wbb = helpers::WbbProcess::spawn(
         ceremony_dir,
         &ca,
@@ -190,6 +198,24 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
         );
     }
 
+    // The electoral roll commits the identifier tree before anyone enrolls:
+    // the app refuses an identifier it cannot check against that root.
+    let setup = client
+        .post(format!("https://127.0.0.1:{er_port}/admin/setup"))
+        .header(
+            "Authorization",
+            format!("Bearer {}", admin_token(ceremony_dir)),
+        )
+        .send()
+        .await
+        .expect("admin setup");
+    let setup_status = setup.status();
+    let setup_body = setup.text().await.unwrap_or_default();
+    assert!(
+        setup_status.is_success(),
+        "ER setup publication: {setup_status} {setup_body}"
+    );
+
     // V1 login.
     let login: serde_json::Value = post_json(
         &client,
@@ -197,7 +223,7 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
         serde_json::json!({ "fiscal_id": "VOTER-001" }),
     )
     .await;
-    assert_eq!(login["vid"], 1);
+    assert_eq!(login["vid"], vids_of[0]);
 
     // V2-V3 enroll (passphrase shown once).
     let enroll: serde_json::Value = post_json(
@@ -219,7 +245,7 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
         serde_json::json!({ "fiscal_id": "VOTER-001" }),
     )
     .await;
-    assert_eq!(relogin["vid"], 1, "re-login keeps the same vid");
+    assert_eq!(relogin["vid"], vids_of[0], "re-login keeps the same vid");
     let dup = client
         .post(format!("{base_url}/api/enroll"))
         .json(&serde_json::json!({ "fiscal_id": "VOTER-001" }))
@@ -257,7 +283,7 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
     .await;
     let pin = pin_resp["pin"].as_u64().expect("pin") as usize;
     assert_gt!(pin, 0);
-    assert_lt!(pin, 100_000_000, "8-digit PIN");
+    assert_lt!(pin, 100_000, "5-digit PIN");
     assert_eq!(
         pin, EXPECTED_PIN_VOTER_1,
         "PIN must be deterministic under the committed master seed"
@@ -290,7 +316,7 @@ async fn voter_enrolls_and_verifies_deterministic_pin() {
     .await;
     assert_eq!(ok["valid"], true, "correct PIN must verify");
 
-    let wrong_pin = (pin + 1) % 100_000_000;
+    let wrong_pin = (pin + 1) % 100_000;
     let bad: serde_json::Value = post_json(
         &client,
         &format!("{base_url}/api/pin/verify"),

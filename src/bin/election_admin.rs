@@ -61,6 +61,10 @@ enum Command {
         /// WBB log base URL (overrides configuration).
         #[arg(long)]
         wbb_url: Option<Url>,
+        /// Ballot box ids to tally without when they give no release
+        /// (Sec. 3.9 step 4); comma separated, e.g. `--proceed-without 2,3`.
+        #[arg(long, value_delimiter = ',')]
+        proceed_without: Vec<u64>,
     },
 
     /// Print the final counts from the WBB `tally_result` entry (V15 support).
@@ -206,7 +210,10 @@ async fn main() -> anyhow::Result<()> {
         Command::CloseVoting { wbb_url } => {
             run_transition(&settings, &cli.config, wbb_url, "voting", "tallying").await?;
         }
-        Command::Tally { wbb_url } => {
+        Command::Tally {
+            wbb_url,
+            proceed_without,
+        } => {
             let ceremony_dir = std::path::PathBuf::from(&settings._ceremony.election_context)
                 .parent()
                 .unwrap_or(&cli.config)
@@ -231,6 +238,8 @@ async fn main() -> anyhow::Result<()> {
                 clock: Clock::from_settings(&settings.clock),
                 n_acc: settings.election.n_acc,
                 t_tt: settings.election.t_tt,
+                t_rt: settings.election.t_rt,
+                proceed_without,
             })
             .await?;
             println!(

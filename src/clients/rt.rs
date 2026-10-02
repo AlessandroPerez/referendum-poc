@@ -5,8 +5,7 @@ use std::time::Duration;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use dlog_group::group::{GroupPoint, GroupScalar};
 use dlog_group::ristretto::RistrettoGroup;
-use evoting::api::prelude::{ThresholdDvRound1Broadcast, VotingCredentialBuilder};
-use evoting::api::server::rt::AccShareBroadcast;
+use evoting::api::prelude::ThresholdDvRound1Broadcast;
 use reqwest::{Client, StatusCode, Url};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -28,13 +27,6 @@ pub struct SignResponse {
     pub signature: String,
 }
 
-/// Response from `POST /decoy`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct DecoyResponse {
-    pub builder: VotingCredentialBuilder<RistrettoGroup>,
-    pub pin: usize,
-}
-
 /// Response from `GET /status`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct StatusResponse {
@@ -52,7 +44,7 @@ pub struct RtClient {
 
 impl RtClient {
     /// Build a client for `base_url` with the service bearer token required by
-    /// `POST /sign` and `POST /decoy`.
+    /// `POST /sign`.
     pub fn new(client: Client, mut base_url: Url, token: SecretString) -> Self {
         let path = base_url.path();
         if !path.ends_with('/') {
@@ -114,26 +106,6 @@ impl RtClient {
         })
     }
 
-    /// `POST /decoy` - request a decoy credential builder and ruse PIN.
-    pub async fn decoy(&self) -> Result<DecoyResponse, RtError> {
-        let url = self.base_url.join("decoy")?;
-        let response = self
-            .client
-            .post(url)
-            .header("Authorization", self.auth_header())
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(RtError::Network)?;
-        let status = response.status();
-        let body = response.text().await.map_err(RtError::Network)?;
-        if status.is_success() {
-            serde_json::from_str(&body).map_err(RtError::Json)
-        } else {
-            Err(RtError::Http(status, body))
-        }
-    }
-
     /// `GET /status`.
     pub async fn status(&self) -> Result<StatusResponse, RtError> {
         let url = self.base_url.join("status")?;
@@ -192,7 +164,7 @@ impl RtClient {
     pub async fn credentials_deliver(
         &self,
         token: &TokenValue,
-    ) -> Result<AccShareBroadcast<RistrettoGroup>, RtError> {
+    ) -> Result<crate::actors::rt::DeliveredShare, RtError> {
         let url = self.base_url.join("credentials/deliver")?;
         #[derive(Serialize)]
         struct Req {

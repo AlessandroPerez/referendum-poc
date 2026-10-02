@@ -49,15 +49,17 @@ pub fn run_ceremony<R: RngCore + CryptoRng>(
 ) -> Result<CeremonyOutput, SetupError> {
     // 1. TT DKG produces the tally decryption key shares and master public key.
     let elgamal = ElGamalParams::<RistrettoGroup>::new(rng);
-    let (tt_tellers, master_tt_pk) = ThresholdTabulationTeller::<RistrettoGroup>::setup(
+    let (tt_tellers, master_tt_pk, teller_set) = ThresholdTabulationTeller::<RistrettoGroup>::setup(
         settings.n_tt,
         settings.t_tt,
         &elgamal,
         rng,
     );
 
-    // 2. ElectionParams binds the ElGamal params to the master TT public key.
-    let params = ElectionParams::<RistrettoGroup>::new(&elgamal, &master_tt_pk, rng);
+    // 2. ElectionParams binds the ElGamal params to the master TT public key
+    //    and to the tellers' public shares (every threshold decryption and
+    //    blinding is held to them, teller by teller).
+    let params = ElectionParams::<RistrettoGroup>::new(&elgamal, &master_tt_pk, teller_set, rng);
 
     // 3. RT DKG produces the credential-issuance key shares and master public key.
     let (rt_tellers, rt_pk) = ThresholdRegistrationTeller::<RistrettoGroup>::setup(
@@ -92,17 +94,54 @@ pub fn run_ceremony<R: RngCore + CryptoRng>(
     })
 }
 
-/// Deterministic VID assignment: assign `1..=n_voters` to the registry order.
-pub fn assign_vids(n_voters: usize) -> Vec<u64> {
-    (1..=n_voters as u64).collect()
+/// Pseudonymous identifiers (Sec. 3.5.3): a RANDOM assignment of the integers
+/// `1..=n_acc`, derived from the electoral roll's private seed so that only
+/// the ER can link a voter to an identifier. Entry `i < n_voters` is the
+/// identifier of the i-th registry voter; the rest are the spare identifiers
+/// handed out on revocation, in this order. An identifier doubles as the
+/// index of its credential, which is why the values stay within `1..=n_acc`.
+pub fn assign_vids(er_seed: &crate::protocol::rng::ActorSeed, n_acc: usize) -> Vec<u64> {
+    use rand::seq::SliceRandom;
+    let mut vids: Vec<u64> = (1..=n_acc as u64).collect();
+    let mut rng = crate::protocol::rng::operation_rng(er_seed, "vid-assignment", 0);
+    vids.shuffle(&mut rng);
+    vids
 }
 
-/// Build the (id, vid) pairs used for the Merkle root from the DIP registry.
-pub fn voter_pairs(voter_ids: &[String], vids: &[u64]) -> Vec<(String, u64)> {
-    voter_ids
+/// The "extra random strings" that stand for the holders of the spare
+/// identifiers in the identifier Merkle tree (Sec. 3.5.3).
+pub fn spare_holder_ids(er_seed: &crate::protocol::rng::ActorSeed, n_spares: usize) -> Vec<String> {
+    use rand::RngCore;
+    (0..n_spares)
+        .map(|k| {
+            let mut rng = crate::protocol::rng::operation_rng(er_seed, "spare-holder", k as u64);
+            let mut bytes = [0u8; 16];
+            rng.fill_bytes(&mut bytes);
+            format!("spare-{}", hex::encode(bytes))
+        })
+        .collect()
+}
+
+/// Build the leaves of the identifier tree: the first `n_voters` holders are
+/// the registry's voters, the rest hold spares (Sec. 3.5.3).
+pub fn voter_pairs(
+    holder_ids: &[String],
+    vids: &[u64],
+    n_voters: usize,
+) -> Vec<(crate::protocol::merkle::LeafKind, String, u64)> {
+    use crate::protocol::merkle::LeafKind;
+    holder_ids
         .iter()
         .zip(vids.iter())
-        .map(|(id, vid)| (id.clone(), *vid))
+        .enumerate()
+        .map(|(i, (id, vid))| {
+            let kind = if i < n_voters {
+                LeafKind::Voter
+            } else {
+                LeafKind::Spare
+            };
+            (kind, id.clone(), *vid)
+        })
         .collect()
 }
 
@@ -124,6 +163,10 @@ mod tests {
             n_acc: 10,
             t_prime: 2,
             max_casts_per_voter: 10,
+            casting_token_ttl_s: 600,
+            min_cast_interval_s: 0,
+            tau_min_s: 2,
+            tau_max_s: 5,
         }
     }
 
@@ -163,5 +206,42 @@ mod tests {
             serde_json::json!([1, 1, 1]),
             "expected one slot per option"
         );
+    }
+}
+
+#[cfg(test)]
+mod vid_assignment_tests {
+    use super::*;
+    use crate::protocol::rng::ActorSeed;
+
+    #[test]
+    fn identifiers_are_a_private_random_permutation() {
+        let seed = ActorSeed::from_bytes([3u8; 32]);
+        let vids = assign_vids(&seed, 10);
+        // Every credential index is used exactly once...
+        let mut sorted = vids.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (1..=10).collect::<Vec<u64>>());
+        // ...not in registry order...
+        assert_ne!(
+            vids, sorted,
+            "sequential ids would de-pseudonymise the registry"
+        );
+        // ...reproducibly for the ER, and differently for another seed.
+        assert_eq!(vids, assign_vids(&seed, 10));
+        assert_ne!(vids, assign_vids(&ActorSeed::from_bytes([4u8; 32]), 10));
+    }
+
+    #[test]
+    fn spare_holders_are_distinct_random_strings() {
+        let seed = ActorSeed::from_bytes([3u8; 32]);
+        let holders = spare_holder_ids(&seed, 3);
+        assert_eq!(holders.len(), 3);
+        assert!(holders
+            .iter()
+            .all(|h| h.starts_with("spare-") && h.len() == 6 + 32));
+        let unique: std::collections::HashSet<_> = holders.iter().collect();
+        assert_eq!(unique.len(), 3);
+        assert_eq!(holders, spare_holder_ids(&seed, 3));
     }
 }

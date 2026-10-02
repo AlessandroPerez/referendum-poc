@@ -49,12 +49,71 @@ struct EntryRow {
     entity_ids: Vec<String>,
     /// Decoded JSON payload for base64-JSON content fields, raw text otherwise.
     payload: serde_json::Value,
+    /// For `ballot_digest` / `cast_intended_proof` entries: what the entry
+    /// counts for, decided HERE with typed decoding - never in the browser
+    /// from loosely typed JSON.
+    ballot_box: Option<BallotBoxStatement>,
     /// Hex Merkle leaf hash reported by the log.
     leaf_hash: Option<String>,
     /// Validators that verified this leaf's Merkle inclusion and BLS-signed it.
     validations: Vec<String>,
     /// Number of validators registered at the log (0 outside the demo).
     validators_total: usize,
+    /// For a `tally_result` entry: whether enough tabulation tellers really
+    /// co-signed it. The page shows a result only when they did.
+    tally_result_signed: bool,
+}
+
+/// What a `ballot_digest` or `cast_intended_proof` entry counts for.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum BallotBoxStatement {
+    /// Well-formed and signed by the ballot box it names: counts.
+    Valid { bb_id: u64, digest: String },
+    /// Counts for nothing (unreadable, or names a ballot box that did not
+    /// sign it) - shown as a warning. The audit WARNs and names the box.
+    Ignored {
+        reason: &'static str,
+        /// The digest it claims to be about, if that much can be read.
+        digest: Option<String>,
+    },
+}
+
+fn ballot_box_statement(
+    parsed: &voting::ParsedWbbData,
+    entry: &serde_json::Value,
+) -> Option<BallotBoxStatement> {
+    let decoded = match parsed.entry_type.as_str() {
+        "ballot_digest" => parsed
+            .decode_payload::<voting::BallotDigestEntry>()
+            .map(|p| (p.receipt.bb_id, p.digest)),
+        "cast_intended_proof" => parsed
+            .decode_payload::<voting::CaiEntry>()
+            .map(|p| (p.bb_id, p.digest)),
+        "ballot_metadata" => parsed
+            .decode_payload::<voting::BallotMetadataEntry>()
+            .map(|p| (p.bb_id, p.digest)),
+        _ => return None,
+    };
+    Some(match decoded {
+        Ok((bb_id, digest)) if voting::signed_by_ballot_box(entry, bb_id) => {
+            BallotBoxStatement::Valid {
+                bb_id,
+                digest: digest.to_string(),
+            }
+        }
+        Ok((_, digest)) => BallotBoxStatement::Ignored {
+            reason: "it names a ballot box that did not sign it",
+            digest: Some(digest.to_string()),
+        },
+        Err(_) => BallotBoxStatement::Ignored {
+            reason: "it cannot be read",
+            digest: parsed
+                .decode_payload::<serde_json::Value>()
+                .ok()
+                .and_then(|v| v.get("digest")?.as_str().map(str::to_owned)),
+        },
+    })
 }
 
 #[tracing::instrument(skip(state))]
@@ -69,11 +128,7 @@ async fn entries_handler(
     let validators_total = entries.validators.len();
     let mut rows = Vec::with_capacity(entries.entries.len());
     for sequenced in entries.entries {
-        let entity_ids: Vec<String> = sequenced
-            .entry
-            .get("entity_ids")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
+        let entity_ids = voting::entry_signer_ids(&sequenced.entry);
         let Some(data_b64) = sequenced.entry.get("data").and_then(|v| v.as_str()) else {
             continue;
         };
@@ -81,12 +136,40 @@ async fn entries_handler(
             continue;
         };
         let Some(parsed) = voting::parse_wbb_data(&data) else {
+            // A co-signature that reached the board after its entry was
+            // published: the log stores `ref:N` plus a signature over the
+            // data of leaf N. Shown, so the index has no silent gap.
+            if let Some(reference) = String::from_utf8_lossy(&data).strip_prefix("ref:") {
+                rows.push(EntryRow {
+                    leaf_index: sequenced.leaf_index,
+                    timestamp: sequenced.timestamp,
+                    phase: String::new(),
+                    role: String::new(),
+                    entry_type: "late_co_signature".to_string(),
+                    tally_result_signed: false,
+                    threshold: 1,
+                    entity_ids,
+                    ballot_box: None,
+                    payload: serde_json::json!({ "signs_entry": reference.trim() }),
+                    leaf_hash: sequenced.leaf_hash,
+                    validations: sequenced
+                        .validations
+                        .into_iter()
+                        .map(|v| v.validator_id)
+                        .collect(),
+                    validators_total,
+                });
+            }
             continue;
         };
         let payload = parsed
             .decode_payload::<serde_json::Value>()
             .unwrap_or_else(|_| serde_json::Value::String(parsed.content.clone()));
+        let ballot_box = ballot_box_statement(&parsed, &sequenced.entry);
+        let tally_result_signed = parsed.entry_type == "tally_result"
+            && voting::signed_by_tellers(&sequenced.entry, voting::RESULT_SIGNERS);
         rows.push(EntryRow {
+            ballot_box,
             leaf_index: sequenced.leaf_index,
             timestamp: sequenced.timestamp,
             phase: parsed.phase,
@@ -102,6 +185,7 @@ async fn entries_handler(
                 .map(|v| v.validator_id)
                 .collect(),
             validators_total,
+            tally_result_signed,
         });
     }
     Ok(Json(rows))
@@ -185,6 +269,12 @@ async fn no_cache(mut response: Response) -> Response {
         header::CACHE_CONTROL,
         HeaderValue::from_static("no-cache, no-store, must-revalidate"),
     );
+    // The page renders text written by election authorities: no inline or
+    // foreign script may ever run in it.
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'self'; frame-ancestors 'none'"),
+    );
     response
 }
 
@@ -243,4 +333,78 @@ pub async fn build_service(
         .map_err(|e| anyhow::anyhow!("failed to load TLS config: {e}"))?;
 
     Ok((addr, rustls_config, state))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A row is classified HERE, from typed content and the signer rule -
+    /// never in the browser from loosely typed JSON.
+    #[test]
+    fn a_digest_entry_counts_only_for_the_box_that_signed_it() {
+        let payload = serde_json::json!({
+            "digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "emoji": ["a"],
+            "public_pin_emoji": ["b"],
+            "receipt": { "seq_no": 1, "received_at_unix_ms": 1, "bb_id": 1 },
+        });
+        let data = format!(
+            "voting,BB,ballot_digest,1,{}",
+            BASE64.encode(serde_json::to_string(&payload).unwrap())
+        );
+        let parsed = voting::parse_wbb_data(data.as_bytes()).unwrap();
+        let statement = |entry: serde_json::Value| ballot_box_statement(&parsed, &entry).unwrap();
+
+        assert!(matches!(
+            statement(serde_json::json!({ "entity_id": "BB-1" })),
+            BallotBoxStatement::Valid { bb_id: 1, .. }
+        ));
+        // Signed by the other box, or by nobody, or carrying both signer
+        // forms (which the board would never verify as a whole).
+        // A metadata entry carries an encrypted ballot-box id, which cannot
+        // be built here; the live `wbb_ui_smoke` pins that classification on
+        // real entries. What is checked here is that an unreadable one is
+        // shown as ignored rather than skipped.
+        let unreadable = {
+            let data = format!(
+                "voting,BB,ballot_metadata,1,{}",
+                BASE64.encode(r#"{"digest":"x","bb_id":1}"#)
+            );
+            voting::parse_wbb_data(data.as_bytes()).unwrap()
+        };
+        assert!(matches!(
+            ballot_box_statement(&unreadable, &serde_json::json!({ "entity_id": "BB-1" })),
+            Some(BallotBoxStatement::Ignored { reason, .. }) if reason == "it cannot be read"
+        ));
+
+        for entry in [
+            serde_json::json!({ "entity_id": "BB-2" }),
+            serde_json::json!({ "entity_ids": ["BB-2"] }),
+            serde_json::json!({ "entity_id": "BB-1", "entity_ids": ["BB-2"] }),
+            serde_json::json!({ "entity_id": "BB-2", "entity_ids": ["BB-1"] }),
+            serde_json::json!({}),
+        ] {
+            assert!(
+                matches!(
+                    statement(entry.clone()),
+                    BallotBoxStatement::Ignored { reason, .. }
+                        if reason == "it names a ballot box that did not sign it"
+                ),
+                "{entry} must not count for BB-1"
+            );
+        }
+
+        // Unreadable content is shown as ignored, with the digest it claims.
+        let broken = format!(
+            "voting,BB,ballot_digest,1,{}",
+            BASE64.encode(r#"{"digest":"zz","emoji":[]}"#)
+        );
+        let parsed = voting::parse_wbb_data(broken.as_bytes()).unwrap();
+        assert!(matches!(
+            ballot_box_statement(&parsed, &serde_json::json!({ "entity_id": "BB-1" })),
+            Some(BallotBoxStatement::Ignored { reason, digest })
+                if reason == "it cannot be read" && digest.as_deref() == Some("zz")
+        ));
+    }
 }

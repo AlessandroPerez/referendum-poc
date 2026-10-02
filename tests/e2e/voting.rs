@@ -54,7 +54,7 @@ async fn three_voters_cast_with_cat_and_cai() {
     let master_seed = MasterSeed::new(MASTER_SEED);
     let mut rng = rand_chacha::ChaCha20Rng::from_seed(MASTER_SEED);
     let ceremony = run_ceremony(&base.election, &mut rng).unwrap();
-    write_artifacts(ceremony_dir, &base, &ceremony, &master_seed, &base.dip)
+    write_artifacts(ceremony_dir, &base, &ceremony, &master_seed)
         .expect("write ceremony artifacts");
 
     let ca = ClusterCa::from_seed(&MASTER_SEED).unwrap();
@@ -72,6 +72,7 @@ async fn three_voters_cast_with_cat_and_cai() {
     let pm_key = signing_key(ceremony_dir, "pm");
     let mut wbb_config = helpers::WbbSpawnConfig::new(ports.wbb)
         .with_entity("PM-1", pm_key.verifying_key())
+        .with_entity("ER-1", signing_key(ceremony_dir, "er").verifying_key())
         .with_phase_manager(pm_key.verifying_key());
     for i in 1..=3 {
         let key = signing_key(ceremony_dir, &format!("rt-{i}"));
@@ -194,6 +195,18 @@ async fn three_voters_cast_with_cat_and_cai() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let client = reqwest_client_trusting_ca(ca.cert_pem()).unwrap();
 
+    // The roll commits the identifier tree before anyone enrolls.
+    let setup = client
+        .post(format!("https://127.0.0.1:{}/admin/setup", ports.er))
+        .header(
+            "Authorization",
+            format!("Bearer {}", admin_token(ceremony_dir)),
+        )
+        .send()
+        .await
+        .expect("admin setup");
+    assert!(setup.status().is_success(), "ER setup publication");
+
     // -- 4. Enroll the three voters ------------------------------
     let mut passphrases = Vec::new();
     for (i, base_url) in voter_urls.iter().enumerate() {
@@ -221,10 +234,11 @@ async fn three_voters_cast_with_cat_and_cai() {
     // -- 6. Voter 1: vote -> cast -> publication check -> CAI confirm ---------
     let v1 = &voter_urls[0];
     let p1 = &passphrases[0];
+    let pin1 = pin_of(&client, v1, p1).await;
     let vote1: serde_json::Value = post_json(
         &client,
         &format!("{v1}/api/vote"),
-        serde_json::json!({ "passphrase": p1, "option": "approve", "pin": pin_of(&client, v1, p1).await }),
+        serde_json::json!({ "passphrase": p1, "option": "approve", "pin": pin1 }),
     )
     .await;
     let digest1 = vote1["digest"].as_str().unwrap().to_string();
@@ -233,7 +247,7 @@ async fn three_voters_cast_with_cat_and_cai() {
     let cast1: serde_json::Value = post_json(
         &client,
         &format!("{v1}/api/cast"),
-        serde_json::json!({ "passphrase": p1 }),
+        serde_json::json!({ "passphrase": p1, "pin": pin1 }),
     )
     .await;
     assert_eq!(cast1["receipts"].as_array().unwrap().len(), 2, "both BBs");
@@ -241,7 +255,7 @@ async fn three_voters_cast_with_cat_and_cai() {
     let status1: serde_json::Value = post_json(
         &client,
         &format!("{v1}/api/ballot/status"),
-        serde_json::json!({ "passphrase": p1 }),
+        serde_json::json!({ "passphrase": p1, "pin": pin1 }),
     )
     .await;
     assert_eq!(
@@ -253,7 +267,10 @@ async fn three_voters_cast_with_cat_and_cai() {
     let confirm1: serde_json::Value = post_json(
         &client,
         &format!("{v1}/api/confirm"),
-        serde_json::json!({ "passphrase": p1 }),
+        serde_json::json!({
+            "passphrase": p1, "pin": pin1, "digest": vote1["digest"],
+            "l1": "code", "l2": "sum",
+        }),
     )
     .await;
     assert!(confirm1["confirmed_at_ms"].as_u64().unwrap() > 0);
@@ -271,7 +288,7 @@ async fn three_voters_cast_with_cat_and_cai() {
     post_json(
         &client,
         &format!("{v2}/api/cast"),
-        serde_json::json!({ "passphrase": p2 }),
+        serde_json::json!({ "passphrase": p2, "pin": pin2 }),
     )
     .await;
     let vote2b: serde_json::Value = post_json(
@@ -287,7 +304,7 @@ async fn three_voters_cast_with_cat_and_cai() {
     let cast2b: serde_json::Value = post_json(
         &client,
         &format!("{v2}/api/cast"),
-        serde_json::json!({ "passphrase": p2 }),
+        serde_json::json!({ "passphrase": p2, "pin": pin2 }),
     )
     .await;
 
@@ -296,7 +313,7 @@ async fn three_voters_cast_with_cat_and_cai() {
     let recast: serde_json::Value = post_json(
         &client,
         &format!("{v2}/api/cast"),
-        serde_json::json!({ "passphrase": p2 }),
+        serde_json::json!({ "passphrase": p2, "pin": pin2 }),
     )
     .await;
     assert_eq!(recast["receipts"], cast2b["receipts"], "idempotent replay");
@@ -313,7 +330,7 @@ async fn three_voters_cast_with_cat_and_cai() {
     post_json(
         &client,
         &format!("{v2}/api/cast"),
-        serde_json::json!({ "passphrase": p2 }),
+        serde_json::json!({ "passphrase": p2, "pin": pin2 }),
     )
     .await;
     post_json(
@@ -324,7 +341,7 @@ async fn three_voters_cast_with_cat_and_cai() {
     .await;
     let limited = client
         .post(format!("{v2}/api/cast"))
-        .json(&serde_json::json!({ "passphrase": p2 }))
+        .json(&serde_json::json!({ "passphrase": p2, "pin": pin2 }))
         .send()
         .await
         .unwrap();
@@ -336,15 +353,15 @@ async fn three_voters_cast_with_cat_and_cai() {
     // -- 8. Voter 3: cast-before-vote is rejected, then a real cast --------
     let v3 = &voter_urls[2];
     let p3 = &passphrases[2];
+    let pin3 = pin_of(&client, v3, p3).await;
     let no_ballot = client
         .post(format!("{v3}/api/cast"))
-        .json(&serde_json::json!({ "passphrase": p3 }))
+        .json(&serde_json::json!({ "passphrase": p3, "pin": pin3 }))
         .send()
         .await
         .unwrap();
     assert_eq!(no_ballot.status(), 400, "cast before vote must fail");
 
-    let pin3 = pin_of(&client, v3, p3).await;
     post_json(
         &client,
         &format!("{v3}/api/vote"),
@@ -354,7 +371,7 @@ async fn three_voters_cast_with_cat_and_cai() {
     let cast3: serde_json::Value = post_json(
         &client,
         &format!("{v3}/api/cast"),
-        serde_json::json!({ "passphrase": p3 }),
+        serde_json::json!({ "passphrase": p3, "pin": pin3 }),
     )
     .await;
     assert_eq!(cast3["receipts"].as_array().unwrap().len(), 2);
@@ -424,7 +441,7 @@ async fn wbb_policy_enforcement() {
     let master_seed = MasterSeed::new(MASTER_SEED);
     let mut rng = rand_chacha::ChaCha20Rng::from_seed(MASTER_SEED);
     let ceremony = run_ceremony(&base.election, &mut rng).unwrap();
-    write_artifacts(ceremony_dir, &base, &ceremony, &master_seed, &base.dip)
+    write_artifacts(ceremony_dir, &base, &ceremony, &master_seed)
         .expect("write ceremony artifacts");
 
     let ca = ClusterCa::from_seed(&MASTER_SEED).unwrap();

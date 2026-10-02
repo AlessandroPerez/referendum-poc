@@ -24,6 +24,15 @@ pub struct LoginResponse {
     pub vid: Vid,
     pub registration_token: TokenValue,
     pub credential_package: CredentialPackage,
+    /// Who the published identifier tree commits this identifier to.
+    #[serde(default)]
+    pub vid_holder: String,
+    /// Whether that leaf is the voter's own identifier or a spare.
+    #[serde(default = "voter_leaf")]
+    pub vid_kind: crate::protocol::merkle::LeafKind,
+    /// Inclusion proof of `(vid_holder, vid)` in that tree.
+    #[serde(default)]
+    pub vid_proof: Vec<crate::protocol::merkle::MerkleStep>,
 }
 
 /// Request body for `POST /devices`.
@@ -304,10 +313,24 @@ impl ErClient {
         assertion: &DipAssertion,
         signature: &str,
     ) -> Result<RevocationResponse, ErError> {
+        self.revoke_from(assertion, signature, None).await
+    }
+
+    /// `POST /revocations` with the id the device saved before sending: the
+    /// same id again is a retry of a request whose answer was lost, and gets
+    /// that revocation's spare back - no second one is spent.
+    pub async fn revoke_from(
+        &self,
+        assertion: &DipAssertion,
+        signature: &str,
+        request_id: Option<&str>,
+    ) -> Result<RevocationResponse, ErError> {
         #[derive(Serialize)]
-        struct Req {
+        struct Req<'a> {
             assertion: DipAssertion,
             signature: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            request_id: Option<&'a str>,
         }
         let url = self.base_url.join("revocations")?;
         let response = self
@@ -316,6 +339,7 @@ impl ErClient {
             .json(&Req {
                 assertion: assertion.clone(),
                 signature: signature.to_string(),
+                request_id,
             })
             .timeout(Duration::from_secs(20))
             .send()
@@ -331,11 +355,15 @@ impl ErClient {
     }
 
     /// `GET /voters/eligible` - the current eligible vid list (A7).
-    pub async fn eligible(&self) -> Result<EligibleResponse, ErError> {
+    pub async fn eligible(&self, admin_token: &SecretString) -> Result<EligibleResponse, ErError> {
         let url = self.base_url.join("voters/eligible")?;
         let response = self
             .client
             .get(url)
+            .header(
+                "Authorization",
+                format!("Bearer {}", admin_token.expose_secret()),
+            )
             .timeout(Duration::from_secs(10))
             .send()
             .await
@@ -411,43 +439,6 @@ impl ErClient {
             Err(ErError::Http(status, body))
         }
     }
-
-    /// Like [`ErClient::verify_token`] but also presents the observed `comm_b`
-    /// so the ER can check the casting-token binding (Sec. 5.3.1.6).
-    pub async fn verify_token_with_comm_b(
-        &self,
-        token: &TokenValue,
-        expected_type: Option<&str>,
-        consume: bool,
-        comm_b: &CommB,
-        internal_token: &SecretString,
-    ) -> Result<VerifyTokenResponse, ErError> {
-        let url = self.base_url.join("tokens/verify")?;
-        let response = self
-            .client
-            .post(url)
-            .header(
-                "Authorization",
-                format!("Bearer {}", internal_token.expose_secret()),
-            )
-            .json(&VerifyTokenRequest {
-                token: token.clone(),
-                expected_type: expected_type.map(str::to_string),
-                consume,
-                comm_b: Some(*comm_b),
-            })
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
-            .map_err(ErError::Network)?;
-        let status = response.status();
-        let body = response.text().await.map_err(ErError::Network)?;
-        if status.is_success() {
-            serde_json::from_str(&body).map_err(ErError::Json)
-        } else {
-            Err(ErError::Http(status, body))
-        }
-    }
 }
 
 /// Response from `POST /devices/recover`.
@@ -472,6 +463,20 @@ pub struct RevocationResponse {
     pub vid: Vid,
     pub registration_token: TokenValue,
     pub credential_package: crate::protocol::acc::CredentialPackage,
+    #[serde(default)]
+    pub vid_holder: String,
+    #[serde(default = "spare_leaf")]
+    pub vid_kind: crate::protocol::merkle::LeafKind,
+    #[serde(default)]
+    pub vid_proof: Vec<crate::protocol::merkle::MerkleStep>,
+}
+
+fn voter_leaf() -> crate::protocol::merkle::LeafKind {
+    crate::protocol::merkle::LeafKind::Voter
+}
+
+fn spare_leaf() -> crate::protocol::merkle::LeafKind {
+    crate::protocol::merkle::LeafKind::Spare
 }
 
 /// Response from `GET /voters/eligible`.
@@ -483,7 +488,7 @@ pub struct EligibleResponse {
 /// Response from `POST /tokens/casting`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CastingTokensResponse {
-    pub casting_tokens: Vec<TokenValue>,
+    pub casting_tokens: Vec<crate::protocol::cat::CastingToken>,
 }
 
 /// Errors from the ER client.

@@ -76,9 +76,31 @@ async fn main() -> anyhow::Result<()> {
         entity_keys.push((entity_id, key));
     }
 
+    let log_key_path =
+        ceremony_dir.join(referendum_poc::protocol::setup::artifacts::WBB_LOG_PUBLIC_KEY_FILE);
+    let log_key = tokio::fs::read_to_string(&log_key_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", log_key_path.display()))
+        .and_then(|text| {
+            referendum_poc::protocol::tlog::log_key_from_base64(&text)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", log_key_path.display()))
+        })?;
+
+    // Validator keys are pinned from the operator's own board configuration
+    // in the ceremony directory - a local file, not something the board says.
+    let validator_keys = match std::fs::read_to_string(ceremony_dir.join("sunlight.yaml")) {
+        Ok(yaml) => referendum_poc::protocol::validators::pinned_keys_from_board_config(&yaml)
+            .map_err(|e| anyhow::anyhow!("sunlight.yaml: {e}"))?,
+        Err(_) => Vec::new(),
+    };
+    let log_origin = referendum_poc::protocol::tlog::log_origin_of(&wbb_url);
+
     let report = run_audit(AuditConfig {
         wbb_url,
         ca_pem,
+        log_key,
+        log_origin,
+        validator_keys,
         entity_keys,
         n_tt: settings.election.n_tt,
         t_tt: settings.election.t_tt,

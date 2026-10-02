@@ -136,7 +136,22 @@ async function refreshEntries() {
 // tally entries themselves.
 function renderResults() {
   const container = $("results");
-  const result = cachedEntries.find((r) => r.entry_type === "tally_result");
+  // Only a result the tabulation tellers really co-signed counts as the
+  // published outcome; the server decides that, from the signers.
+  const results = cachedEntries.filter(
+    (r) => r.entry_type === "tally_result" && r.tally_result_signed,
+  );
+  const disagree =
+    results.length > 1 &&
+    results.some(
+      (r) => JSON.stringify(r.payload) !== JSON.stringify(results[0].payload),
+    );
+  if (disagree) {
+    container.textContent =
+      "[!] The bulletin board carries more than one signed result, and they disagree. Report it.";
+    return;
+  }
+  const result = results[0];
   if (!result || !result.payload) {
     container.textContent = "No tally published yet.";
     return;
@@ -145,11 +160,19 @@ function renderResults() {
     ["tally_result", "tally_proof"].includes(r.entry_type),
   );
   const { blank, si, no } = result.payload;
-  container.innerHTML =
-    `<p><strong>Si: ${si}</strong> - <strong>No: ${no}</strong> - blank: ${blank}</p>` +
-    `<p>Published in log ${proofs
-      .map((r) => `entry #${r.leaf_index} (${r.entry_type})`)
-      .join(", ")} - co-signed by the tabulation tellers and verifiable with <code>referendum-auditor</code>.</p>`;
+  container.textContent = "";
+  const counts = document.createElement("p");
+  const strong = (text) => {
+    const el = document.createElement("strong");
+    el.textContent = text;
+    return el;
+  };
+  counts.append(strong(`Si: ${Number(si)}`), " - ", strong(`No: ${Number(no)}`), ` - blank: ${Number(blank)}`);
+  const where = document.createElement("p");
+  where.textContent = `Published in log ${proofs
+    .map((r) => `entry #${r.leaf_index} (${r.entry_type})`)
+    .join(", ")} - co-signed by the tabulation tellers and verifiable with referendum-auditor.`;
+  container.append(counts, where);
 }
 
 // The published proof carries the value the voter chose to open, after
@@ -166,39 +189,128 @@ function describeOpened(opened) {
   return `list level: ${one(opened.l1)}, candidate level: ${one(opened.l2)}`;
 }
 
+// Everything here comes from entries written by election authorities: it is
+// put on the page as TEXT only, and what an entry counts for is decided by
+// the server (`ballot_box`: typed decoding + the ballot box's own signature).
 function renderSearch(digest) {
   const container = $("search-result");
-  container.innerHTML = "";
-  const matches = cachedEntries.filter(
-    (row) => row.payload && row.payload.digest === digest,
-  );
-  if (matches.length === 0) {
+  container.textContent = "";
+  const about = (r) => r.ballot_box && r.ballot_box.digest === digest;
+  const valid = cachedEntries.filter((r) => about(r) && r.ballot_box.status === "valid");
+  const ignored = cachedEntries.filter((r) => about(r) && r.ballot_box.status === "ignored");
+  if (valid.length === 0 && ignored.length === 0) {
     container.textContent =
       "No entry found for this digest. If you just cast your ballot, refresh and retry.";
     return;
   }
-  const digests = matches.filter((r) => r.entry_type === "ballot_digest");
-  const cai = matches.filter((r) => r.entry_type === "cast_intended_proof");
-  const bbIds = [...new Set(digests.map((r) => r.payload.receipt?.bb_id))].sort();
+  const digests = valid.filter((r) => r.entry_type === "ballot_digest");
+  const cai = valid.filter((r) => r.entry_type === "cast_intended_proof");
+  const bbIds = [...new Set(digests.map((r) => r.ballot_box.bb_id))].sort();
 
   const summary = document.createElement("p");
   const noBot = bbIds.length >= 2;
-  summary.innerHTML =
-    `Published by ballot box(es) <strong>${bbIds.join(", ")}</strong> - ` +
+  summary.textContent =
+    `Published by ballot box(es) ${bbIds.join(", ") || "none"} - ` +
     (noBot
-      ? "[OK] accepted by at least 2 ballot boxes, as required for it to be counted."
-      : "[!] published by fewer than 2 ballot boxes: this ballot would be discarded at tally.") +
+      ? "[OK] accepted by at least 2 ballot boxes (acceptance alone does not make it count - see below)."
+      : "[!] published by only one ballot box: the other box has failed or never received it. The ballot still counts once confirmed, but casting again is safer.") +
     (cai.length > 0
-      ? ` [OK] cast-as-intended disclosure published by BB ${cai
-          .map((r) => r.payload.bb_id)
-          .sort()
-          .join(", ")} (confirmed at ${formatTimestamp(cai[0].payload.confirmed_at_ms)}; opened control values - ${describeOpened(cai[0].payload.opened)}). Compare them with the numbers your Vote App showed. Only confirmed ballots are counted.`
+      ? " Cast-as-intended disclosures are listed below: compare EVERY line with the numbers your Vote App showed."
       : " [!] No cast-as-intended disclosure yet - an unconfirmed ballot is NOT counted at tally.");
   container.appendChild(summary);
 
+  // Every confirmation is shown, never just one: a ballot box must not be
+  // able to show one value here and have another one audited.
+  //
+  // Two different claims are made by each line, and this page can check only
+  // one of them. The values a box STATES it opened are what it printed; what
+  // its DISCLOSURE really opens can only be settled against the released
+  // ballot, at the tally. So the disclosures are compared here - two
+  // different disclosures for one ballot are a report-it - and the stated
+  // values are never called correct.
+  const openedTexts = new Set();
+  const disclosures = new Set();
+  const perBox = new Map();
+  for (const row of cai) {
+    const opened = describeOpened(row.payload.opened);
+    openedTexts.add(opened);
+    disclosures.add(JSON.stringify(row.payload.disclosure ?? null));
+    perBox.set(row.ballot_box.bb_id, (perBox.get(row.ballot_box.bb_id) || 0) + 1);
+    const p = document.createElement("p");
+    p.textContent = `BB ${row.ballot_box.bb_id} (entry ${row.leaf_index}): published on the board at ${formatTimestamp(row.timestamp)} (the box says the voter confirmed at ${formatTimestamp(row.payload.confirmed_at_ms)}); states it opened - ${opened}`;
+    container.appendChild(p);
+  }
+  if (cai.length > 0) {
+    const p = document.createElement("p");
+    // What this page can check is what the entries SAY; what they actually
+    // open is settled against the released ballots at the tally. So it
+    // reports the disagreement and never predicts the auditor's verdict.
+    // The digest an entry STATES is the publisher's to choose, so entries
+    // gathered here may be about another ballot altogether: a dishonest box
+    // can file another voter's genuine disclosure under this digest. Whether
+    // a disclosure opens THIS ballot is settled only at the tally, so the
+    // page reports the divergence and does not pronounce on the vote.
+    if (disclosures.size > 1) {
+      p.textContent =
+        `[!] ${cai.length} confirmations state this digest and ${disclosures.size} of them carry different disclosures. A disclosure is tied to a ballot only at the tally, which names any box that stated a digest its disclosure does not open. Report it, and compare the values below with the numbers your Vote App showed.`;
+    } else if (openedTexts.size > 1) {
+      p.textContent =
+        "[!] The published confirmations state DIFFERENT values for the same disclosure, so at least one ballot box has published something the others did not. Report it: the tally judges each disclosure against the released ballot, and the audit names the box.";
+    } else if ([...perBox.values()].some((n) => n > 1)) {
+      p.textContent =
+        "[!] A ballot box published more than one confirmation for this ballot: check every line above.";
+    } else {
+      p.textContent = `${cai.length} confirmation(s), all STATING the same values and carrying the same disclosure. Compare the values with the numbers your Vote App showed; whether the disclosure really opens THIS ballot is settled at the tally.`;
+    }
+    container.appendChild(p);
+  }
+
+  // The same for what the ballot boxes say the ballot looks like.
+  const looks = new Set(
+    digests.map((r) => JSON.stringify([r.payload.emoji, r.payload.public_pin_emoji])),
+  );
+  if (looks.size > 1) {
+    const p = document.createElement("p");
+    p.textContent =
+      "[!] The ballot boxes DISAGREE on the emoji of this ballot. Report it - the audit names the box.";
+    container.appendChild(p);
+  }
+
+  // Counted = digest published by at least one ballot box AND a confirmation
+  // published by at least one (the tally's rule; one honest box suffices).
+  // Whether the confirmation is VALID is checked at tally against the
+  // released ballot - the auditor names a box whose confirmation is not.
+  if (cai.length > 0) {
+    const confirming = [...perBox.keys()].sort();
+    const p = document.createElement("p");
+    p.textContent =
+      bbIds.length > 0
+        ? `[OK] Published by ballot box(es) ${bbIds.join(", ")} and a cast-as-intended disclosure is published by ${confirming.join(", ")}. Whether that disclosure really opens this ballot is settled at the tally, which discards the ballot if it does not - and only a voter's last valid ballot counts. Only the voter's own app can tell you now.`
+        : `[!] A disclosure is published by ${confirming.join(", ")} but no ballot box published this ballot's digest: it is NOT counted as it stands.`;
+    container.appendChild(p);
+  }
+
+  for (const row of ignored) {
+    const p = document.createElement("p");
+    const signer = (row.entity_ids || []).join(", ") || "no verifiable signer";
+    p.textContent = `[!] Entry ${row.leaf_index} (${row.entry_type}, ${signer}) is ignored: ${row.ballot_box.reason}. Report it - the audit names the box.`;
+    container.appendChild(p);
+  }
+
   for (const row of digests) {
     const p = document.createElement("p");
-    p.innerHTML = `BB ${row.payload.receipt.bb_id}: emoji receipt <code>${(row.payload.emoji || []).join(" ")}</code>, received at ${formatTimestamp(row.payload.receipt.received_at_unix_ms)}`;
+    const code = (values) => {
+      const el = document.createElement("code");
+      el.textContent = (values || []).join(" ");
+      return el;
+    };
+    p.append(
+      `BB ${row.ballot_box.bb_id}: emoji receipt `,
+      code(row.payload.emoji),
+      " public PIN emoji ",
+      code(row.payload.public_pin_emoji),
+      ` published on the board at ${formatTimestamp(row.timestamp)} (the box says it received it at ${formatTimestamp(row.payload.receipt.received_at_unix_ms)})`,
+    );
     container.appendChild(p);
   }
 }

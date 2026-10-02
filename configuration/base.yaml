@@ -14,11 +14,12 @@ seeds:
   master_seed: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 
 clock:
-  # `logical`: base_ms + tick * tick_ms, reproducible (test suite, golden
-  # artifacts). `wall`: real Unix time (demo, deployments; the WBB then
-  # enforces its +/- 5 minute freshness window). `setup-ceremony --clock`
-  # or APP_CLOCK__MODE override it.
-  mode: logical
+  # `wall`: real Unix time (the shipped default; the WBB then enforces its
+  # +/- 5 minute freshness window). `logical`: base_ms + tick * tick_ms,
+  # reproducible - the test suite and the golden artifacts ask for it by
+  # name, and it never runs a real election. `setup-ceremony --clock` or
+  # APP_CLOCK__MODE override it.
+  mode: wall
   base_ms: 1700000000000
   tick_ms: 1000
 

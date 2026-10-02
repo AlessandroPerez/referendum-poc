@@ -17,6 +17,15 @@ pub struct DipAssertion {
     pub fiscal_id: String,
     pub name: String,
     pub assurance: String,
+    /// Relying party the login is for (thesis A5).
+    #[serde(default)]
+    pub audience: String,
+    /// One-time value, accepted by the electoral roll once.
+    #[serde(default)]
+    pub nonce: String,
+    /// Issue time, Unix ms.
+    #[serde(default)]
+    pub issued_at_ms: u64,
 }
 
 /// Response from `POST /authenticate`.

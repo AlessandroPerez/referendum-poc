@@ -2,7 +2,6 @@
 //!
 //! Implements:
 //!   - `POST /sign`       - Ed25519-sign a WBB data string.
-//!   - `POST /decoy`      - generate a decoy credential builder + ruse PIN.
 //!   - `GET  /status`     - readiness + entity id.
 //!
 //! The service loads its DKG share and reconstructs its
@@ -10,7 +9,6 @@
 //! threshold math.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::{
@@ -26,7 +24,9 @@ use dlog_group::ristretto::RistrettoGroup;
 use ed25519_dalek::{Signer, SigningKey};
 use evoting::api::prelude::{ThresholdDvRound1Broadcast, ThresholdDvRound1State};
 use evoting::api::server::bb::ElectionContext;
-use evoting::api::server::rt::{AccShareBroadcast, ThresholdRegistrationTeller};
+use evoting::api::server::rt::{
+    AccShareBroadcast, AccShareCommitments, ThresholdRegistrationTeller,
+};
 use rand_chacha::ChaCha20Rng;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -37,8 +37,8 @@ use crate::actors::common::{health_router, serve_rustls, with_state};
 use crate::configuration::Settings;
 use crate::domain::{TokenValue, Vid};
 use crate::protocol::acc::{load_rt_share, reconstruct_rt_teller, RtCredentialShare};
-use crate::protocol::clock::Clock;
-use crate::protocol::rng::{operation_rng, ActorSeed};
+use crate::protocol::clock::{Clock, ClockMode};
+use crate::protocol::rng::ActorSeed;
 use crate::protocol::tls::{reqwest_client_trusting_ca, rustls_config_for_service};
 
 /// RT service state.
@@ -48,15 +48,15 @@ pub struct RtState {
     rt_id: usize,
     signing_key_seed: SecretString,
     service_token: SecretString,
-    actor_seed: ActorSeed,
     election_context: ElectionContext<RistrettoGroup>,
     rt_pk: evoting::api::prelude::RTPublicKey<RistrettoGroup>,
     share_path: std::path::PathBuf,
     clock: Clock,
-    decoy_counter: Arc<AtomicU64>,
-    dvnizkp_counter: Arc<AtomicU64>,
-    tau_counter: Arc<AtomicU64>,
-    controls_counter: Arc<AtomicU64>,
+    /// Durable per-purpose nonce counters (Sec. 3.9 step 15, A7): the seed on
+    /// disk is the same after a restart, so the counter has to be too.
+    nonces: Arc<crate::protocol::rng::NonceLedger>,
+    /// Bounds of tau in seconds (clock ticks on the logical clock).
+    tau_range: (u64, u64),
     /// This teller's OWN credential shares, indexed by credential (vid - 1).
     credential_shares: Vec<RtCredentialShare>,
     /// Clients to the ER (token verification) and NS (readiness notify);
@@ -99,9 +99,36 @@ impl std::fmt::Debug for RtState {
 #[derive(Debug, Clone)]
 struct PendingCredentialRequest {
     rid: String,
-    /// tau delay in clock ticks, sampled from {2..5} (Sec. 5.3.1.3).
-    #[allow(dead_code)]
-    tau_ticks: u64,
+    /// When the waiting period of this request is over (Sec. 5.3.1.3-5).
+    gate: TauGate,
+}
+
+/// The waiting period tau between a PIN request and the moment the teller
+/// notifies the voter and releases its share (Sec. 5.3.1.3-5).
+///
+/// On the wall clock the gate opens `tau` seconds after the request. On the
+/// reproducible logical clock nothing advances by itself, so there is nothing
+/// to wait for: the gate is open from the start (tau is still sampled and
+/// reported, so the RNG stream and the API are the same in both modes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TauGate {
+    ready_at_ms: u64,
+}
+
+impl TauGate {
+    fn new(mode: ClockMode, now_ms: u64, tau_s: u64) -> Self {
+        let ready_at_ms = match mode {
+            ClockMode::Wall => now_ms.saturating_add(tau_s.saturating_mul(1000)),
+            ClockMode::Logical => 0,
+        };
+        Self { ready_at_ms }
+    }
+
+    /// How long until the gate opens, if it is still closed at `now_ms`.
+    fn remaining(&self, now_ms: u64) -> Option<std::time::Duration> {
+        (now_ms < self.ready_at_ms)
+            .then(|| std::time::Duration::from_millis(self.ready_at_ms - now_ms))
+    }
 }
 
 struct Round1Session {
@@ -115,11 +142,12 @@ impl RtState {
         rt_id: usize,
         signing_key: SigningKey,
         service_token: SecretString,
-        actor_seed: ActorSeed,
         election_context: ElectionContext<RistrettoGroup>,
         rt_pk: evoting::api::prelude::RTPublicKey<RistrettoGroup>,
         share_path: std::path::PathBuf,
+        nonces: Arc<crate::protocol::rng::NonceLedger>,
         clock: Clock,
+        tau_range: (u64, u64),
         credential_shares: Vec<RtCredentialShare>,
         er_client: Option<crate::clients::er::ErClient>,
         ns_client: Option<crate::clients::ns::NsClient>,
@@ -130,15 +158,12 @@ impl RtState {
             rt_id,
             signing_key_seed: SecretString::new(hex::encode(signing_key.to_bytes())),
             service_token,
-            actor_seed,
             election_context,
             rt_pk,
             share_path,
             clock,
-            decoy_counter: Arc::new(AtomicU64::new(0)),
-            dvnizkp_counter: Arc::new(AtomicU64::new(0)),
-            tau_counter: Arc::new(AtomicU64::new(0)),
-            controls_counter: Arc::new(AtomicU64::new(0)),
+            nonces,
+            tau_range,
             credential_shares,
             er_client,
             ns_client,
@@ -158,11 +183,6 @@ impl RtState {
         SigningKey::from_bytes(&seed)
     }
 
-    fn next_decoy_rng(&self) -> ChaCha20Rng {
-        let counter = self.decoy_counter.fetch_add(1, Ordering::SeqCst);
-        operation_rng(&self.actor_seed, "decoy", counter)
-    }
-
     fn require_bearer(&self, headers: &HeaderMap) -> Result<(), RtError> {
         let expected = self.service_token.expose_secret();
         let header = headers
@@ -179,19 +199,15 @@ impl RtState {
         Ok(())
     }
 
-    fn next_dvnizkp_rng(&self) -> ChaCha20Rng {
-        let counter = self.dvnizkp_counter.fetch_add(1, Ordering::SeqCst);
-        operation_rng(&self.actor_seed, "dvnizkp", counter)
-    }
-
-    fn next_tau_rng(&self) -> ChaCha20Rng {
-        let counter = self.tau_counter.fetch_add(1, Ordering::SeqCst);
-        operation_rng(&self.actor_seed, "tau", counter)
-    }
-
-    fn next_controls_rng(&self) -> ChaCha20Rng {
-        let counter = self.controls_counter.fetch_add(1, Ordering::SeqCst);
-        operation_rng(&self.actor_seed, "controls", counter)
+    /// A one-off RNG for `purpose`, with the counter PERSISTED before the
+    /// nonces are drawn: see [`NonceLedger`]. An in-memory counter would
+    /// restart at zero after a crash and hand a peer teller two proofs over
+    /// one nonce, which is that teller's secret.
+    async fn next_rng(&self, purpose: &str) -> Result<ChaCha20Rng, RtError> {
+        self.nonces
+            .next(purpose)
+            .await
+            .map_err(|e| RtError::Internal(format!("nonce ledger: {e}")))
     }
 
     fn er_client(&self) -> Result<&crate::clients::er::ErClient, RtError> {
@@ -200,13 +216,13 @@ impl RtState {
             .ok_or_else(|| RtError::Internal("ER peer not configured".into()))
     }
 
-    fn my_share_broadcast(
-        &self,
-        credential_index: usize,
-    ) -> Result<AccShareBroadcast<RistrettoGroup>, RtError> {
+    fn my_share_broadcast(&self, credential_index: usize) -> Result<DeliveredShare, RtError> {
         self.credential_shares
             .get(credential_index)
-            .map(|c| c.share.clone())
+            .map(|c| DeliveredShare {
+                share: c.share.clone(),
+                share_commitments: c.share_commitments.clone(),
+            })
             .ok_or_else(|| {
                 RtError::Internal(format!("credential index {credential_index} out of range"))
             })
@@ -271,33 +287,6 @@ async fn sign_handler(
 }
 
 #[derive(Debug, Serialize)]
-pub struct DecoyResponse {
-    pub builder: evoting::api::prelude::VotingCredentialBuilder<RistrettoGroup>,
-    pub pin: usize,
-}
-
-async fn decoy_handler(
-    Extension(state): Extension<Arc<RtState>>,
-    headers: HeaderMap,
-) -> Result<Json<DecoyResponse>, RtError> {
-    state.require_bearer(&headers)?;
-    let mut rng = state.next_decoy_rng();
-    let election_context = state.election_context.clone();
-    let rt_pk = state.rt_pk.clone();
-    let share_path = state.share_path.clone();
-
-    let (builder, pin) = tokio::task::spawn_blocking(move || {
-        let share = load_rt_share(&share_path).map_err(|e| RtError::Internal(e.to_string()))?;
-        let teller = reconstruct_rt_teller(share, &election_context, &rt_pk);
-        Ok::<_, RtError>(teller.gen_decoy_builder(&mut rng))
-    })
-    .await
-    .map_err(|e| RtError::Internal(e.to_string()))??;
-
-    Ok(Json(DecoyResponse { builder, pin }))
-}
-
-#[derive(Debug, Serialize)]
 pub struct StatusResponse {
     pub entity_id: String,
     pub status: &'static str,
@@ -319,15 +308,16 @@ struct CredentialsRequestReq {
 
 #[derive(Debug, Serialize)]
 struct CredentialsRequestResp {
-    /// Sampled tau delay in clock ticks (Sec. 5.3.1.3).
+    /// Sampled waiting period tau in seconds - one tick on the logical clock
+    /// (Sec. 5.3.1.3).
     tau_ticks: u64,
 }
 
 /// `POST /credentials/request` - record a PIN request (Sec. 5.3.1.3).
 ///
 /// The RT verifies and consumes the ER-issued PIN-request token, records the
-/// `(vid, rid)` pair, samples tau in {2..5} ticks with its seeded RNG, and
-/// notifies the NS immediately (tau is recorded, not waited for).
+/// `(vid, rid)` pair, samples the waiting period tau with its seeded RNG, and
+/// notifies the NS once tau has elapsed (at once on the logical clock).
 async fn credentials_request_handler(
     Extension(state): Extension<Arc<RtState>>,
     Json(req): Json<CredentialsRequestReq>,
@@ -345,21 +335,47 @@ async fn credentials_request_handler(
         return Err(RtError::Unauthorized);
     }
 
-    let mut tau_rng = state.next_tau_rng();
-    let tau_ticks = state.clock.sample_tau(&mut tau_rng, 2, 5);
+    let mut tau_rng = state.next_rng("tau").await?;
+    let tau_ticks = state
+        .clock
+        .sample_tau(&mut tau_rng, state.tau_range.0, state.tau_range.1);
+    let gate = TauGate::new(state.clock.mode(), state.clock.now_ms(), tau_ticks);
 
     state.pending.lock().await.insert(
         vid,
         PendingCredentialRequest {
             rid: req.rid.clone(),
-            tau_ticks,
+            gate,
         },
     );
 
-    if let Some(ns) = &state.ns_client {
-        ns.notify(vid, &req.rid, &state.entity_id)
-            .await
-            .map_err(|e| RtError::Internal(format!("NS notify failed: {e}")))?;
+    // Sec. 5.3.1.4: the teller tells the notification service only AFTER tau.
+    if let Some(ns) = state.ns_client.clone() {
+        match gate.remaining(state.clock.now_ms()) {
+            // Logical clock: nothing to wait for, notify within the request.
+            None => ns
+                .notify(vid, &req.rid, &state.entity_id)
+                .await
+                .map_err(|e| RtError::Internal(format!("NS notify failed: {e}")))?,
+            Some(wait) => {
+                let (rid, entity_id) = (req.rid.clone(), state.entity_id.clone());
+                tracing::info!(%vid, tau_s = tau_ticks, "PIN request recorded; notifying after tau");
+                tokio::spawn(async move {
+                    tokio::time::sleep(wait).await;
+                    // Nobody waits on this task: retry a few times rather
+                    // than leave the voter without a notification.
+                    for attempt in 1..=5u32 {
+                        match ns.notify(vid, &rid, &entity_id).await {
+                            Ok(_) => return,
+                            Err(e) => {
+                                tracing::error!(%vid, attempt, error = %e, "NS notify after tau failed");
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            }
+                        }
+                    }
+                });
+            }
+        }
     }
 
     Ok(Json(CredentialsRequestResp { tau_ticks }))
@@ -376,10 +392,13 @@ struct CredentialsDeliverReq {
 async fn credentials_deliver_handler(
     Extension(state): Extension<Arc<RtState>>,
     Json(req): Json<CredentialsDeliverReq>,
-) -> Result<Json<AccShareBroadcast<RistrettoGroup>>, RtError> {
+) -> Result<Json<DeliveredShare>, RtError> {
+    // Check the token WITHOUT consuming it first: a request that comes before
+    // tau has elapsed is noted but not answered, and the app retries with the
+    // same token (Sec. 5.3.1.5 step 1).
     let verification = state
         .er_client()?
-        .verify_token(&req.token, Some("retrieval"), true, &state.internal_token)
+        .verify_token(&req.token, Some("retrieval"), false, &state.internal_token)
         .await
         .map_err(|e| RtError::Internal(format!("ER token verification failed: {e}")))?;
     if !verification.valid {
@@ -393,12 +412,38 @@ async fn credentials_deliver_handler(
     if verification.rid.as_deref() != Some(request.rid.as_str()) {
         return Err(RtError::Unauthorized);
     }
+    if let Some(wait) = request.gate.remaining(state.clock.now_ms()) {
+        tracing::info!(%vid, remaining_ms = wait.as_millis() as u64, "delivery before tau: refused");
+        return Err(RtError::TooEarly);
+    }
     drop(pending);
+
+    // The waiting period is over: now the token is spent.
+    let consumed = state
+        .er_client()?
+        .verify_token(&req.token, Some("retrieval"), true, &state.internal_token)
+        .await
+        .map_err(|e| RtError::Internal(format!("ER token verification failed: {e}")))?;
+    if !consumed.valid {
+        return Err(RtError::Unauthorized);
+    }
 
     // Credential index is fixed by the vid assignment (vid i <-> package i-1).
     let share = state.my_share_broadcast((vid.value() - 1) as usize)?;
     state.dv_sessions.lock().await.insert(req.token, vid);
     Ok(Json(share))
+}
+
+/// What a registration teller hands the voter's app at delivery: its own
+/// share and the dealers' commitments the app checks it against (Sec. 3.6.1
+/// step 9 sends the share WITH its proof, and step 11 has the app check it).
+///
+/// The commitments never travel through the roll: their constant term is
+/// `g3^x`, which the protocol keeps encrypted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliveredShare {
+    pub share: AccShareBroadcast<RistrettoGroup>,
+    pub share_commitments: AccShareCommitments<RistrettoGroup>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -431,7 +476,7 @@ async fn dvnizkp_round1_handler(
         return Err(RtError::Unauthorized);
     }
 
-    let mut rng = state.next_dvnizkp_rng();
+    let mut rng = state.next_rng("dvnizkp").await?;
     let teller = state.build_teller()?;
     let a = req.a;
     let token = req.token;
@@ -500,7 +545,7 @@ async fn controls_round1_handler(
 ) -> Result<Json<evoting::api::prelude::PartialControlBroadcast<RistrettoGroup>>, RtError> {
     state.require_bearer(&headers)?;
     let teller = state.build_teller()?;
-    let mut rng = state.next_controls_rng();
+    let mut rng = state.next_rng("controls").await?;
     let votes = req.votes;
     let (votes, control_state, broadcast) = tokio::task::spawn_blocking(move || {
         let (control_state, broadcast) = teller.gen_controls_round1(&votes, &mut rng);
@@ -553,6 +598,8 @@ enum RtError {
     Unauthorized,
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("the waiting period of this PIN request is not over yet")]
+    TooEarly,
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -563,6 +610,7 @@ impl IntoResponse for RtError {
             Self::Json(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            Self::TooEarly => (StatusCode::TOO_EARLY, self.to_string()),
             // Internal failures are logged but not leaked.
             Self::Internal(_) => {
                 tracing::error!(error = %self, "rt-server internal error");
@@ -580,7 +628,6 @@ pub fn router(state: Arc<RtState>) -> Router {
     with_state(
         health_router()
             .route("/sign", post(sign_handler))
-            .route("/decoy", post(decoy_handler))
             .route("/status", get(status_handler))
             .route("/credentials/request", post(credentials_request_handler))
             .route("/credentials/deliver", post(credentials_deliver_handler))
@@ -628,16 +675,35 @@ pub async fn build_service(
         share.id
     };
     let credential_shares = load_credential_shares(&settings, rt_id).await?;
+    // An empty range would panic inside a request, after the voter's token
+    // was already spent: refuse to start instead.
+    let tau_range = settings
+        .election
+        .tau_range()
+        .map_err(|e| anyhow::anyhow!(e))?;
+    // The nonce counters live beside this teller's share file, so a restart
+    // finds them where it finds the seed they pace (Sec. 3.9 step 15, A7).
+    let nonce_path = share_path.with_file_name(format!("rt-{rt_id}-nonce-ledger.json"));
+    // Fresh entropy in every nonce on a real run: a ledger restored from an
+    // older backup cannot then replay one (the counter alone cannot tell a
+    // rollback from the truth). The logical clock keeps the stream
+    // reproducible for the harness.
+    let fresh_entropy = matches!(clock.mode(), crate::protocol::clock::ClockMode::Wall);
+    let nonces = Arc::new(
+        crate::protocol::rng::NonceLedger::open(nonce_path, actor_seed.clone(), fresh_entropy)
+            .await?,
+    );
     let state = Arc::new(RtState::new(
         entity_id,
         rt_id,
         signing_key,
         service_token,
-        actor_seed,
         election_context,
         rt_pk,
         share_path,
+        nonces,
         clock,
+        tau_range,
         credential_shares,
         er_client,
         ns_client,
@@ -780,4 +846,41 @@ pub async fn build_client(settings: &Settings) -> anyhow::Result<reqwest::Client
         .await
         .map_err(|e| anyhow::anyhow!("failed to read CA cert: {e}"))?;
     reqwest_client_trusting_ca(&ca_pem).map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tau_gate_tests {
+    use super::*;
+
+    #[test]
+    fn wall_clock_gate_opens_after_tau_seconds() {
+        let now = 1_789_000_000_000u64;
+        let gate = TauGate::new(ClockMode::Wall, now, 3);
+        assert_eq!(
+            gate.remaining(now),
+            Some(std::time::Duration::from_secs(3)),
+            "closed for the whole waiting period"
+        );
+        assert_eq!(
+            gate.remaining(now + 2_999),
+            Some(std::time::Duration::from_millis(1))
+        );
+        assert_eq!(gate.remaining(now + 3_000), None, "open exactly at tau");
+        assert_eq!(gate.remaining(now + 60_000), None);
+    }
+
+    #[test]
+    fn logical_clock_gate_is_always_open() {
+        // Nothing advances a logical clock while a request waits: gating on
+        // it would block delivery forever, so there is no waiting period.
+        let gate = TauGate::new(ClockMode::Logical, 1_700_000_000_000, 5);
+        assert_eq!(gate.remaining(1_700_000_000_000), None);
+        assert_eq!(gate.remaining(0), None);
+    }
+
+    #[test]
+    fn a_huge_tau_cannot_overflow() {
+        let gate = TauGate::new(ClockMode::Wall, u64::MAX - 10, u64::MAX);
+        assert!(gate.remaining(u64::MAX - 10).is_some());
+    }
 }

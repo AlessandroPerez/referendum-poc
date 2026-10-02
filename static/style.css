@@ -250,6 +250,24 @@ button:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
 
 /* Control values shown after casting. */
 .control { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-top: 0.75rem; }
+/* A copy icon beside the value it copies, inside the same block. */
+/* Tap a value to copy it: it flashes blue and a toast says what was copied. */
+.copy-on-click { cursor: pointer; transition: background 0.25s, color 0.25s; }
+.copy-on-click:focus-visible { outline: 2px solid var(--accent); }
+.copy-on-click.flash { background: #1e88e5; color: white; }
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.5rem;
+  transform: translateX(-50%);
+  background: #1e88e5;
+  color: white;
+  padding: 0.6rem 1rem;
+  border-radius: 0.6rem;
+  font-size: 0.95rem;
+  box-shadow: 0 2px 8px #0006;
+  z-index: 100;
+}
 .control-value {
   display: flex;
   flex-direction: column;
@@ -261,3 +279,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
 }
 .control-value strong { font-size: 1.8rem; letter-spacing: 0.1em; font-variant-numeric: tabular-nums; }
 .control-value.opened { border-color: var(--ok); background: #26a26922; }
+/* The control values ARE the cast-as-intended choice: tap one to open it. */
+.control-value[role="radio"] { cursor: pointer; }
+.control-value[role="radio"]:focus-visible { outline: 2px solid var(--accent); }
+.control-value[role="radio"][aria-checked="true"] { border-color: var(--accent); background: var(--accent); color: white; }

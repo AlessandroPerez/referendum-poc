@@ -3,16 +3,16 @@
 use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use dlog_group::group::GroupScalar;
 use dlog_group::ristretto::RistrettoGroup;
-use dlog_group::serde::ScalarHelper;
+use dlog_sigma_primitives::elgamal::ciphertext::Ciphertext;
 use evoting::api::prelude::{
-    CredentialControlProof, EncrChoice, VerifiableFingerprints, VerifiablePartialDecryption, Vote,
-    ZetaVssBroadcast,
+    BlindingShare, ThresholdFingerprints, VerifiablePartialDecryption, ZetaCommitments,
 };
 use reqwest::{Client, StatusCode, Url};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
+use crate::protocol::tally::SignedZetaVssBroadcast;
 
 type G = RistrettoGroup;
 
@@ -136,7 +136,9 @@ impl TtClient {
     }
 
     /// `POST /vss/zeta/round1` - open a zeta VSS session (Sec. 3.9 step 6).
-    pub async fn zeta_round1(&self, session: &str) -> Result<ZetaVssBroadcast<G>, TtError> {
+    /// The broadcast comes back under the teller's ceremony-pinned signature:
+    /// this driver only relays it (deviation 25) and cannot produce one.
+    pub async fn zeta_round1(&self, session: &str) -> Result<SignedZetaVssBroadcast<G>, TtError> {
         self.post_json(
             "vss/zeta/round1",
             &serde_json::json!({ "session": session }),
@@ -145,23 +147,22 @@ impl TtClient {
     }
 
     /// `POST /vss/zeta/combine` - combine broadcasts into this party's
-    /// sub-share (Sec. 3.9 step 6); consumes the session.
+    /// sub-share (Sec. 3.9 step 6); consumes the session. The sub-share stays
+    /// with the teller: the answer is only its id.
     pub async fn zeta_combine(
         &self,
         session: &str,
-        broadcasts: &[ZetaVssBroadcast<G>],
-    ) -> Result<(usize, <G as GroupScalar>::Scalar), TtError> {
+        broadcasts: &[SignedZetaVssBroadcast<G>],
+    ) -> Result<usize, TtError> {
         #[derive(Serialize)]
         #[serde(bound = "")]
         struct Request<'a> {
             session: &'a str,
-            broadcasts: &'a [ZetaVssBroadcast<G>],
+            broadcasts: &'a [SignedZetaVssBroadcast<G>],
         }
         #[derive(Deserialize)]
         struct Response {
             id: usize,
-            #[serde(with = "ScalarHelper::<G>")]
-            sub_share: <G as GroupScalar>::Scalar,
         }
         let response: Response = self
             .post_json(
@@ -172,40 +173,71 @@ impl TtClient {
                 },
             )
             .await?;
-        Ok((response.id, response.sub_share))
+        Ok(response.id)
+    }
+
+    /// `POST /blind` - this teller raises `ct_lists` to its zeta sub-share of
+    /// `session` and proves it (Sec. 3.9 steps 7, 20, 24). `transcript` is
+    /// one of `ox`, `acc`, `credential_fingerprints`.
+    pub async fn blind(
+        &self,
+        commitments: &[ZetaCommitments<G>],
+        ct_lists: &[Vec<Ciphertext<G>>],
+        transcript: &str,
+    ) -> Result<BlindingShare<G>, TtError> {
+        #[derive(Serialize)]
+        #[serde(bound = "")]
+        struct Request<'a> {
+            commitments: &'a [ZetaCommitments<G>],
+            ct_lists: &'a [Vec<Ciphertext<G>>],
+            transcript: &'a str,
+        }
+        self.post_json(
+            "blind",
+            &Request {
+                commitments,
+                ct_lists,
+                transcript,
+            },
+        )
+        .await
+    }
+
+    /// The body every blinding-backed decryption takes: the artifact, the
+    /// lists it was built over, and which step of the pipeline it belongs to.
+    /// A teller decrypts only what its own blinding produced.
+    fn blinded_request<'a>(
+        fps: &'a ThresholdFingerprints<G>,
+        originals: &'a [Vec<Ciphertext<G>>],
+        transcript: &'a str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "fps": fps,
+            "originals": originals,
+            "transcript": transcript,
+        })
     }
 
     /// `POST /decrypt/ox` - per-party ox-fingerprint decryptions.
     pub async fn decrypt_ox(
         &self,
-        fps: &VerifiableFingerprints<G>,
+        fps: &ThresholdFingerprints<G>,
+        originals: &[Vec<Ciphertext<G>>],
     ) -> Result<Vec<VerifiablePartialDecryption<G>>, TtError> {
-        self.post_json("decrypt/ox", &serde_json::json!({ "fps": fps }))
+        self.post_json("decrypt/ox", &Self::blinded_request(fps, originals, "ox"))
             .await
     }
 
-    /// `POST /decrypt/acc-checks` - per-party ACC-check decryptions.
+    /// `POST /decrypt/acc-checks` - per-party decryptions of the BLINDED
+    /// credential checks (Sec. 3.9 step 22).
     pub async fn decrypt_acc_checks(
         &self,
-        votes: &[Vote<G>],
-        controls: &[CredentialControlProof<G>],
-        zeta: <G as GroupScalar>::Scalar,
+        fps: &ThresholdFingerprints<G>,
+        originals: &[Vec<Ciphertext<G>>],
     ) -> Result<Vec<VerifiablePartialDecryption<G>>, TtError> {
-        #[derive(Serialize)]
-        #[serde(bound = "")]
-        struct Request<'a> {
-            votes: &'a [Vote<G>],
-            controls: &'a [CredentialControlProof<G>],
-            #[serde(with = "ScalarHelper::<G>")]
-            zeta: <G as GroupScalar>::Scalar,
-        }
         self.post_json(
             "decrypt/acc-checks",
-            &Request {
-                votes,
-                controls,
-                zeta,
-            },
+            &Self::blinded_request(fps, originals, "acc"),
         )
         .await
     }
@@ -213,7 +245,8 @@ impl TtClient {
     /// `POST /decrypt/fps` - per-party credential-fingerprint decryptions.
     pub async fn decrypt_fps(
         &self,
-        fps: &VerifiableFingerprints<G>,
+        fps: &ThresholdFingerprints<G>,
+        originals: &[Vec<Ciphertext<G>>],
     ) -> Result<
         (
             Vec<VerifiablePartialDecryption<G>>,
@@ -228,16 +261,20 @@ impl TtClient {
             vote_fps: Vec<VerifiablePartialDecryption<G>>,
         }
         let response: Response = self
-            .post_json("decrypt/fps", &serde_json::json!({ "fps": fps }))
+            .post_json(
+                "decrypt/fps",
+                &Self::blinded_request(fps, originals, "credential_fingerprints"),
+            )
             .await?;
         Ok((response.pub_fps, response.vote_fps))
     }
 
     /// `POST /decrypt/tally` - per-party tally decryptions.
     #[allow(clippy::type_complexity)]
+    /// The teller takes NOTHING here: it recomputes what it decrypts from the
+    /// published artifacts (Sec. 3.9 steps 28-29).
     pub async fn decrypt_tally(
         &self,
-        enc_tally: &EncrChoice<G>,
     ) -> Result<
         (
             Vec<VerifiablePartialDecryption<G>>,
@@ -252,10 +289,7 @@ impl TtClient {
             l2: Vec<Vec<VerifiablePartialDecryption<G>>>,
         }
         let response: Response = self
-            .post_json(
-                "decrypt/tally",
-                &serde_json::json!({ "enc_tally": enc_tally }),
-            )
+            .post_json("decrypt/tally", &serde_json::json!({}))
             .await?;
         Ok((response.l1, response.l2))
     }
