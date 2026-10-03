@@ -73,7 +73,7 @@
       "\ud83d\udc9a"
     ]
   ],
-  "checkpoint_root": "8rjk/m3XQrWDLVkCjYET6ZCOesUxGFye7eLIafAdXuY=",
+  "checkpoint_root": "lD4INSWoJxkQanuchlNvxmXPUa2VFZu6NlbHbbXVFRc=",
   "election_context_sha256": "8092e07f9cfc62d35afaa2edaac33d1ee06fb39da186ecad7ca2eac0bd39d2ff",
   "entries": [
     {
@@ -482,7 +482,7 @@
       "phase": "tallying"
     },
     {
-      "data_sha256": "7bfb1905852e885d0e974a23f061438fad58731c9f398e751f4c6a2575ed55fe",
+      "data_sha256": "e62df0ed740e2d93e1759c0c41da6daf1ac25173722c6918e3dde248ed7eeb94",
       "entry_type": "re_encryption_proof",
       "phase": "tallying"
     },

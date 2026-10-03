@@ -355,14 +355,27 @@ fn init_checkpoints_db(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Serializes the full-cluster e2e tests.  Each spawns ~a dozen servers on
-/// ports found by bind-then-release (`free_port`), and two clusters booting
-/// concurrently in one process can steal each other's just-released ports
-/// (the documented port race).  Holding this guard for the duration of a
-/// cluster test removes the intra-process race entirely.
-pub async fn cluster_guard() -> tokio::sync::MutexGuard<'static, ()> {
-    static CLUSTER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    CLUSTER_LOCK.lock().await
+/// Bounds how many full-cluster e2e tests run at once: `E2E_PARALLEL`
+/// (default 1, i.e. one after another). Each cluster spawns ~a dozen servers;
+/// their ports come from `free_port`'s per-process counter in a private range,
+/// so concurrent clusters never get the same port. The bound is about CPU:
+/// the tests time real protocol work, and too many clusters at once on a
+/// small machine would only make them slow and their timing bounds noisy.
+pub async fn cluster_guard() -> tokio::sync::SemaphorePermit<'static> {
+    use std::sync::OnceLock;
+    static CLUSTERS: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+    CLUSTERS
+        .get_or_init(|| {
+            let parallel = std::env::var("E2E_PARALLEL")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|n| (1..=16).contains(n))
+                .unwrap_or(1);
+            tokio::sync::Semaphore::new(parallel)
+        })
+        .acquire()
+        .await
+        .expect("the cluster semaphore is never closed")
 }
 
 /// Allocate a port for a cluster service.
@@ -471,7 +484,7 @@ pub struct ElectionPorts {
 }
 
 pub struct ElectionCluster {
-    _guard: tokio::sync::MutexGuard<'static, ()>,
+    _guard: tokio::sync::SemaphorePermit<'static>,
     temp: tempfile::TempDir,
     pub wbb: WbbProcess,
     pub wbb_url: Url,
@@ -911,6 +924,23 @@ impl ElectionCluster {
     ) -> Result<TallyOutcome, referendum_poc::actors::admin::AdminError> {
         let er_url = Url::parse(&format!("https://127.0.0.1:{}/", self.ports.er)).unwrap();
         self.try_tally_with(er_url, bb_urls).await
+    }
+
+    /// The tally over `bb_urls`, talking to the board through `wbb_url`.
+    pub async fn try_tally_with_boxes_and_board(
+        &self,
+        bb_urls: Vec<Url>,
+        wbb_url: Url,
+    ) -> Result<TallyOutcome, referendum_poc::actors::admin::AdminError> {
+        let url = |p: &u16| Url::parse(&format!("https://127.0.0.1:{p}/")).unwrap();
+        self.try_tally_with_all(
+            url(&self.ports.er),
+            bb_urls,
+            self.ports.tt.iter().map(url).collect(),
+            wbb_url,
+            Vec::new(),
+        )
+        .await
     }
 
     /// The tally over `bb_urls`, with the operator proceeding without the

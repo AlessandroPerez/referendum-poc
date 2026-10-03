@@ -672,14 +672,7 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
             // the board refuses a timestamp outside its window, and a cut-off
             // submission may be resumed long after the first run.
             let outbox = resign_pending(&cfg, &http, &saved.outbox, &already, &mut clock).await?;
-            flush_publications(
-                &wbb,
-                &outbox,
-                &already,
-                &cfg.ceremony_dir,
-                saved.release_cut,
-            )
-            .await?;
+            flush_publications(&wbb, &outbox, &already, &cfg.ceremony_dir, None).await?;
             return Ok(saved.outcome);
         }
         // Cut off BEFORE the tally decryption. Everything the tail needs is
@@ -708,14 +701,7 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
         // be finished before it looks. Without this a single lost submission
         // strands the election for good - the board is append-only and the
         // pipeline cannot be re-run over it.
-        flush_publications(
-            &wbb,
-            &outbox,
-            &already,
-            &cfg.ceremony_dir,
-            saved.release_cut,
-        )
-        .await?;
+        flush_publications(&wbb, &outbox, &already, &cfg.ceremony_dir, None).await?;
         let outcome = saved.outcome;
         return finish_tally(
             FinishTally {
@@ -863,6 +849,8 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
         .unwrap_or(0);
     let mut from_board: std::collections::HashSet<(crate::domain::BallotDigest, u64)> =
         std::collections::HashSet::new();
+    // The release entries the tally takes in, stated in its first artifact.
+    let mut tally_inputs: Vec<String> = Vec::new();
     for release in crate::protocol::tally::board_releases(&board_entries) {
         let Ok(digest) = crate::protocol::voting::ballot_digest(&release.record.ballot) else {
             continue;
@@ -878,6 +866,9 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
         }
         records.retain(|r| crate::protocol::voting::ballot_digest(&r.ballot).ok() != Some(digest));
         records.push(release.record);
+        if let Ok(data) = BASE64.decode(&release.data) {
+            tally_inputs.push(crate::protocol::tally::release_input_id(&data));
+        }
     }
     let mut released_ballots: std::collections::HashMap<
         crate::domain::BallotDigest,
@@ -944,6 +935,10 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
         .iter()
         .filter(|digest| !released_ballots.contains_key(digest))
         .collect();
+    let release_check = (!missing.is_empty()).then(|| ReleaseCheck {
+        cut: release_cut,
+        missing: missing.iter().map(|digest| **digest).collect(),
+    });
     let blocking: Vec<u64> = silent_ids
         .iter()
         .copied()
@@ -1069,6 +1064,7 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
                 },
             )
             .map_err(|e| AdminError::Other(e.to_string()))?;
+            tally_inputs.push(crate::protocol::tally::release_input_id(data.as_bytes()));
             let timestamp = clock.now_ms() as i64;
             clock.advance();
             let entry = sign_entry(data.as_bytes(), entity_id, timestamp, signing_key);
@@ -1280,6 +1276,7 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
             &ReEncryptionProofEntry::OxFingerprints {
                 fps: fps.clone(),
                 decryptions: dec_ox,
+                inputs: tally_inputs.clone(),
             },
         )
         .map_err(|e| AdminError::Other(e.to_string()))?,
@@ -1814,11 +1811,17 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
             complete: false,
             log_key: log_key_fingerprint(&pinned_log),
             tree_size: already.iter().map(|(leaf, _)| *leaf + 1).max().unwrap_or(0),
-            release_cut,
         },
     )
     .await?;
-    flush_publications(&wbb, &outbox, &already, &cfg.ceremony_dir, release_cut).await?;
+    flush_publications(
+        &wbb,
+        &outbox,
+        &already,
+        &cfg.ceremony_dir,
+        release_check.as_ref(),
+    )
+    .await?;
 
     finish_tally(
         FinishTally {
@@ -2011,21 +2014,13 @@ async fn finish_tally(
             complete: true,
             log_key: log_key_fingerprint(pinned_log),
             tree_size: already.iter().map(|(leaf, _)| *leaf + 1).max().unwrap_or(0),
-            release_cut: no_release_cut(),
         },
     )
     .await?;
     let saved = load_saved_tally(&cfg.ceremony_dir)
         .await?
         .ok_or_else(|| AdminError::Other("the saved tally could not be read back".into()))?;
-    flush_publications(
-        wbb,
-        &saved.outbox,
-        already,
-        &cfg.ceremony_dir,
-        no_release_cut(),
-    )
-    .await?;
+    flush_publications(wbb, &saved.outbox, already, &cfg.ceremony_dir, None).await?;
 
     tracing::info!(
         released = outcome.released,
@@ -2288,16 +2283,15 @@ struct SavedTally {
     /// The board's tree size when the pipeline read it; every artifact of this
     /// tally is sequenced after it.
     tree_size: i64,
-    /// The board's size when the pipeline took in the releases already on
-    /// it: a box release sequenced at or past this leaf that the outbox does
-    /// not hold was not tallied, and must not precede the tally's start.
-    #[serde(default = "no_release_cut")]
-    release_cut: i64,
 }
 
-/// No release check: the save holds no releases still to publish.
-fn no_release_cut() -> i64 {
-    i64::MAX
+/// What a fresh tally run watches for just before its first artifact: a
+/// release past the board reading it took its input from (`cut`) of a
+/// counted ballot no box had released (`missing`). Only such a release can
+/// add a ballot to the tally; a copy of one already taken in cannot.
+struct ReleaseCheck {
+    cut: i64,
+    missing: std::collections::HashSet<crate::domain::BallotDigest>,
 }
 
 fn log_key_fingerprint(key: &p256::ecdsa::VerifyingKey) -> String {
@@ -2493,19 +2487,22 @@ async fn resign_pending(
 /// resumed submission) are skipped; a partial the board already holds is
 /// not an error.
 ///
-/// The releases go first, and the tally's input is every release sequenced
-/// before its first artifact (the auditor reads it so). Just before that
-/// first artifact the board is read again: a release a box wrote at or past
-/// `release_cut` that this outbox does not hold was not tallied, so nothing
-/// more is published, the saved tally is dropped, and the next run takes the
-/// release in (Sec. 3.9 step 2). A box can only release ballots it holds,
-/// so this ends.
+/// The releases go first; the tally's first artifact states the input it
+/// took in, and a release outside it is named by the auditor, not counted.
+/// On a fresh run (`release_check`), just before that first artifact, the
+/// board is read again: a release a box wrote past the run's reading of a
+/// counted ballot that no box had released would ADD a ballot, so nothing
+/// more is published, the saved tally is dropped, and the next run takes it
+/// in (Sec. 3.9 step 2). Copies of ballots already taken in change nothing
+/// and are ignored (Sec. 3.9 step 3 discards multiple copies), so a box can
+/// force at most one re-run per missing ballot. A resumed run never checks:
+/// part of its tally may already be on the board.
 async fn flush_publications(
     wbb: &WbbClient,
     outbox: &[PendingPublication],
     board: &[(i64, serde_json::Value)],
     ceremony_dir: &Path,
-    release_cut: i64,
+    release_check: Option<&ReleaseCheck>,
 ) -> Result<(), AdminError> {
     let on_board: std::collections::HashSet<&str> = board
         .iter()
@@ -2523,7 +2520,9 @@ async fn flush_publications(
         }
         if !started && !is_release(pending) {
             started = true;
-            check_release_cut(wbb, outbox, ceremony_dir, release_cut).await?;
+            if let Some(check) = release_check {
+                check_release_cut(wbb, outbox, ceremony_dir, check).await?;
+            }
         }
         submit_cosigned_and_wait(wbb, &pending.entries, &pending.data).await?;
     }
@@ -2536,9 +2535,9 @@ async fn check_release_cut(
     wbb: &WbbClient,
     outbox: &[PendingPublication],
     ceremony_dir: &Path,
-    release_cut: i64,
+    check: &ReleaseCheck,
 ) -> Result<(), AdminError> {
-    if release_cut == no_release_cut() {
+    if check.missing.is_empty() {
         return Ok(());
     }
     let entries: Vec<(i64, serde_json::Value)> = wbb
@@ -2555,7 +2554,11 @@ async fn check_release_cut(
         .collect();
     let late: Vec<String> = crate::protocol::tally::board_releases(&entries)
         .into_iter()
-        .filter(|release| release.leaf >= release_cut && !ours.contains(&release.data))
+        .filter(|release| release.leaf >= check.cut && !ours.contains(&release.data))
+        .filter(|release| {
+            crate::protocol::voting::ballot_digest(&release.record.ballot)
+                .is_ok_and(|digest| check.missing.contains(&digest))
+        })
         .map(|release| format!("BB-{} at entry {}", release.bb_id, release.leaf))
         .collect();
     if late.is_empty() {
@@ -2571,8 +2574,8 @@ async fn check_release_cut(
         }
     }
     Err(AdminError::Other(format!(
-        "a ballot box released ballots on the bulletin board while the tally ran ({}): \
-         nothing past the releases was published - run the tally again to take them in",
+        "a ballot box released a counted ballot no box had released while the tally ran \
+         ({}): nothing past the releases was published - run the tally again to take it in",
         late.join(", ")
     )))
 }

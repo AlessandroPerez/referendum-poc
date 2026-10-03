@@ -1126,6 +1126,25 @@ fn audit_entries(
         .map(|entry| entry.leaf_index)
         .min()
         .unwrap_or(i64::MAX);
+    // A tally that states its input in its first artifact (the release
+    // entries it took in) is audited on exactly that input: a release any
+    // box wrote outside it - even in the moment before that artifact - is
+    // named and not counted. Without a statement, the cut above applies.
+    let stated_inputs: Option<HashSet<String>> = entries
+        .iter()
+        .filter_map(|entry| {
+            let parsed = entry.parsed.as_ref()?;
+            if parsed.entry_type != "re_encryption_proof" {
+                return None;
+            }
+            match parsed.decode_payload::<ReEncryptionProofEntry>().ok()? {
+                ReEncryptionProofEntry::OxFingerprints { inputs, .. } if !inputs.is_empty() => {
+                    Some(inputs.into_iter().collect())
+                }
+                _ => None,
+            }
+        })
+        .next();
     for entry in entries {
         let Some(parsed) = &entry.parsed else {
             continue;
@@ -1133,7 +1152,7 @@ fn audit_entries(
         if parsed.entry_type != "encrypted_ballot" {
             continue;
         }
-        if entry.leaf_index > tally_start {
+        if stated_inputs.is_none() && entry.leaf_index > tally_start {
             release_problems.push(format!(
                 "leaf {}: {} released a ballot after the tally had started (entry {}); \
                  not part of the tally input",
@@ -1232,6 +1251,18 @@ fn audit_entries(
             }
             Err(e) => {
                 release_problems.push(format!("leaf {}: digest error ({e})", entry.leaf_index));
+                continue;
+            }
+        }
+        // Every check above names what this release says about its box,
+        // counted or not; only now is it held to the tally's stated input.
+        if let Some(stated) = &stated_inputs {
+            if !stated.contains(&crate::protocol::tally::release_input_id(&entry.data)) {
+                release_problems.push(format!(
+                    "leaf {}: BB-{bb_id} released a ballot the tally did not take in (its \
+                     first artifact states its input); not counted",
+                    entry.leaf_index
+                ));
                 continue;
             }
         }
@@ -1700,6 +1731,7 @@ fn audit_entries(
     let Some(ReEncryptionProofEntry::OxFingerprints {
         fps: ox_fps,
         decryptions: dec_ox,
+        ..
     }) = ox
     else {
         unreachable!("inventory guarantees the ox slot holds the ox variant");

@@ -222,6 +222,13 @@ pub struct BoardRelease {
     pub data: String,
 }
 
+/// The identifier of one release entry in the tally's input: the SHA-256
+/// (hex) of the entry's decoded `data`.
+pub fn release_input_id(data: &[u8]) -> String {
+    use sha2::Digest as _;
+    hex::encode(sha2::Sha256::digest(data))
+}
+
 /// Every readable `encrypted_ballot` entry on the board signed by the box
 /// its receipt names, in board order. A record a box signs for ANOTHER box
 /// is nobody's release and is left out (the auditor names it).
@@ -281,6 +288,12 @@ pub enum ReEncryptionProofEntry {
     OxFingerprints {
         fps: ThresholdFingerprints<G>,
         decryptions: Vec<ThresholdDecOk<G>>,
+        /// The tally's input, fixed by its first artifact: `release_input_id`
+        /// of every release entry the tally took in. A release any box writes
+        /// later - or in the moment before this entry - is not part of it,
+        /// and the auditor names it (Sec. 3.9 steps 2-3, Sec. 3.10 1(b)).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        inputs: Vec<String>,
     },
     /// Sec. 3.9 step 19: RT credential control proofs over the shuffled votes.
     /// Published by the registration tellers themselves, in a

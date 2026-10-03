@@ -443,9 +443,11 @@ impl HeldDisclosure {
 /// says, is an oracle that can be run to exhaustion.
 ///
 /// The consequence is deliberate: a voter who types their OWN PIN into the
-/// decoy box arms it as a decoy, and ballots cast with it are discarded like
-/// any decoy's. The app says so before they type, draws its own decoys away
-/// from the real PIN, and arming any other value puts the real PIN back.
+/// decoy box arms it as a decoy - but Sec. 3.7.3 step 5 builds the ruse
+/// credential for `x + PIN^ruse - PIN^valid`, which for their own PIN IS the
+/// valid credential, so ballots cast with it still count. The app draws its
+/// own decoys away from the real PIN, and arming any other value puts the
+/// real PIN back.
 ///
 /// PrivatePINEmoji of `pin` (Sec. 3.6.3 step 5, 3.7.1, 3.8.2 step 14): the
 /// visual digest of `H(o^x)` for the credential that PIN is used with - the
@@ -749,25 +751,16 @@ impl VoterState {
         Ok(session)
     }
 
-    /// The RT clients the session trusts (V10; default all, order preserved).
-    fn trusted_rts<'a>(&'a self, session: &VoterSession) -> Vec<&'a RtClient> {
-        match &session.trusted {
-            Some(t) => self
-                .rt_names
-                .iter()
-                .zip(&self.rt_clients)
-                .filter(|(name, _)| t.rts.contains(name))
-                .map(|(_, c)| c)
-                .collect(),
-            None => self.rt_clients.iter().collect(),
-        }
-    }
-
-    /// The trusted tellers that have announced, through the notification
-    /// service, that their waiting period for this request is over.
+    /// The tellers that have announced, through the notification service,
+    /// that their waiting period for this request is over. EVERY teller
+    /// counts, trusted or not: Sec. 3.6.3 has each RT_i send its shares and
+    /// the app interpolate any t_RT of them; the trusted selection of
+    /// Sec. 3.12 only decides which tellers can tell a ruse from a re-send,
+    /// and the ruse is made on the device here. Narrowing retrieval to the
+    /// trusted tellers would let one of them deny the voter a credential.
     fn ready_rts<'a>(
         &'a self,
-        session: &VoterSession,
+        _session: &VoterSession,
         notifications: &crate::clients::ns::NotificationList,
     ) -> Vec<(&'a str, &'a RtClient)> {
         let announced: std::collections::HashSet<String> = notifications
@@ -778,10 +771,6 @@ impl VoterState {
         self.rt_names
             .iter()
             .zip(&self.rt_clients)
-            .filter(|(name, _)| match &session.trusted {
-                Some(t) => t.rts.contains(name),
-                None => true,
-            })
             .filter(|(name, _)| announced.contains(&name.to_lowercase()))
             .map(|(name, c)| (name.as_str(), c))
             .collect()
@@ -804,8 +793,8 @@ impl VoterState {
     }
 
     /// V3: request PIN delivery - fresh pin-request tokens under a new rid,
-    /// NS registration, and RT `/credentials/request` on the trusted tellers
-    /// (Sec. 5.3.1.2/.3).  Updates `session.rid`/`ns_token`.
+    /// NS registration, and RT `/credentials/request` on every teller
+    /// (Sec. 5.3.1.2/.3, Sec. 3.6.3).  Updates `session.rid`/`ns_token`.
     async fn run_pin_request(&self, session: &mut VoterSession) -> Result<(), VoterError> {
         self.ensure_device_registered(session).await?;
         let tokens = self
@@ -813,19 +802,18 @@ impl VoterState {
             .pin_request_tokens(&session.registration_token)
             .await?;
         self.ns_client.register(session.vid, &tokens.rid).await?;
-        let trusted = self.trusted_rts(session);
-        if tokens.rt_tokens.len() < trusted.len() {
+        if tokens.rt_tokens.len() < self.rt_clients.len() {
             return Err(VoterError::Protocol(
-                "ER issued fewer RT tokens than trusted tellers".into(),
+                "ER issued fewer RT tokens than there are tellers".into(),
             ));
         }
         // A teller that refuses or errors is dropped, not fatal: the
-        // credential needs t_RT of them (A2, Sec. 3.12), so one teller must
+        // credential needs t_RT of them (A2, Sec. 3.6.3), so one teller must
         // not be able to deny a voter their enrollment. The request is made
-        // to every trusted teller and counted.
+        // to every teller and counted.
         let mut asked = 0usize;
         let mut refused = Vec::new();
-        for (rt, token) in trusted.iter().zip(&tokens.rt_tokens) {
+        for (rt, token) in self.rt_clients.iter().zip(&tokens.rt_tokens) {
             match rt.credentials_request(token, &tokens.rid).await {
                 Ok(_) => asked += 1,
                 Err(e) => refused.push(e.to_string()),
@@ -833,7 +821,7 @@ impl VoterState {
         }
         if asked < self.t_rt {
             tracing::warn!(
-                "only {asked} of the trusted registration tellers accepted the credential \
+                "only {asked} of the registration tellers accepted the credential \
                  request, {} are needed: {}",
                 self.t_rt,
                 refused.join("; ")
@@ -924,7 +912,7 @@ impl VoterState {
 
         // Gate on NS readiness (Sec. 5.3.1.4): each teller announces itself
         // only once ITS waiting period is over, and the periods differ. Ask
-        // only the trusted tellers that have announced - asking a slower one
+        // only the tellers that have announced - asking a slower one
         // would just be refused - and go ahead as soon as t_RT of them have.
         let notifications = self.ns_client.notifications(session.vid, &rid).await?;
         let ready: Vec<(&str, &RtClient)> = self

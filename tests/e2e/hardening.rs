@@ -2359,6 +2359,9 @@ async fn an_enrollment_whose_last_requests_fail_still_hands_over_the_passphrase(
 /// at a box for one of them must not hold the other's.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stalled_confirmation_holds_no_other_voter() {
+    // Long against any honest confirmation, so the bound below tells a
+    // voter held behind the stall from a merely slow machine.
+    const STALL: Duration = Duration::from_secs(20);
     // Both voters enroll on ONE app server, and nowhere else.
     let cluster = ElectionCluster::start(2, ElectionOpts::default()).await;
 
@@ -2381,9 +2384,7 @@ async fn a_stalled_confirmation_holds_no_other_voter() {
                             stalls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             // Off the runtime's worker: a plain sleep here
                             // would stall the test's own timers with it.
-                            tokio::task::block_in_place(|| {
-                                std::thread::sleep(Duration::from_millis(3000))
-                            });
+                            tokio::task::block_in_place(|| std::thread::sleep(STALL));
                         }
                     }
                 }
@@ -2456,7 +2457,7 @@ async fn a_stalled_confirmation_holds_no_other_voter() {
     );
     assert!(status.is_success(), "{status}");
     assert!(
-        took < Duration::from_millis(1500),
+        took < STALL / 2,
         "the second voter waited {took:?} behind the first voter's stalled confirmation"
     );
     let (status, _) = stalled.await.expect("join");
@@ -3353,16 +3354,7 @@ async fn a_lost_board_answer_does_not_keep_a_published_ballot_from_the_release()
         .expect("token")
         .trim()
         .to_string();
-    let released: serde_json::Value = cluster
-        .client
-        .get(format!("{bb1}/ballots"))
-        .header("Authorization", format!("Bearer {token}"))
-        .send()
-        .await
-        .expect("release")
-        .json()
-        .await
-        .unwrap_or_default();
+    let (_, released) = read_release(&cluster.client, &format!("{bb1}/ballots"), &token).await;
     assert_eq!(
         released.as_array().map(|a| a.len()),
         Some(3),
@@ -4161,15 +4153,8 @@ async fn a_dropped_board_read_does_not_shorten_a_release() {
         .trim()
         .to_string();
     let release = || async {
-        let response = cluster
-            .client
-            .get(format!("{bb1}/ballots"))
-            .header("Authorization", format!("Bearer {token}"))
-            .send()
-            .await
-            .expect("request");
-        let status = response.status();
-        let records: serde_json::Value = response.json().await.unwrap_or_default();
+        let (status, records) =
+            read_release(&cluster.client, &format!("{bb1}/ballots"), &token).await;
         (status, records.as_array().map(|a| a.len()))
     };
     drop_reads.store(1, Ordering::SeqCst);
@@ -5638,7 +5623,7 @@ async fn a_release_written_after_the_tally_started_is_named_not_counted() {
         audit
             .steps
             .iter()
-            .any(|s| s.detail.contains("after the tally had started")),
+            .any(|s| s.detail.contains("the tally did not take in")),
         "{:?}",
         audit.steps
     );
@@ -5657,4 +5642,482 @@ fn take_one(counter: &std::sync::atomic::AtomicUsize) -> bool {
         }
     }
     false
+}
+
+/// Sec. 3.6.3 / Sec. 3.12: every teller receives the PIN request and any
+/// t_RT of them rebuild the credential; the trusted selection only says which
+/// tellers can tell a ruse from a re-send. A voter trusting a t_RT-sized pair
+/// that holds one dishonest teller (A2) still gets a re-send and a new
+/// credential after a revocation. Returns the last answer.
+async fn trusted_pair_with_a_dishonest_teller(
+    revoke: bool,
+    rts: [&'static str; 2],
+) -> (u16, String) {
+    let cluster = ElectionCluster::start(1, ElectionOpts::default()).await;
+    let real = reqwest::Url::parse(&format!("https://127.0.0.1:{}/", cluster.ports.rt[0])).unwrap();
+    // rt-1 delivers its share and answers round 1, then drops out of round 2
+    // (the dishonest teller of hardening.rs:577).
+    let stand_in = helpers::spawn_stand_in(
+        &real,
+        cluster.client.clone(),
+        helpers::passthrough(),
+        Some(std::sync::Arc::new(|path: &str, _b: &[u8]| {
+            path.contains("dvnizkp/round2").then(|| {
+                (
+                    reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::body::Bytes::from_static(b"{\"error\":\"nope\"}"),
+                )
+            })
+        })),
+    )
+    .await;
+    let voter = cluster
+        .spawn_voter_with_peers(&[("rt-1", stand_in.to_string())])
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Default selection (all three): the enrollment survives rt-1.
+    let p = helpers::enroll_on(&cluster.client, &voter, "VOTER-001").await;
+    let _pin = helpers::post_json(
+        &cluster.client,
+        &format!("{voter}/api/pin/retrieve"),
+        serde_json::json!({ "passphrase": p }),
+    )
+    .await;
+    // Sec. 3.12: the voter trusts t_RT = 2 tellers.
+    helpers::post_json(
+        &cluster.client,
+        &format!("{voter}/api/settings/trusted"),
+        serde_json::json!({"passphrase": p, "rts": rts, "bbs": ["bb-1","bb-2"]}),
+    )
+    .await;
+    if revoke {
+        let _revoked = cluster
+            .client
+            .post(format!("{voter}/api/revoke"))
+            .json(&serde_json::json!({"passphrase": p}))
+            .send()
+            .await
+            .unwrap();
+        helpers::wait_pin_ready(&cluster.client, &voter, &p).await;
+        let mut last = (0, String::new());
+        for _ in 0..3 {
+            let r = cluster
+                .client
+                .post(format!("{voter}/api/pin/retrieve"))
+                .json(&serde_json::json!({"passphrase": p}))
+                .send()
+                .await
+                .unwrap();
+            last = (r.status().as_u16(), r.text().await.unwrap_or_default());
+        }
+        last
+    } else {
+        let mut last = (0, String::new());
+        for _ in 0..2 {
+            let r = cluster
+                .client
+                .post(format!("{voter}/api/pin/resend"))
+                .json(&serde_json::json!({"passphrase": p}))
+                .send()
+                .await
+                .unwrap();
+            last = (r.status().as_u16(), r.text().await.unwrap_or_default());
+        }
+        last
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trusted_dishonest_teller_cannot_veto_a_re_send() {
+    let (status, _) = trusted_pair_with_a_dishonest_teller(false, ["rt-1", "rt-2"]).await;
+    assert_eq!(
+        status, 200,
+        "one dishonest teller of three vetoes the re-send"
+    );
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trusted_dishonest_teller_cannot_veto_the_credential_after_a_revocation() {
+    let (status, _) = trusted_pair_with_a_dishonest_teller(true, ["rt-1", "rt-2"]).await;
+    assert_eq!(
+        status, 200,
+        "one dishonest teller of three vetoes the new credential"
+    );
+}
+
+/// Sec. 3.12 lets the voter change the trusted tellers before the PIN
+/// arrives: after a revocation, a change made while the PIN is on its way
+/// does not strand it.
+#[tokio::test(flavor = "multi_thread")]
+async fn changing_the_trusted_tellers_before_the_pin_arrives_does_not_strand_it() {
+    let mut cluster = ElectionCluster::start(1, ElectionOpts::default()).await;
+    cluster.enroll_all().await;
+    let p = cluster.passphrases[0].clone();
+    cluster
+        .voter_post(
+            0,
+            "/api/settings/trusted",
+            serde_json::json!({"passphrase": p, "rts": ["rt-1","rt-2"], "bbs": ["bb-1","bb-2"]}),
+        )
+        .await;
+    let _revoked = cluster
+        .voter_post(0, "/api/revoke", serde_json::json!({"passphrase": p}))
+        .await;
+    // Before the PIN arrives (the voter has not retrieved it yet): new selection.
+    cluster
+        .voter_post(
+            0,
+            "/api/settings/trusted",
+            serde_json::json!({"passphrase": p, "rts": ["rt-2","rt-3"], "bbs": ["bb-1","bb-2"]}),
+        )
+        .await;
+    helpers::wait_pin_ready(&cluster.client, &cluster.voter_urls[0], &p).await;
+    let retrieve = cluster
+        .client
+        .post(format!("{}/api/pin/retrieve", cluster.voter_urls[0]))
+        .json(&serde_json::json!({"passphrase": p}))
+        .send()
+        .await
+        .unwrap();
+    let st = retrieve.status();
+    assert!(
+        st.is_success(),
+        "the PIN never arrived after a permitted trusted-teller change"
+    );
+}
+
+/// Sec. 3.9 steps 2-3, Sec. 3.10 1(b): one dishonest box withholds a ballot
+/// from the driver and writes its own release while a network attacker
+/// delays the driver's first tally submission until that release is
+/// sequenced - after the driver's last board reading, before the tally's
+/// first artifact. The tally's first artifact states the input it took in,
+/// so the audit of this correct tally passes and names the late release.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_release_just_before_the_tally_starts_is_named_not_counted() {
+    use base64::Engine as _;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let cluster = ElectionCluster::start(3, ElectionOpts::default()).await;
+    let victim = three_ballots_one_only_bb2_holds(&cluster).await;
+    // BB-2's own release of the victim ballot, prepared now (BB-2 holds it).
+    let token = std::fs::read_to_string(cluster.ceremony_dir().join("bb-2-service-token.txt"))
+        .unwrap()
+        .trim()
+        .to_string();
+    let list: Vec<serde_json::Value> = loop {
+        let resp = cluster
+            .client
+            .get(format!("https://127.0.0.1:{}/ballots", cluster.ports.bb[1]))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        if resp.status() == reqwest::StatusCode::OK {
+            break resp.json().await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    let record = list
+        .into_iter()
+        .find(|r| {
+            let b: evoting::api::prelude::Ballot<dlog_group::ristretto::RistrettoGroup> =
+                serde_json::from_value(r["ballot"].clone()).unwrap();
+            referendum_poc::protocol::voting::ballot_digest(&b)
+                .unwrap()
+                .to_string()
+                == victim
+        })
+        .expect("BB-2 holds the ballot");
+    let release = format!(
+        "tallying,BB,encrypted_ballot,1,{}",
+        base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_string(&serde_json::json!({ "record": record })).unwrap())
+    );
+    let bb2_key = cluster.signing_key("bb-2");
+    let board_client = cluster.wbb.client.clone();
+    let fired = Arc::new(AtomicBool::new(false));
+    let real_board =
+        reqwest::Url::parse(cluster.wbb_url.as_str().trim_end_matches("wbb/")).unwrap();
+    let board = {
+        let fired = fired.clone();
+        helpers::spawn_stand_in(
+            &real_board,
+            cluster.client.clone(),
+            helpers::passthrough(),
+            Some(Arc::new(move |path: &str, body: &[u8]| {
+                if path != "wbb/submit" || fired.load(Ordering::SeqCst) {
+                    return None;
+                }
+                let data = serde_json::from_slice::<serde_json::Value>(body)
+                    .ok()
+                    .and_then(|v| v["data"].as_str().map(str::to_string))
+                    .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
+                    .unwrap_or_default();
+                if !data.starts_with(b"tallying,TT,") {
+                    return None;
+                }
+                fired.store(true, Ordering::SeqCst);
+                // The driver has read the board for the last time; BB-2 now
+                // writes its release, which is sequenced first.
+                let board_client = board_client.clone();
+                let release = release.clone();
+                let bb2_key = bb2_key.clone();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        let entries = board_client.entries().await.unwrap();
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as i64;
+                        let entry = referendum_poc::clients::wbb::sign_entry(
+                            release.as_bytes(),
+                            "BB-2",
+                            now.max(entries.entries.last().unwrap().timestamp + 1),
+                            &bb2_key,
+                        );
+                        board_client
+                            .submit_and_wait(&entry, Duration::from_secs(20))
+                            .await
+                            .expect("the board accepts what a box may write");
+                    })
+                });
+                None
+            })),
+        )
+        .await
+    };
+    let url = |p: &u16| reqwest::Url::parse(&format!("https://127.0.0.1:{p}/")).unwrap();
+    let bb1 = url(&cluster.ports.bb[0]);
+    let bb2 = withholding_box(&cluster, victim.clone()).await;
+    let outcome = cluster
+        .try_tally_with_boxes_and_board(vec![bb1, bb2], board.join("wbb/").unwrap())
+        .await
+        .expect("tally");
+    assert!(
+        fired.load(Ordering::SeqCst),
+        "the release was written in the window"
+    );
+    assert_eq!((outcome.counts.si, outcome.counts.no), (2, 0));
+    let audit = cluster.audit().await;
+    assert!(audit.ok(), "{:?}", audit.steps);
+    assert!(
+        audit
+            .steps
+            .iter()
+            .any(|s| s.detail.contains("the tally did not take in")),
+        "{:?}",
+        audit.steps
+    );
+}
+
+/// BB-2's own release list (GET /ballots on the real box).
+async fn bb2_release_list(cluster: &ElectionCluster) -> Vec<serde_json::Value> {
+    let token = std::fs::read_to_string(cluster.ceremony_dir().join("bb-2-service-token.txt"))
+        .unwrap()
+        .trim()
+        .to_string();
+    loop {
+        let resp = cluster
+            .client
+            .get(format!("https://127.0.0.1:{}/ballots", cluster.ports.bb[1]))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap();
+        if resp.status() == reqwest::StatusCode::OK {
+            break resp.json().await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// BB-2 writes `record` to the board as its own release, under its own key.
+async fn bb2_writes_record(
+    cluster: &ElectionCluster,
+    record: serde_json::Value,
+) -> Result<i64, String> {
+    use base64::Engine as _;
+    let payload = serde_json::json!({ "record": record });
+    let data = format!(
+        "tallying,BB,encrypted_ballot,1,{}",
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_string(&payload).unwrap())
+    );
+    let entries = cluster
+        .wbb
+        .client
+        .entries()
+        .await
+        .map_err(|e| e.to_string())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let entry = referendum_poc::clients::wbb::sign_entry(
+        data.as_bytes(),
+        "BB-2",
+        now.max(entries.entries.last().unwrap().timestamp + 1),
+        &cluster.signing_key("bb-2"),
+    );
+    cluster
+        .wbb
+        .client
+        .submit_and_wait(&entry, Duration::from_secs(20))
+        .await
+        .map(|e| e.leaf_index)
+        .map_err(|e| e.to_string())
+}
+
+/// Sec. 3.9 step 3 discards multiple copies: a box that keeps writing copies
+/// of a ballot already taken in (receipt timestamp bumped so the data
+/// differs) cannot stop the tally - only a release that would ADD a counted
+/// ballot stops a run.
+#[tokio::test(flavor = "multi_thread")]
+async fn copies_of_a_released_ballot_do_not_stop_the_tally() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mut cluster = ElectionCluster::start(3, ElectionOpts::default()).await;
+    cluster.enroll_all().await;
+    let mut pins = Vec::new();
+    for i in 0..3 {
+        pins.push(cluster.pin(i).await);
+    }
+    cluster.open_voting().await;
+    cluster.vote_and_cast(0, "approve", pins[0]).await;
+    cluster.vote_and_cast(1, "approve", pins[1]).await;
+    cluster.vote_and_cast(2, "reject", pins[2]).await;
+    cluster.close_voting().await;
+    let base = bb2_release_list(&cluster).await[0].clone();
+    let base_ms = base["receipt"]["received_at_unix_ms"].as_u64().unwrap();
+    let url = |p: &u16| reqwest::Url::parse(&format!("https://127.0.0.1:{p}/")).unwrap();
+    let bbs: Vec<reqwest::Url> = cluster.ports.bb.iter().map(url).collect();
+    let stop = AtomicBool::new(false);
+    let period: u64 = std::env::var("P1_PERIOD_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(700);
+    let writer = async {
+        let mut k = 0u64;
+        while !stop.load(Ordering::SeqCst) {
+            let mut r = base.clone();
+            r["receipt"]["received_at_unix_ms"] = serde_json::json!(base_ms + 1 + k);
+            if bb2_writes_record(&cluster, r).await.is_ok() {
+                k += 1;
+            }
+            tokio::time::sleep(Duration::from_millis(period)).await;
+        }
+        k
+    };
+    let run = async {
+        let outcome = cluster
+            .try_tally_with_boxes_without(bbs.clone(), vec![])
+            .await;
+        stop.store(true, Ordering::SeqCst);
+        outcome
+    };
+    let (written, outcome) = tokio::join!(writer, run);
+    let outcome = outcome.expect("copies of a released ballot do not stop the tally");
+    assert!(written > 0, "the box wrote no copy while the tally ran");
+    assert_eq!((outcome.counts.si, outcome.counts.no), (2, 1));
+    let audit = cluster.audit().await;
+    assert!(audit.ok(), "{:?}", audit.steps);
+}
+
+/// Sec. 3.9 step 2: a box that withheld a counted ballot from the driver and
+/// writes it to the board after the driver's reading (while the driver
+/// publishes its first release) stops the run before the tally starts; the
+/// next run counts the ballot and the audit passes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_ballot_released_after_the_reading_stops_the_run() {
+    use base64::Engine as _;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let cluster = ElectionCluster::start(3, ElectionOpts::default()).await;
+    let victim = three_ballots_one_only_bb2_holds(&cluster).await;
+    let bb1 = reqwest::Url::parse(&format!("https://127.0.0.1:{}/", cluster.ports.bb[0])).unwrap();
+    let bb2 = withholding_box(&cluster, victim.clone()).await;
+    let signal = Arc::new(AtomicBool::new(false));
+    let written = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let board = {
+        let signal = signal.clone();
+        let written = written.clone();
+        helpers::spawn_stand_in(
+            &reqwest::Url::parse(&format!("https://127.0.0.1:{}/", cluster.ports.wbb)).unwrap(),
+            cluster.client.clone(),
+            helpers::passthrough(),
+            Some(Arc::new(move |path: &str, body: &[u8]| {
+                if path == "wbb/submit" && !signal.load(Ordering::SeqCst) {
+                    let data = serde_json::from_slice::<serde_json::Value>(body)
+                        .ok()
+                        .and_then(|v| v["data"].as_str().map(str::to_owned))
+                        .and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
+                        .unwrap_or_default();
+                    if data.starts_with(b"tallying,BB,encrypted_ballot") {
+                        signal.store(true, Ordering::SeqCst);
+                        tokio::task::block_in_place(|| {
+                            let t = std::time::Instant::now();
+                            while !written.load(Ordering::SeqCst)
+                                && t.elapsed() < Duration::from_secs(120)
+                            {
+                                std::thread::sleep(Duration::from_millis(100));
+                            }
+                        });
+                    }
+                }
+                None
+            })),
+        )
+        .await
+    };
+    let watcher = async {
+        while !signal.load(Ordering::SeqCst) && !done.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if signal.load(Ordering::SeqCst) {
+            bb2_writes_its_release_of(&cluster, &victim).await;
+        }
+        written.store(true, Ordering::SeqCst);
+    };
+    let tally = async {
+        let r = cluster
+            .try_tally_with_boxes_and_board(
+                vec![bb1.clone(), bb2.clone()],
+                board.join("wbb/").unwrap(),
+            )
+            .await;
+        done.store(true, Ordering::SeqCst);
+        r
+    };
+    let ((), first) = tokio::join!(watcher, tally);
+    assert!(first.is_err(), "the run was not stopped");
+    let second = cluster
+        .try_tally_with_boxes(vec![bb1, bb2])
+        .await
+        .expect("second run");
+    assert_eq!((second.counts.si, second.counts.no), (2, 1));
+    let audit = cluster.audit().await;
+    assert!(audit.ok(), "{:?}", audit.steps);
+}
+
+/// A box's release, asked for as the tally driver does: "in preparation"
+/// (202) is waited out - after the close a box computes its release once,
+/// in the background, and a slow machine may still be at it.
+async fn read_release(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+    loop {
+        let response = client
+            .get(url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .expect("request");
+        let status = response.status();
+        if status != reqwest::StatusCode::ACCEPTED || tokio::time::Instant::now() > deadline {
+            let body = response.json().await.unwrap_or_default();
+            return (status, body);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
