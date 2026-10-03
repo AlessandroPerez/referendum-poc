@@ -63,6 +63,10 @@ jobs:
       - name: Clean cached path-dependency artifacts
         run: cargo clean -p evoting -p dlog-sigma-primitives -p dlog-group
       - name: cargo test
+        # Up to three full clusters at once (tests/e2e/helpers.rs
+        # `cluster_guard`); each test still boots its own.
+        env:
+          E2E_PARALLEL: "3"
         run: cargo test --all-targets
 
   fmt:

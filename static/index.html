@@ -38,9 +38,11 @@
           <p class="step">Step 1 of 5</p>
           <h2>eID login</h2>
           <p class="lead">Identify yourself with your electronic ID to start the enrollment.</p>
-          <label for="fiscal-id">Fiscal ID</label>
+          <label for="fiscal-id">eID</label>
           <input id="fiscal-id" placeholder="VOTER-001" autocomplete="off">
-          <button id="btn-login">Log in via DIP</button>
+          <p class="hint">Demo: the eID provider is simulated - type the identifier of a test eID
+            (VOTER-001, VOTER-002, ...) instead of presenting a card.</p>
+          <button id="btn-login">Log in with eID</button>
         </section>
 
         <section id="screen-enroll" class="screen hidden">
@@ -188,8 +190,9 @@
           <code id="ruse-pin" class="big hidden"></code>
           <code id="ruse-emoji" class="hidden"></code>
           <p class="hint">"Re-send my PIN" delivers YOUR PIN again. If someone is watching and you
-            want them to see a PIN that is not yours, use the ruse PIN above instead: the two
-            requests look the same to everyone outside this device.</p>
+            want them to see a PIN that is not yours, use the ruse PIN above instead. Both show a
+            PIN the same way on this screen; on the network they differ, so someone watching your
+            connection could tell them apart.</p>
           <button id="btn-resend" class="secondary">Re-send my PIN</button>
           <p id="pin-tools-label" class="result"></p>
         </section>
@@ -217,7 +220,7 @@
         <section id="screen-recover" class="screen">
           <h2>Recover on this device</h2>
           <p class="lead">Lost or changed your device? Restore your account with your eID and passphrase.</p>
-          <label for="recover-fiscal">Fiscal ID</label>
+          <label for="recover-fiscal">eID</label>
           <input id="recover-fiscal" placeholder="VOTER-001" autocomplete="off">
           <label for="recover-passphrase">Passphrase</label>
           <input id="recover-passphrase" autocomplete="off">

@@ -119,3 +119,10 @@ tempfile = "3"
 pretty_assertions = "1"
 x509-parser = "0.16"
 fs2 = "0.4"
+
+# The tests drive the full protocol - mixes, threshold decryptions, proofs -
+# through the cryptographic dependencies, which are far too slow unoptimised.
+# Optimise every dependency in dev/test builds; this crate stays at the
+# default level, so it still compiles quickly.
+[profile.dev.package."*"]
+opt-level = 3

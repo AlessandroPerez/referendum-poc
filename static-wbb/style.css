@@ -106,3 +106,9 @@ main { max-width: 72rem; }
 .screen button { margin-inline: auto; }
 .screen code { text-align: center; }
 #entries th, #entries td { text-align: center; }
+
+/* Ballot lookup: one compact row per box entry. */
+table.compact { width: auto; margin: 0.5rem 0; }
+table.compact th, table.compact td { padding: 0.2rem 0.6rem; }
+#search-result p.warn { color: light-dark(#b3261e, #ff8a80); }
+#search-result p.hint { font-size: 0.85rem; opacity: 0.8; }

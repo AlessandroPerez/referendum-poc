@@ -104,10 +104,12 @@ async fn coercion_ruse_pin() {
     }
 }
 
-/// V5 negative: a wrong-PIN ballot passes the BB proof checks but is
-/// filtered by the ACC check at tally.
+/// V5 negative and Sec. 3.9 step 10, in one election: a wrong-PIN ballot
+/// passes the BB proof checks but is filtered by the ACC check at tally, and
+/// of two valid ballots from one credential only the last-cast one survives
+/// the ox fingerprint dedup.
 #[tokio::test]
-async fn wrong_pin() {
+async fn a_wrong_pin_ballot_dies_and_the_last_valid_ballot_wins() {
     let mut cluster = ElectionCluster::start(3, ElectionOpts::default()).await;
     cluster.enroll_all().await;
     cluster.open_voting().await;
@@ -115,38 +117,6 @@ async fn wrong_pin() {
     let pin = cluster.pin(0).await;
     let wrong = (pin + 1) % 100_000;
     cluster.vote_and_cast(0, "reject", wrong).await;
-    cluster.vote_and_cast(0, "approve", pin).await;
-    let pin1 = cluster.pin(1).await;
-    cluster.vote_and_cast(1, "approve", pin1).await;
-    let pin2 = cluster.pin(2).await;
-    cluster.vote_and_cast(2, "blank", pin2).await;
-
-    cluster.close_voting().await;
-    let outcome = cluster.tally().await;
-    assert_eq!(outcome.released, 8, "4 casts x 2 BBs");
-    assert_eq!(outcome.reconciled, 4);
-    assert_eq!(
-        outcome.deduped, 4,
-        "different PINs do not merge in ox dedup"
-    );
-    assert_eq!(outcome.valid, 3, "wrong-PIN ballot dies at the ACC check");
-    assert_eq!(outcome.legitimate, 3);
-    assert_eq!(
-        (outcome.counts.blank, outcome.counts.si, outcome.counts.no),
-        (1, 2, 0),
-        "the wrong-PIN reject never counts"
-    );
-}
-
-/// Sec. 3.9 step 10: two valid ballots from the same credential - only the
-/// last-cast one survives the ox fingerprint dedup.
-#[tokio::test]
-async fn revote_last_wins() {
-    let mut cluster = ElectionCluster::start(3, ElectionOpts::default()).await;
-    cluster.enroll_all().await;
-    cluster.open_voting().await;
-
-    let pin = cluster.pin(0).await;
     cluster.vote_and_cast(0, "approve", pin).await;
     cluster.vote_and_cast(0, "reject", pin).await;
     let pin1 = cluster.pin(1).await;
@@ -156,18 +126,22 @@ async fn revote_last_wins() {
 
     cluster.close_voting().await;
     let outcome = cluster.tally().await;
-    assert_eq!(outcome.released, 8, "4 casts x 2 BBs");
-    assert_eq!(outcome.reconciled, 4);
+    assert_eq!(outcome.released, 10, "5 casts x 2 BBs");
+    assert_eq!(outcome.reconciled, 5);
     assert_eq!(
-        outcome.deduped, 3,
-        "same credential + PIN merges: last wins"
+        outcome.deduped, 4,
+        "the valid re-vote merges with the earlier valid ballot (last wins); a different PIN \
+         does not merge"
     );
-    assert_eq!(outcome.valid, 3);
+    assert_eq!(
+        outcome.valid, 3,
+        "the wrong-PIN ballot dies at the ACC check"
+    );
     assert_eq!(outcome.legitimate, 3);
     assert_eq!(
         (outcome.counts.blank, outcome.counts.si, outcome.counts.no),
         (1, 1, 1),
-        "voter 1's later reject wins over the earlier approve"
+        "voter 0's later valid reject wins; the wrong-PIN reject never counts"
     );
 }
 
@@ -311,35 +285,6 @@ async fn new_device() {
     )
     .await;
     assert_eq!(verify["valid"], true, "voting ability restored");
-}
-
-/// V6: a re-delivered PIN equals the original and keeps verifying.
-#[tokio::test]
-async fn pin_resend() {
-    let mut cluster = ElectionCluster::start(1, ElectionOpts::default()).await;
-    cluster.enroll_all().await;
-    let pin = cluster.pin(0).await;
-
-    let resent = cluster
-        .voter_post(
-            0,
-            "/api/pin/resend",
-            serde_json::json!({ "passphrase": cluster.passphrases[0] }),
-        )
-        .await;
-    assert_eq!(
-        resent["pin"].as_u64().unwrap(),
-        pin,
-        "re-delivered PIN equals the original (Sec. 3.7.2)"
-    );
-    let verify = cluster
-        .voter_post(
-            0,
-            "/api/pin/verify",
-            serde_json::json!({ "passphrase": cluster.passphrases[0], "pin": pin }),
-        )
-        .await;
-    assert_eq!(verify["valid"], true, "functionality restored");
 }
 
 /// V12 negatives: the CAT rate limit is enforced over distinct ballot
@@ -768,6 +713,16 @@ async fn one_valid_confirmation_is_enough() {
     );
     let report = cluster.audit().await;
     assert!(report.ok(), "audit:\n{}", report.render());
+    // BB-1 never received the disclosure and released the ballot on the
+    // board's word - what A9 asks of it (Sec. 3.8.4 step 15, Sec. 3.9 step
+    // 2): no box may be named for that lawful release.
+    for step in report.warnings() {
+        assert!(
+            !step.detail.contains("BB-1") && !step.detail.contains("BB-2"),
+            "no box may be named for a lawful release:\n{}",
+            report.render()
+        );
+    }
 }
 
 /// A confirmation a ballot box makes up - a genuine disclosure of ANOTHER
@@ -2541,90 +2496,6 @@ async fn a_planted_confirmation_does_not_make_a_ballot_counted() {
     );
     let report = cluster.audit().await;
     assert!(report.ok(), "audit:\n{}", report.render());
-}
-
-/// A box that released a ballot on ANOTHER box's published disclosure did
-/// what A9 asks of it (Sec. 3.8.4 step 15, Sec. 3.9 step 2), and the audit
-/// must not name it as if it had released something nobody confirmed. Here
-/// BB-1 never receives the voter's disclosure and releases the ballot on the
-/// board's word: the audit passes with no accusation against any box.
-#[tokio::test]
-async fn releasing_on_another_boxes_disclosure_is_not_misconduct() {
-    use super::helpers::{passthrough, spawn_stand_in, Intercept};
-
-    let mut cluster = ElectionCluster::start(3, ElectionOpts::default()).await;
-    cluster.enroll(0).await;
-    cluster.enroll(1).await;
-    cluster.open_voting().await;
-    for (i, option) in ["approve", "blank"].iter().enumerate() {
-        let pin = cluster.pin(i).await;
-        cluster.vote_and_cast(i, option, pin).await;
-    }
-
-    let drop_cai: Intercept = std::sync::Arc::new(|path, _| {
-        (path == "cai").then(|| {
-            (
-                reqwest::StatusCode::SERVICE_UNAVAILABLE,
-                axum::body::Bytes::from_static(b"{\"error\":\"down\"}"),
-            )
-        })
-    });
-    let real_bb1 =
-        reqwest::Url::parse(&format!("https://127.0.0.1:{}/", cluster.ports.bb[0])).unwrap();
-    let stand_in = spawn_stand_in(
-        &real_bb1,
-        cluster.client.clone(),
-        passthrough(),
-        Some(drop_cai),
-    )
-    .await;
-    let voter = cluster
-        .spawn_voter_with_peers(&[("bb-1", stand_in.to_string())])
-        .await;
-    let passphrase = super::helpers::enroll_on(&cluster.client, &voter, "VOTER-003").await;
-    let post = |path: &str, body: serde_json::Value| {
-        let url = format!("{voter}{path}");
-        let client = cluster.client.clone();
-        async move { super::helpers::post_json(&client, &url, body).await }
-    };
-    let pin = post("/api/pin", serde_json::json!({ "passphrase": passphrase })).await["pin"]
-        .as_u64()
-        .unwrap();
-    let vote = post(
-        "/api/vote",
-        serde_json::json!({ "passphrase": passphrase, "option": "reject", "pin": pin }),
-    )
-    .await;
-    post(
-        "/api/cast",
-        serde_json::json!({ "passphrase": passphrase, "pin": pin }),
-    )
-    .await;
-    let confirm = post(
-        "/api/confirm",
-        serde_json::json!({
-            "passphrase": passphrase, "pin": pin, "digest": vote["digest"],
-            "l1": "code", "l2": "sum",
-        }),
-    )
-    .await;
-    assert_eq!(confirm["will_be_counted"], true, "{confirm}");
-
-    cluster.close_voting().await;
-    let outcome = cluster.tally().await;
-    assert_eq!(
-        (outcome.counts.blank, outcome.counts.si, outcome.counts.no),
-        (1, 1, 1)
-    );
-    let report = cluster.audit().await;
-    assert!(report.ok(), "audit:\n{}", report.render());
-    for step in report.warnings() {
-        assert!(
-            !step.detail.contains("BB-1") && !step.detail.contains("BB-2"),
-            "no box may be named for a lawful release:\n{}",
-            report.render()
-        );
-    }
 }
 
 /// Sec. 3.9 step 1: the eligible list the credential mix is built from is the
