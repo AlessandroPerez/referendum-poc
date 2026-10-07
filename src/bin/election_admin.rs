@@ -243,7 +243,7 @@ async fn main() -> anyhow::Result<()> {
             })
             .await?;
             println!(
-                "tally complete: blank={} si={} no={} (released={} reconciled={} deduped={} valid={} legitimate={})",
+                "tally complete: blank={} approve={} reject={} (released={} reconciled={} deduped={} valid={} legitimate={})",
                 outcome.counts.blank,
                 outcome.counts.si,
                 outcome.counts.no,
@@ -287,7 +287,7 @@ async fn main() -> anyhow::Result<()> {
             }
             match counts {
                 Some(counts) => println!(
-                    "results: blank={} si={} no={}",
+                    "results: blank={} approve={} reject={}",
                     counts.blank, counts.si, counts.no
                 ),
                 None => anyhow::bail!("no tally_result entry on the WBB (tally not run yet?)"),

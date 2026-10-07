@@ -419,7 +419,8 @@ async function showControlValues() {
     const index = (values.l1_sum + 100 - values.l1_code) % 100;
     const option = $("vote-option");
     const expected = OPTION_INDEX[option.value];
-    const label = option.options[option.selectedIndex].textContent;
+    // The option's name without its number (the select shows "1: Approve").
+    const label = option.options[option.selectedIndex].textContent.replace(/^\d+:\s*/, "");
     $("control-check").textContent =
       index === expected
         ? `Check: sum - code = ${index}, the number of "${label}".`

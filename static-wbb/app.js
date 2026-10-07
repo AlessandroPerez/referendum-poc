@@ -167,7 +167,15 @@ function renderResults() {
     el.textContent = text;
     return el;
   };
-  counts.append(strong(`Si: ${Number(si)}`), " - ", strong(`No: ${Number(no)}`), ` - blank: ${Number(blank)}`);
+  // The published fields keep their names (`si`, `no`); the page names the
+  // options as the ballot does.
+  counts.append(
+    strong(`Blank: ${Number(blank)}`),
+    " - ",
+    strong(`Approve: ${Number(si)}`),
+    " - ",
+    strong(`Reject: ${Number(no)}`),
+  );
   const where = document.createElement("p");
   where.textContent = `Published in log ${proofs
     .map((r) => `entry #${r.leaf_index} (${r.entry_type})`)
