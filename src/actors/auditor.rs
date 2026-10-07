@@ -1999,7 +1999,7 @@ fn audit_entries(
     match extract_counts(&tally_proof.decrypted) {
         Ok(counts) if counts == published_counts => report.pass(
             "tally_result",
-            format!("blank={} si={} no={}", counts.blank, counts.si, counts.no),
+            format!("Blank={} Approve={} Reject={}", counts.blank, counts.si, counts.no),
         ),
         Ok(counts) => report.fail(
             "tally_result",
