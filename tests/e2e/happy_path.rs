@@ -77,6 +77,10 @@ async fn referendum_happy_path() {
         .await;
     assert_eq!(status["no_bot"], true, "V14: no bot for voter 1");
     assert_eq!(status["published_bb_ids"], serde_json::json!([1, 2]));
+    assert!(
+        status["on_eligible_list"].is_null(),
+        "no eligible list is published before the tally"
+    );
 
     // -- V13: the CAI confirmation happened inside `vote_and_cast` (every
     //    cast is confirmed); a second confirmation has no held ballot ------
@@ -128,6 +132,19 @@ async fn referendum_happy_path() {
     // -- A5/A7: close voting, run the Sec. 3.9 tally ---------------------------
     cluster.close_voting().await;
     let outcome = cluster.tally().await;
+    // Sec. 3.9 step 1: the roll's eligible list is on the board now, and the
+    // voter app reads it from the board (its incremental board view).
+    let status = cluster
+        .voter_post(
+            0,
+            "/api/ballot/status",
+            serde_json::json!({ "passphrase": cluster.passphrases[0], "pin": pin1 }),
+        )
+        .await;
+    assert_eq!(
+        status["on_eligible_list"], true,
+        "voter 1 is on the published eligible list"
+    );
 
     assert_eq!(outcome.released, 18, "9 casts x 2 BBs released");
     assert_eq!(outcome.reconciled, 9, "every ballot on >=2 BBs (no bot)");

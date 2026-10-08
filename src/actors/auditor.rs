@@ -1292,6 +1292,107 @@ fn audit_entries(
         );
     }
 
+    // The tally's stated input is the coordinator's word, co-signed by the
+    // tellers but checked by none of them: hold it to the board (Sec. 3.10
+    // 1(b): "fetch from the WBB the ballots published at the beginning of
+    // tallying"). The driver reads the board only after the roll publishes
+    // the eligible list (Sec. 3.9 step 1), so a release sequenced before that
+    // entry was there to be taken in: its box and digest must be in the
+    // input (the first copy, as the driver takes it). A stated entry nobody
+    // can see on the board fails the later checks: the mix input would not
+    // match the releases rebuilt here.
+    if let Some(stated_list) = entries.iter().find_map(|entry| {
+        let parsed = entry.parsed.as_ref()?;
+        if parsed.entry_type != "re_encryption_proof" {
+            return None;
+        }
+        match parsed.decode_payload::<ReEncryptionProofEntry>().ok()? {
+            ReEncryptionProofEntry::OxFingerprints { inputs, .. } if !inputs.is_empty() => {
+                Some(inputs)
+            }
+            _ => None,
+        }
+    }) {
+        let stated: HashSet<&String> = stated_list.iter().collect();
+        let mut input_problems = Vec::new();
+        if stated.len() != stated_list.len() {
+            input_problems.push(format!(
+                "the stated input names {} release entries but only {} distinct ones",
+                stated_list.len(),
+                stated.len()
+            ));
+        }
+        let eligible_at = entries
+            .iter()
+            .filter(|e| {
+                e.parsed
+                    .as_ref()
+                    .is_some_and(|p| p.entry_type == "eligible_vids")
+            })
+            .map(|e| e.leaf_index)
+            .min()
+            .unwrap_or(i64::MIN);
+        let mut first_copy: HashMap<(crate::domain::BallotDigest, u64), (i64, String)> =
+            HashMap::new();
+        let mut ordered: Vec<&AuditedEntry> = entries
+            .iter()
+            .filter(|e| {
+                e.parsed
+                    .as_ref()
+                    .is_some_and(|p| p.entry_type == "encrypted_ballot")
+            })
+            .collect();
+        ordered.sort_by_key(|e| e.leaf_index);
+        for entry in ordered {
+            let id = crate::protocol::tally::release_input_id(&entry.data);
+            let Some(record) = entry
+                .parsed
+                .as_ref()
+                .and_then(|p| p.decode_payload::<EncryptedBallotEntry>().ok())
+                .map(|e| e.record)
+            else {
+                continue;
+            };
+            let bb_id = record.receipt.bb_id;
+            let expected = format!("BB-{bb_id}");
+            if !entry
+                .signers
+                .iter()
+                .any(|(signer, _, _)| *signer == expected)
+            {
+                continue;
+            }
+            let Ok(digest) = ballot_digest(&record.ballot) else {
+                continue;
+            };
+            if voting_digests.contains(&digest) {
+                first_copy
+                    .entry((digest, bb_id))
+                    .or_insert((entry.leaf_index, id));
+            }
+        }
+        for ((digest, bb_id), (leaf, id)) in &first_copy {
+            if *leaf < eligible_at && !stated.contains(id) {
+                input_problems.push(format!(
+                    "BB-{bb_id} released digest {digest} at leaf {leaf}, before the tally \
+                     began, and the tally's stated input leaves it out"
+                ));
+            }
+        }
+        if input_problems.is_empty() {
+            report.pass(
+                "tally_input",
+                format!(
+                    "the tally's stated input ({} release entries) holds every release \
+                     published before the tally began",
+                    stated.len()
+                ),
+            );
+        } else {
+            report.fail("tally_input", collapse_repeats(&input_problems));
+        }
+    }
+
     // Ground truth for everything a ballot box published about a digest: the
     // ballot RELEASED for it, by whichever box released it. The digest binds
     // the ballot, so any release serves - a box cannot escape the check by
@@ -1999,7 +2100,10 @@ fn audit_entries(
     match extract_counts(&tally_proof.decrypted) {
         Ok(counts) if counts == published_counts => report.pass(
             "tally_result",
-            format!("Blank={} Approve={} Reject={}", counts.blank, counts.si, counts.no),
+            format!(
+                "Blank={} Approve={} Reject={}",
+                counts.blank, counts.si, counts.no
+            ),
         ),
         Ok(counts) => report.fail(
             "tally_result",
@@ -2094,5 +2198,149 @@ mod collapse_tests {
     fn a_colon_later_in_the_text_is_not_a_position() {
         let notes = vec!["leafy: not a position".to_string()];
         assert_eq!(collapse_repeats(&notes), "leafy: not a position");
+    }
+}
+
+/// Sec. 3.4.2 fixes who may write what: "tRT RTs
+/// which agree on the same data can write the credential control elements",
+/// the TTs write the tally artifacts, each BB its own entries. The tally
+/// driver takes a co-signed entry as published from its data alone, on the
+/// board's word (A3); the AUDITOR re-checks the signer set itself
+/// (`required_signing`: "the auditor must not delegate that check to the
+/// WBB's own policy enforcement"). Each entry below has only valid
+/// signatures by pinned keys, and must make `entry_signatures` FAIL.
+#[cfg(test)]
+mod signer_policy {
+    use super::*;
+    use crate::clients::wbb::sign_entry;
+    use ed25519_dalek::SigningKey;
+
+    fn key(id: &str) -> SigningKey {
+        let mut seed = [0u8; 32];
+        seed[..id.len()].copy_from_slice(id.as_bytes());
+        SigningKey::from_bytes(&seed)
+    }
+
+    fn cfg() -> AuditConfig {
+        let ids = [
+            "RT-1", "RT-2", "RT-3", "TT-1", "TT-2", "TT-3", "BB-1", "ER-1",
+        ];
+        let log_key = p256::ecdsa::SigningKey::from_slice(&[7u8; 32]).unwrap();
+        AuditConfig {
+            wbb_url: Url::parse("https://127.0.0.1/wbb/").unwrap(),
+            ca_pem: String::new(),
+            log_key: *log_key.verifying_key(),
+            log_origin: "127.0.0.1/wbb".into(),
+            validator_keys: Vec::new(),
+            entity_keys: ids
+                .iter()
+                .map(|id| (id.to_string(), key(id).verifying_key()))
+                .collect(),
+            n_tt: 3,
+            t_tt: 2,
+        }
+    }
+
+    /// The board's co-signed form: one valid signature per signer.
+    fn cosigned(data: &str, signers: &[&str]) -> serde_json::Value {
+        let ts = 1_000i64;
+        let sigs: Vec<String> = signers
+            .iter()
+            .map(|id| BASE64.encode(sign_entry(data.as_bytes(), id, ts, &key(id)).signature))
+            .collect();
+        serde_json::json!({
+            "data": BASE64.encode(data.as_bytes()),
+            "timestamp": ts,
+            "entity_ids": signers,
+            "signatures": sigs,
+            "signer_timestamps": signers
+                .iter()
+                .map(|id| serde_json::json!({"entity_id": id, "timestamp": ts}))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn single(data: &str, signer: &str) -> serde_json::Value {
+        let e = sign_entry(data.as_bytes(), signer, 1_000, &key(signer));
+        serde_json::json!({
+            "data": BASE64.encode(data.as_bytes()),
+            "timestamp": 1_000,
+            "entity_id": signer,
+            "signature": BASE64.encode(e.signature),
+        })
+    }
+
+    async fn step(entry: serde_json::Value) -> AuditStep {
+        let report = audit_raw_entries(&cfg(), vec![(0, entry)]).await;
+        report
+            .steps
+            .into_iter()
+            .find(|s| s.name == "entry_signatures")
+            .expect("entry_signatures is always reported")
+    }
+
+    #[tokio::test]
+    async fn an_entry_without_the_signers_its_type_requires_fails_the_signature_step() {
+        // Honest forms pass the step.
+        for honest in [
+            cosigned("tallying,RT,credential_control,2,e30=", &["RT-1", "RT-2"]),
+            cosigned("setup,RT,acc_pub_key,2,e30=", &["RT-2", "RT-3"]),
+            cosigned("tallying,TT,tally_result,3,e30=", &["TT-1", "TT-2", "TT-3"]),
+            single("voting,BB,ballot_digest,1,e30=", "BB-1"),
+        ] {
+            let s = step(honest.clone()).await;
+            assert!(s.ok, "an honest entry failed: {} ({honest})", s.detail);
+        }
+        for (what, entry) in [
+            (
+                "credential_control by ONE registration teller",
+                single("tallying,RT,credential_control,2,e30=", "RT-1"),
+            ),
+            (
+                "credential_control co-signed by one RT and a TT",
+                cosigned("tallying,RT,credential_control,2,e30=", &["RT-1", "TT-1"]),
+            ),
+            (
+                "credential_control declaring threshold 1",
+                cosigned("tallying,RT,credential_control,1,e30=", &["RT-1", "RT-2"]),
+            ),
+            (
+                "acc_pub_key by one RT",
+                single("setup,RT,acc_pub_key,2,e30=", "RT-3"),
+            ),
+            (
+                "acc_pub_key written under the ER's role",
+                single("setup,ER,acc_pub_key,1,e30=", "ER-1"),
+            ),
+            (
+                "tally_result by two of the three TTs",
+                cosigned("tallying,TT,tally_result,3,e30=", &["TT-1", "TT-2"]),
+            ),
+            (
+                "mixed_ballots by one TT counted twice",
+                cosigned(
+                    "tallying,TT,mixed_ballots,3,e30=",
+                    &["TT-1", "TT-1", "TT-2"],
+                ),
+            ),
+            (
+                "credential_control declared under the TT role, signed by two RTs",
+                cosigned("tallying,TT,credential_control,2,e30=", &["RT-1", "RT-2"]),
+            ),
+            (
+                "tally_result declared under the RT role, signed by the three TTs",
+                cosigned("tallying,RT,tally_result,3,e30=", &["TT-1", "TT-2", "TT-3"]),
+            ),
+            (
+                "a ballot box's release under the TT role",
+                cosigned(
+                    "tallying,TT,encrypted_ballot,3,e30=",
+                    &["TT-1", "TT-2", "TT-3"],
+                ),
+            ),
+        ] {
+            let s = step(entry).await;
+            assert!(!s.ok, "{what}: entry_signatures passed ({})", s.detail);
+        }
     }
 }

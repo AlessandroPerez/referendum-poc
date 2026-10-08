@@ -1572,8 +1572,9 @@ async fn a_tally_that_fails_part_way_leaves_the_board_untouched() {
         ])
         .await
         .expect_err("a teller that will not sign the result stops the tally");
+    // The teller that refused is named by the driver.
     assert!(
-        failed.to_string().contains("TT co-signing failed"),
+        failed.to_string().contains("TT-3 refused to co-sign"),
         "{failed}"
     );
     // Sec. 3.9 publishes as it goes - the control elements reach the WBB at

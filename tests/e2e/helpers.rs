@@ -1003,6 +1003,31 @@ impl ElectionCluster {
         .await
     }
 
+    /// The tally driving `rt_urls` AND `tt_urls` in place of the cluster's
+    /// tellers (stand-ins in front of both kinds at once).
+    pub async fn try_tally_with_rts_and_tellers(
+        &self,
+        rt_urls: Vec<Url>,
+        tt_urls: Vec<Url>,
+    ) -> Result<TallyOutcome, referendum_poc::actors::admin::AdminError> {
+        let url = |p: &u16| Url::parse(&format!("https://127.0.0.1:{p}/")).unwrap();
+        run_tally(TallyConfig {
+            ceremony_dir: self.temp.path().to_path_buf(),
+            er_url: url(&self.ports.er),
+            bb_urls: self.ports.bb.iter().map(url).collect(),
+            rt_urls,
+            tt_urls,
+            wbb_url: self.wbb_url.clone(),
+            ca_pem: self.ca.cert_pem().to_string(),
+            clock: Clock::from_settings(&self.base.clock),
+            n_acc: self.base.election.n_acc,
+            t_tt: self.base.election.t_tt,
+            t_rt: self.base.election.t_rt,
+            proceed_without: Vec::new(),
+        })
+        .await
+    }
+
     /// The tally, talking to the board through `wbb_url` (e.g. a stand-in
     /// that loses requests).
     pub async fn try_tally_with_board(

@@ -1,6 +1,7 @@
 //! End-to-end test suite entrypoint (one test binary per
 //! `tests/` subdirectory, helpers in a sibling module).
 
+mod cosigned_publication;
 mod credential_generation;
 mod enrollment;
 mod golden;
@@ -9,9 +10,11 @@ mod hardening;
 mod helpers;
 mod pin_management;
 mod protocol_flows;
+mod resigning;
 mod setup_ceremony;
 mod tally_audit;
 mod tamper;
+mod teller_naming;
 mod voting;
 mod wbb_smoke;
 

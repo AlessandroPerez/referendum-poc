@@ -42,6 +42,22 @@ pub enum Error {
 /// Convenience alias.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// How much of another party's text an error message quotes.
+const QUOTED_MAX_CHARS: usize = 200;
+
+/// Text another party sent (a teller's refusal, say), made fit to show in an
+/// error message: quoted and escaped, so a control character prints as its
+/// escape and cannot move the cursor or erase a line on the operator's
+/// terminal, and cut short.
+pub fn quoted(text: &str) -> String {
+    let shown: String = text.chars().take(QUOTED_MAX_CHARS).collect();
+    if shown.len() < text.len() {
+        format!("{shown:?} (cut at {QUOTED_MAX_CHARS} characters)")
+    } else {
+        format!("{shown:?}")
+    }
+}
+
 impl Error {
     pub fn validation(msg: impl Into<String>) -> Self {
         Self::Validation(msg.into())
@@ -114,5 +130,15 @@ mod tests {
     fn conflict_maps_to_409() {
         let response = Error::conflict("duplicate").into_response();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn quoted_text_carries_no_control_character_and_is_cut_short() {
+        let forged = "\r\x1b[2K\x1b[1A\rError: TT-1 refused";
+        let shown = quoted(forged);
+        assert!(!shown.chars().any(char::is_control), "{shown}");
+        assert!(shown.contains("TT-1 refused"));
+        let long = "x".repeat(10_000);
+        assert!(quoted(&long).len() < 300);
     }
 }

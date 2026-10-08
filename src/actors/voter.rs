@@ -118,6 +118,8 @@ pub struct VoterState {
     /// sending the PIN request in the background (see `enroll_handler`):
     /// the status screen reports a request as open while it runs.
     enrolling: Mutex<std::collections::HashSet<Vid>>,
+    /// What this app has made of the board so far (see [`BoardView`]).
+    board_view: Mutex<BoardView>,
 }
 
 impl std::fmt::Debug for VoterState {
@@ -175,6 +177,13 @@ struct VoterSession {
     /// and nothing acts on it automatically.
     #[serde(default)]
     rebuilt_without_rts: Vec<String>,
+    /// A fresh random value each time a PIN is delivered (retrieval, re-send,
+    /// ruse, revocation). Every open screen of this app compares it with the
+    /// one it last saw and, when it changed, forgets every PIN it shows:
+    /// after a ruse no other tab may go on showing the valid PIN. Random, not
+    /// a count, so it says nothing about how many deliveries there were.
+    #[serde(default)]
+    pin_epoch: String,
     #[serde(default)]
     ruse_voter: Option<Voter<G>>,
     /// The dealers' commitments for this credential, pinned the first time
@@ -445,9 +454,10 @@ impl HeldDisclosure {
 /// The consequence is deliberate: a voter who types their OWN PIN into the
 /// decoy box arms it as a decoy - but Sec. 3.7.3 step 5 builds the ruse
 /// credential for `x + PIN^ruse - PIN^valid`, which for their own PIN IS the
-/// valid credential, so ballots cast with it still count. The app draws its
-/// own decoys away from the real PIN, and arming any other value puts the
-/// real PIN back.
+/// valid credential, so ballots cast with it still count. A decoy the app
+/// draws itself is uniform over every PIN, the real one included (see
+/// `pin_ruse_handler`), and arming any other value makes that value the
+/// decoy instead.
 ///
 /// PrivatePINEmoji of `pin` (Sec. 3.6.3 step 5, 3.7.1, 3.8.2 step 14): the
 /// visual digest of `H(o^x)` for the credential that PIN is used with - the
@@ -840,13 +850,12 @@ impl VoterState {
     }
 
     /// V4: retrieval-token share delivery + threshold DVNIZKP against the
-    /// trusted tellers, finalizing the `Voter` (Sec. 5.3.1.4/.5, Sec. 3.6.2/.3).
+    /// tellers that have announced themselves - every teller, trusted or not
+    /// (Sec. 3.6.3) - finalizing the `Voter` (Sec. 5.3.1.4/.5, Sec. 3.6.2/.3).
     ///
     /// EVERY path that rebuilds a credential goes through here, retrieval and
-    /// re-send alike, so the decoy the voter held before a revocation is
-    /// armed again over the new credential whichever one they take and a
-    /// coercer who comes back is never shown a PIN they do not know
-    /// (Sec. 3.7.5 read together with Sec. 3.7.3).
+    /// re-send alike. A revocation clears any decoy first (Sec. 3.7.5: a new
+    /// registration shows PIN^valid), so none is carried over.
     async fn run_retrieval(&self, session: &mut VoterSession) -> Result<PinCode, VoterError> {
         let pin = self.rebuild_credential(session).await?;
         Ok(pin)
@@ -895,8 +904,13 @@ impl VoterState {
                     session.rebuilt_without_rts = excluded.into_iter().cloned().collect();
                     return Ok(pin);
                 }
+                // A teller in this subset that refuses to deliver now (it
+                // delivered before, or the subset would not be ready) is one
+                // more teller to leave out, not a reason to stop: otherwise
+                // one dishonest teller holds every retry (A2).
                 Err(VoterError::CredentialFailedPinCheck)
-                | Err(VoterError::CredentialRoundRefused) => continue,
+                | Err(VoterError::CredentialRoundRefused)
+                | Err(VoterError::TellersStillWaiting) => continue,
                 Err(e) => return Err(e),
             }
         }
@@ -1226,11 +1240,10 @@ async fn published_assigned_vids(state: &VoterState) -> Result<Vec<u64>, VoterEr
     use base64::Engine as _;
     let entries = state
         .wbb_client
-        .entries()
+        .board_entries()
         .await
         .map_err(|e| VoterError::Protocol(format!("WBB read failed: {e}")))?;
     entries
-        .entries
         .iter()
         .filter_map(|sequenced| {
             let data = B64.decode(sequenced.entry.get("data")?.as_str()?).ok()?;
@@ -1261,24 +1274,7 @@ fn identifier_matches_its_kind(
 /// The eligible identifiers the electoral roll published for the tally, if
 /// it has published them yet.
 async fn published_eligible_list(state: &VoterState) -> Result<Option<Vec<Vid>>, VoterError> {
-    use base64::engine::general_purpose::STANDARD as B64;
-    use base64::Engine as _;
-    let entries = state
-        .wbb_client
-        .entries()
-        .await
-        .map_err(|e| VoterError::Protocol(format!("WBB read failed: {e}")))?;
-    Ok(entries
-        .entries
-        .iter()
-        .filter_map(|sequenced| {
-            let data = B64.decode(sequenced.entry.get("data")?.as_str()?).ok()?;
-            let parsed = voting::parse_wbb_data(&data)?;
-            (parsed.entry_type == "eligible_vids")
-                .then(|| parsed.decode_payload::<Vec<Vid>>().ok())
-                .flatten()
-        })
-        .next())
+    Ok(read_board_view(state).await?.eligible_list.clone())
 }
 
 /// The root of the identifier tree, as published on the bulletin board at
@@ -1288,11 +1284,10 @@ async fn published_vid_root(state: &VoterState) -> Result<[u8; 32], VoterError> 
     use base64::Engine as _;
     let entries = state
         .wbb_client
-        .entries()
+        .board_entries()
         .await
         .map_err(|e| VoterError::Protocol(format!("WBB read failed: {e}")))?;
     let root = entries
-        .entries
         .iter()
         .filter_map(|sequenced| {
             let data = B64.decode(sequenced.entry.get("data")?.as_str()?).ok()?;
@@ -1443,6 +1438,7 @@ async fn enroll_handler(
         ruse_pin: None,
         share_commitments: None,
         rebuilt_without_rts: Vec::new(),
+        pin_epoch: String::new(),
         ruse_voter: None,
         trusted: None,
         generation: 0,
@@ -1546,6 +1542,8 @@ struct StatusResponse {
     /// (Sec. 3.6.1 step 11) - a retry took place, not proof of who was
     /// wrong: see the register.
     rebuilt_without_rts: Vec<String>,
+    /// See `VoterSession::pin_epoch`.
+    pin_epoch: String,
 }
 
 /// Poll enrollment status: the PIN is ready once >= t_RT notifications arrived
@@ -1560,7 +1558,7 @@ async fn status_handler(
         (_, Some(_)) => true,
         (Some(rid), None) => {
             // Same rule as the retrieval itself: t_RT of the tellers this
-            // voter TRUSTS have announced that their waiting period is over.
+            // voter's app asks have announced that their waiting period is over.
             let list = state.ns_client.notifications(session.vid, rid).await?;
             state.ready_rts(&session, &list).len() >= state.t_rt
         }
@@ -1574,6 +1572,7 @@ async fn status_handler(
         pin_request_open: session.rid.is_some()
             || state.enrolling.lock().await.contains(&session.vid),
         rebuilt_without_rts: session.rebuilt_without_rts.clone(),
+        pin_epoch: session.pin_epoch.clone(),
     }))
 }
 
@@ -1621,6 +1620,7 @@ async fn pin_retrieve_handler(
     }
 
     let pin = state.run_retrieval(&mut session).await?;
+    session.pin_epoch = new_pin_epoch(&state);
     state.save_session(&req.passphrase, &session).await?;
     // Refresh the recovery blob now that the credential exists (V8). The PIN
     // is on the device whatever the roll answers, so the answer says so.
@@ -1764,13 +1764,13 @@ async fn results_handler(
         .map_err(|e| VoterError::Protocol(format!("WBB phase query failed: {e}")))?;
     let entries = state
         .wbb_client
-        .entries()
+        .board_entries()
         .await
         .map_err(|e| VoterError::Protocol(format!("WBB entries query failed: {e}")))?;
 
     let mut counts = None;
     let mut tally_entries = Vec::new();
-    for sequenced in &entries.entries {
+    for sequenced in entries.iter() {
         let Some(parsed) = sequenced
             .entry
             .get("data")
@@ -2202,7 +2202,7 @@ async fn ballot_status_handler(
 }
 
 /// One ballot box's publication of a digest, as found on the bulletin board.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct DigestPublication {
     bb_id: u64,
     leaf_index: i64,
@@ -2215,7 +2215,7 @@ struct DigestPublication {
 }
 
 /// One ballot box's published cast-as-intended proof for a digest.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct DigestConfirmation {
     bb_id: u64,
     leaf_index: i64,
@@ -2265,61 +2265,18 @@ async fn digest_on_board(
     state: &VoterState,
     digest: BallotDigest,
 ) -> Result<VerifyResponse, VoterError> {
-    use base64::engine::general_purpose::STANDARD as B64;
-    use base64::Engine as _;
-    let entries = state
-        .wbb_client
-        .entries()
-        .await
-        .map_err(|e| VoterError::Protocol(format!("WBB read failed: {e}")))?;
-
-    let mut publications = Vec::new();
-    let mut confirmations = Vec::new();
-    for sequenced in &entries.entries {
-        let Some(parsed) = sequenced
-            .entry
-            .get("data")
-            .and_then(|v| v.as_str())
-            .and_then(|b64| B64.decode(b64).ok())
-            .and_then(|data| voting::parse_wbb_data(&data))
-        else {
-            continue;
-        };
-        match parsed.entry_type.as_str() {
-            "ballot_digest" => {
-                if let Ok(entry) = parsed.decode_payload::<BallotDigestEntry>() {
-                    if entry.digest == digest
-                        && voting::signed_by_ballot_box(&sequenced.entry, entry.receipt.bb_id)
-                    {
-                        publications.push(DigestPublication {
-                            bb_id: entry.receipt.bb_id,
-                            leaf_index: sequenced.leaf_index,
-                            board_timestamp: sequenced.timestamp,
-                            received_at_unix_ms: entry.receipt.received_at_unix_ms,
-                            emoji: entry.emoji,
-                            public_pin_emoji: entry.public_pin_emoji,
-                        });
-                    }
-                }
-            }
-            "cast_intended_proof" => {
-                if let Ok(entry) = parsed.decode_payload::<voting::CaiEntry>() {
-                    if entry.digest == digest
-                        && voting::signed_by_ballot_box(&sequenced.entry, entry.bb_id)
-                    {
-                        confirmations.push(DigestConfirmation {
-                            bb_id: entry.bb_id,
-                            leaf_index: sequenced.leaf_index,
-                            confirmed_at_ms: entry.confirmed_at_ms,
-                            opened: entry.opened,
-                            disclosure: Some(entry.disclosure),
-                        });
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
+    let (mut publications, mut confirmations) = {
+        let view = read_board_view(state).await?;
+        view.by_digest
+            .get(&digest)
+            .map(|on_board| {
+                (
+                    on_board.publications.clone(),
+                    on_board.confirmations.clone(),
+                )
+            })
+            .unwrap_or_default()
+    };
     publications.sort_by_key(|p| p.bb_id);
     confirmations.sort_by_key(|c| c.bb_id);
     let distinct: std::collections::BTreeSet<u64> = publications.iter().map(|p| p.bb_id).collect();
@@ -2338,6 +2295,109 @@ async fn digest_on_board(
         publications,
         confirmations,
     })
+}
+
+/// What one digest has on the board: each box's publication of it and each
+/// box's cast-as-intended proof for it, under that box's own signature, in
+/// board order.
+#[derive(Default)]
+struct DigestOnBoard {
+    publications: Vec<DigestPublication>,
+    confirmations: Vec<DigestConfirmation>,
+}
+
+/// The board as the voting path reads it, kept up to date entry by entry:
+/// each reading parses only what was written since the last one (Table 6.1,
+/// A9: one box flooding the board must not make every check of every voter
+/// as slow as the board is long). Folded in board order, it answers what a
+/// parse of a whole reading answers.
+#[derive(Default)]
+struct BoardView {
+    /// Leaves below this one are folded in.
+    next_leaf: i64,
+    /// The ballot entries, by the tally's own rule (`board_ballots`).
+    ballots: crate::protocol::tally::BoardBallotsFold,
+    by_digest: HashMap<BallotDigest, DigestOnBoard>,
+    /// The first `eligible_vids` list the roll published, once it has.
+    eligible_list: Option<Vec<Vid>>,
+}
+
+impl BoardView {
+    fn add(&mut self, sequenced: &crate::clients::wbb::SequencedEntry) {
+        use base64::engine::general_purpose::STANDARD as B64;
+        use base64::Engine as _;
+        self.ballots.add(&sequenced.entry);
+        let Some(parsed) = sequenced
+            .entry
+            .get("data")
+            .and_then(|v| v.as_str())
+            .and_then(|b64| B64.decode(b64).ok())
+            .and_then(|data| voting::parse_wbb_data(&data))
+        else {
+            return;
+        };
+        match parsed.entry_type.as_str() {
+            "ballot_digest" => {
+                if let Ok(entry) = parsed.decode_payload::<BallotDigestEntry>() {
+                    if voting::signed_by_ballot_box(&sequenced.entry, entry.receipt.bb_id) {
+                        self.by_digest
+                            .entry(entry.digest)
+                            .or_default()
+                            .publications
+                            .push(DigestPublication {
+                                bb_id: entry.receipt.bb_id,
+                                leaf_index: sequenced.leaf_index,
+                                board_timestamp: sequenced.timestamp,
+                                received_at_unix_ms: entry.receipt.received_at_unix_ms,
+                                emoji: entry.emoji,
+                                public_pin_emoji: entry.public_pin_emoji,
+                            });
+                    }
+                }
+            }
+            "cast_intended_proof" => {
+                if let Ok(entry) = parsed.decode_payload::<voting::CaiEntry>() {
+                    if voting::signed_by_ballot_box(&sequenced.entry, entry.bb_id) {
+                        self.by_digest
+                            .entry(entry.digest)
+                            .or_default()
+                            .confirmations
+                            .push(DigestConfirmation {
+                                bb_id: entry.bb_id,
+                                leaf_index: sequenced.leaf_index,
+                                confirmed_at_ms: entry.confirmed_at_ms,
+                                opened: entry.opened,
+                                disclosure: Some(entry.disclosure),
+                            });
+                    }
+                }
+            }
+            "eligible_vids" if self.eligible_list.is_none() => {
+                self.eligible_list = parsed.decode_payload::<Vec<Vid>>().ok();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// ONE reading of the board: the entries written since the last reading,
+/// folded into the view. A failed read is an error, never an empty answer.
+async fn read_board_view(
+    state: &VoterState,
+) -> Result<tokio::sync::MutexGuard<'_, BoardView>, VoterError> {
+    let mut view = state.board_view.lock().await;
+    let written_since = state
+        .wbb_client
+        .board_entries_from(view.next_leaf)
+        .await
+        .map_err(|e| VoterError::Protocol(format!("WBB read failed: {e}")))?;
+    for sequenced in &written_since {
+        view.add(sequenced);
+    }
+    if let Some(last) = written_since.last() {
+        view.next_leaf = last.leaf_index + 1;
+    }
+    Ok(view)
 }
 
 /// The control values of the held ballot. No `Debug`: they reveal the vote.
@@ -2531,17 +2591,8 @@ async fn confirm_handler(
     // could publish the newer ballot and then this one in between, and the
     // older choice would be confirmed as the most recent.
     {
-        let entries = state
-            .wbb_client
-            .entries()
-            .await
-            .map_err(|e| VoterError::Protocol(format!("WBB read failed: {e}")))?;
-        let entries: Vec<(i64, serde_json::Value)> = entries
-            .entries
-            .into_iter()
-            .map(|sequenced| (sequenced.leaf_index, sequenced.entry))
-            .collect();
-        let on_board = crate::protocol::tally::board_ballots(&entries).publishers;
+        let view = read_board_view(&state).await?;
+        let on_board = view.ballots.publishers();
         let newer_on_board = session
             .held_by_pin
             .iter()
@@ -2837,7 +2888,7 @@ async fn pin_ruse_handler(
     // One writer per device: see `VoterState::device_locks`.
     let _device = state.device_lock(&req.passphrase).await?;
     let mut session = state.session_for(&req.passphrase).await?;
-    let voter = session.voter.clone().ok_or(VoterError::PinNotRetrieved)?;
+    session.voter.as_ref().ok_or(VoterError::PinNotRetrieved)?;
     session.pin.ok_or(VoterError::PinNotRetrieved)?;
 
     // Arming a decoy is an act of the voter, not of whoever holds the device:
@@ -2878,6 +2929,16 @@ async fn pin_ruse_handler(
         }
     };
 
+    // Sec. 3.7.3 steps 7-8: a ruse is a PIN request like a re-send - the
+    // tellers answer it after their waiting period, and those not trusted
+    // return the valid shares. So it IS one here: the same request, the same
+    // wait and the same traffic, and the decoy is then armed on this device
+    // over the credential just delivered (README row 3). A screen that
+    // finished sooner, or a request that looked different on the wire, would
+    // tell a ruse from a re-send.
+    redeliver_pin(&state, &mut session, &req.passphrase, false).await?;
+    let voter = session.voter.clone().ok_or(VoterError::PinNotRetrieved)?;
+
     // Simulate over the REAL credential builder: the forged DV proof makes
     // local verification of the ruse PIN succeed, while ballots built with it
     // unmask a wrong x and are filtered by the tally ACC check.
@@ -2912,22 +2973,30 @@ async fn pin_ruse_handler(
     }))
 }
 
-/// V6: PIN re-sending (Sec. 3.7.2) - a fresh rid' + RT requests + retrieval.
-/// The re-derived PIN must equal the stored one.
-#[tracing::instrument(skip(state, req))]
-async fn pin_resend_handler(
-    Extension(state): Extension<Arc<VoterState>>,
-    Json(req): Json<PassphraseRequest>,
-) -> Result<Json<PinResponse>, VoterError> {
-    // One writer per device: see `VoterState::device_locks`.
-    let _device = state.device_lock(&req.passphrase).await?;
-    let mut session = state.session_for(&req.passphrase).await?;
+/// A new `VoterSession::pin_epoch`.
+fn new_pin_epoch(state: &VoterState) -> String {
+    let mut rng = state.next_rng("pin-epoch");
+    format!("{:016x}", rng.next_u64())
+}
+
+/// Sec. 3.7.2: a fresh rid', the PIN request to every teller, and the
+/// retrieval once t_RT of them have announced themselves; the stored
+/// credential is replaced by the valid one the tellers deliver, and any
+/// decoy goes with it. Shared by the re-send and the ruse, which in the
+/// thesis is a PIN request too (Sec. 3.7.3 steps 7-8): the two then take
+/// the same time and look the same on the wire.
+async fn redeliver_pin(
+    state: &VoterState,
+    session: &mut VoterSession,
+    passphrase: &str,
+    commit: bool,
+) -> Result<PinCode, VoterError> {
     let stored_pin = session.pin;
 
-    state.run_pin_request(&mut session).await?;
+    state.run_pin_request(session).await?;
     // The new request id must survive a timeout: another re-send then
     // starts from a consistent session (the stored PIN is untouched).
-    state.save_session(&req.passphrase, &session).await?;
+    state.save_session(passphrase, session).await?;
     // Each teller answers only after its waiting period tau (Sec. 5.3.1.4):
     // wait for t_RT of them to announce themselves, for at most the longest
     // possible tau plus a margin. On the logical clock they already have.
@@ -2936,7 +3005,7 @@ async fn pin_resend_handler(
     // per second at most (it only happens on forged or stale announcements).
     let deadline = tokio::time::Instant::now() + state.tau_wait;
     let pin = loop {
-        let pause = match state.run_retrieval(&mut session).await {
+        let pause = match state.run_retrieval(session).await {
             Err(VoterError::PinNotReady) => std::time::Duration::from_millis(250),
             Err(VoterError::TellersStillWaiting) => std::time::Duration::from_secs(1),
             other => break other?,
@@ -2962,10 +3031,30 @@ async fn pin_resend_handler(
     // calls valid. A voter who wants a decoy arms one again afterwards.
     session.ruse_pin = None;
     session.ruse_voter = None;
-    state.save_session(&req.passphrase, &session).await?;
+    session.pin_epoch = new_pin_epoch(state);
     // Committed: the answer below describes the device as it now is, and a
-    // blob upload the roll refuses is logged, not turned into "failed".
-    state.refresh_recovery_blob(&req.passphrase, &session).await;
+    // blob upload the roll refuses is logged, not turned into "failed". A
+    // ruse commits once, after arming its decoy - one save and one upload
+    // either way, and no moment where the valid credential is saved with no
+    // decoy armed.
+    if commit {
+        state.save_session(passphrase, session).await?;
+        state.refresh_recovery_blob(passphrase, session).await;
+    }
+    Ok(pin)
+}
+
+/// V6: PIN re-sending (Sec. 3.7.2) - a fresh rid' + RT requests + retrieval.
+/// The re-derived PIN must equal the stored one.
+#[tracing::instrument(skip(state, req))]
+async fn pin_resend_handler(
+    Extension(state): Extension<Arc<VoterState>>,
+    Json(req): Json<PassphraseRequest>,
+) -> Result<Json<PinResponse>, VoterError> {
+    // One writer per device: see `VoterState::device_locks`.
+    let _device = state.device_lock(&req.passphrase).await?;
+    let mut session = state.session_for(&req.passphrase).await?;
+    let pin = redeliver_pin(&state, &mut session, &req.passphrase, true).await?;
 
     // A RE-SEND delivers the valid PIN. Sec. 3.6.3 footnote 9 is explicit:
     // "PIN = PIN^ruse if this originates from a ruse PIN request ..., or
@@ -3176,6 +3265,7 @@ async fn revoke_handler(
     session.rebuilt_without_rts.clear();
     session.rid = None;
     session.ns_token = None;
+    session.pin_epoch = new_pin_epoch(&state);
     state.save_session(&req.passphrase, &session).await?;
     // Only now is the old file dropped, so the passphrase resolves to one
     // session; and only then is the PIN requested, which the voter can retry.
@@ -3300,6 +3390,11 @@ async fn trusted_put_handler(
         )));
     }
 
+    // The ballot boxes chosen here are the ones ballots and disclosures go
+    // to (Sec. 3.8). The registration tellers are recorded and shown: in the
+    // thesis they decide which tellers can tell a ruse from a re-send (Sec.
+    // 3.12), and the ruse is made on this device (README row 3), so the PIN
+    // request still goes to every teller (Sec. 3.6.3).
     session.trusted = Some(TrustedSettings {
         rts: req.rts.clone(),
         bbs: req.bbs.clone(),
@@ -3672,6 +3767,7 @@ pub async fn build_service(
         ballots: Mutex::new(HashMap::new()),
         device_locks: Mutex::new(HashMap::new()),
         enrolling: Mutex::new(std::collections::HashSet::new()),
+        board_view: Mutex::new(BoardView::default()),
     });
 
     let addr: SocketAddr = format!("{}:{}", settings.service.host, settings.service.port)

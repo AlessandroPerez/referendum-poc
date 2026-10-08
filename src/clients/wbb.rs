@@ -110,12 +110,28 @@ pub struct PhaseResponse {
     pub phase: String,
 }
 
+/// The leaf a submission answer says the entry is at. A partial that arrives
+/// after its entry was published is logged as a reference leaf of its own
+/// (status "appended", `leaf_index` that new leaf): the entry itself is at
+/// `referenced_leaf`.
+pub fn answered_leaf(answer: &serde_json::Value) -> Option<i64> {
+    let field = if answer.get("status").and_then(|v| v.as_str()) == Some("appended") {
+        "referenced_leaf"
+    } else {
+        "leaf_index"
+    };
+    answer.get(field).and_then(|v| v.as_i64())
+}
+
 /// WBB client. Holds a pre-configured [`reqwest::Client`] so TLS roots and
 /// timeouts are set up once (see `protocol::tls`).
 #[derive(Clone, Debug)]
 pub struct WbbClient {
     client: Client,
     base_url: Url,
+    /// The entries [`Self::board_entries`] has read so far, shared by every
+    /// clone of this client.
+    read_so_far: std::sync::Arc<tokio::sync::Mutex<std::sync::Arc<Vec<SequencedEntry>>>>,
 }
 
 impl WbbClient {
@@ -127,7 +143,11 @@ impl WbbClient {
         if !path.ends_with('/') {
             base_url.set_path(&format!("{path}/"));
         }
-        Self { client, base_url }
+        Self {
+            client,
+            base_url,
+            read_so_far: Default::default(),
+        }
     }
 
     /// The board's base URL (with a trailing slash).
@@ -154,32 +174,47 @@ impl WbbClient {
         }
     }
 
-    /// Submit and poll `/entries` until the entry is included, up to `deadline`.
+    /// Submit and wait until the entry is on the board, up to `deadline`.
     ///
-    /// Identification is best-effort: it looks for an entry whose `data` field
-    /// matches the submitted `data` bytes. This is sufficient for the PoC
-    /// harness; production code would track a content hash.
+    /// The board answers a submission with the leaf it sequenced the entry
+    /// at, and that one leaf is read to confirm it carries these `data`
+    /// bytes. With no leaf named, or a named leaf that holds something else,
+    /// the board is read (incrementally, see [`Self::board_entries`]) until
+    /// the data appears. Never the whole board at every poll: one writer
+    /// flooding the board would make each poll, and so every publication,
+    /// as slow as the board is long.
     pub async fn submit_and_wait(
         &self,
         entry: &SignedEntry,
         deadline: Duration,
     ) -> Result<SequencedEntry, WbbError> {
         let data_b64 = BASE64.encode(&entry.data);
-        self.submit(entry).await?;
+        let carries_data = |sequenced: &SequencedEntry| {
+            sequenced
+                .entry
+                .get("data")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s == data_b64)
+        };
+        let answer = self.submit(entry).await?;
+        let mut named = answered_leaf(&answer);
 
         let result = timeout(deadline, async {
             let mut ticker = interval(Duration::from_millis(50));
             loop {
                 ticker.tick().await;
-                if let Ok(entries) = self.entries().await {
-                    if let Some(found) = entries.entries.iter().find(|e| {
-                        e.entry
-                            .get("data")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s == data_b64)
-                            .unwrap_or(false)
-                    }) {
-                        return Ok(found.clone());
+                match named {
+                    Some(leaf) => match self.entry(leaf).await {
+                        Ok(Some(sequenced)) if carries_data(&sequenced) => return Ok(sequenced),
+                        Ok(Some(_)) => named = None,
+                        _ => {}
+                    },
+                    None => {
+                        if let Ok(entries) = self.board_entries().await {
+                            if let Some(found) = entries.iter().find(|e| carries_data(e)) {
+                                return Ok(found.clone());
+                            }
+                        }
                     }
                 }
             }
@@ -251,6 +286,72 @@ impl WbbClient {
         } else {
             Err(WbbError::Http(status, body))
         }
+    }
+
+    /// `GET /entries?start={start}`: the entries from leaf `start` on.
+    pub async fn entries_from(&self, start: i64) -> Result<EntriesResponse, WbbError> {
+        let mut url = self.base_url.join("entries")?;
+        url.query_pairs_mut()
+            .append_pair("start", &start.to_string());
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(WbbError::Network)?;
+        let status = response.status();
+        let body = response.text().await.map_err(WbbError::Network)?;
+        if status == StatusCode::OK {
+            serde_json::from_str(&body).map_err(WbbError::Json)
+        } else {
+            Err(WbbError::Http(status, body))
+        }
+    }
+
+    /// Every entry on the board, as `GET /entries` - read INCREMENTALLY:
+    /// what this client (or a clone) has read before is kept, and only the
+    /// entries from the last one read on are fetched. A reading then costs
+    /// the board what was written since the previous one, not the whole log:
+    /// one writer flooding the board cannot make every check on the voting
+    /// path as slow as the board is long. The reading is shared, not copied.
+    ///
+    /// The board is append-only (Sec. 3.4.2), so what was read stays as it
+    /// was. Each reading starts AT the last leaf already read and must find
+    /// it unchanged; if not (another board at this address), everything is
+    /// read again. An entry's validator signatures are as first read: a
+    /// reader that shows them uses [`Self::entries`].
+    pub async fn board_entries(&self) -> Result<std::sync::Arc<Vec<SequencedEntry>>, WbbError> {
+        let mut read = self.read_so_far.lock().await;
+        let fresh = match read.last() {
+            None => self.entries().await?.entries,
+            Some(last) => {
+                let fresh = self.entries_from(last.leaf_index).await?.entries;
+                let continues = fresh.first().is_some_and(|first| {
+                    first.leaf_index == last.leaf_index && first.entry == last.entry
+                }) && fresh
+                    .windows(2)
+                    .all(|pair| pair[0].leaf_index < pair[1].leaf_index);
+                if continues {
+                    std::sync::Arc::make_mut(&mut read).extend(fresh.into_iter().skip(1));
+                    return Ok(read.clone());
+                }
+                self.entries().await?.entries
+            }
+        };
+        *read = std::sync::Arc::new(fresh);
+        Ok(read.clone())
+    }
+
+    /// The entries from leaf `next_leaf` on, out of a fresh
+    /// [`Self::board_entries`] reading: for a reader that keeps what it
+    /// made of the entries before.
+    pub async fn board_entries_from(
+        &self,
+        next_leaf: i64,
+    ) -> Result<Vec<SequencedEntry>, WbbError> {
+        let read = self.board_entries().await?;
+        let from = read.partition_point(|sequenced| sequenced.leaf_index < next_leaf);
+        Ok(read[from..].to_vec())
     }
 
     /// `GET /entries/{index}`. Returns `None` on 404.

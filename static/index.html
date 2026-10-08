@@ -73,7 +73,7 @@
           <p class="step">Step 4 of 5</p>
           <h2>Your PIN</h2>
           <p class="lead">This is your 5-digit voting PIN. Memorise it and keep it secret.</p>
-          <code id="pin" class="big copy-on-click" data-copy-name="PIN" title="Tap to copy" role="button" tabindex="0"></code>
+          <code id="pin" class="big"></code>
           <label>Your PIN emoji</label>
           <code id="pin-emoji"></code>
           <p class="hint">Remember these symbols too. Whenever you type this PIN, the app must
@@ -86,7 +86,7 @@
           <h2>Verify your PIN</h2>
           <p class="lead">Type your PIN to verify it locally on this device.</p>
           <label for="pin-input">PIN</label>
-          <input id="pin-input" inputmode="numeric" autocomplete="off">
+          <input id="pin-input" type="password" inputmode="numeric" autocomplete="off">
           <button id="btn-verify">Verify</button>
           <p id="verify-label" class="result"></p>
           <code id="verify-emoji" class="hidden"></code>
@@ -109,14 +109,14 @@
           <h2>Your vote</h2>
           <p class="lead">Election phase: <strong id="phase-label">...</strong></p>
           <label for="vote-option">Your choice</label>
-          <select id="vote-option">
+          <select id="vote-option" autocomplete="off">
             <option value="" disabled selected>Choose...</option>
             <option value="blank">0: Blank</option>
             <option value="approve">1: Approve</option>
             <option value="reject">2: Reject</option>
           </select>
           <label for="vote-pin">PIN</label>
-          <input id="vote-pin" inputmode="numeric" autocomplete="off">
+          <input id="vote-pin" type="password" inputmode="numeric" autocomplete="off">
           <button id="btn-vote">Build ballot</button>
         </section>
 
@@ -181,18 +181,16 @@
             is lost: that decoy is your real credential, so its ballots still count, and arming
             any other value gives you a decoy again.</p>
           <label for="ruse-current-pin">Your PIN</label>
-          <input id="ruse-current-pin" inputmode="numeric" maxlength="5" placeholder="5 digits" />
+          <input id="ruse-current-pin" type="password" inputmode="numeric" maxlength="5" placeholder="5 digits" autocomplete="off" />
           <p class="hint">Arming a decoy replaces the credential this app checks your PIN
             against, so it is you who has to ask for it: type the PIN this app holds.</p>
           <label for="ruse-pin-input">Ruse PIN (optional)</label>
-          <input id="ruse-pin-input" inputmode="numeric" maxlength="5" placeholder="5 digits" />
+          <input id="ruse-pin-input" type="password" inputmode="numeric" maxlength="5" placeholder="5 digits" autocomplete="off" />
           <button id="btn-ruse">Get a ruse PIN</button>
-          <code id="ruse-pin" class="big hidden"></code>
-          <code id="ruse-emoji" class="hidden"></code>
-          <p class="hint">"Re-send my PIN" delivers YOUR PIN again. If someone is watching and you
-            want them to see a PIN that is not yours, use the ruse PIN above instead. Both show a
-            PIN the same way on this screen; on the network they differ, so someone watching your
-            connection could tell them apart.</p>
+          <p class="hint">Arm a decoy when nobody is watching. "Re-send my PIN" delivers YOUR PIN
+            again and disarms any decoy (arm it again if you need it). Both are PIN requests to the
+            tellers and end the same way - a pause, then "PIN delivered" with a PIN - and what you
+            type above is cleared at once.</p>
           <button id="btn-resend" class="secondary">Re-send my PIN</button>
           <p id="pin-tools-label" class="result"></p>
         </section>
@@ -208,7 +206,11 @@
 
         <section id="screen-trusted" class="screen locked">
           <h2>Trusted authorities</h2>
-          <p class="lead">Choose which registration tellers and ballot boxes this app relies on.</p>
+          <p class="lead">Choose which ballot boxes this app sends your ballots and confirmations
+            to, and which registration tellers you trust. Every teller still receives your PIN
+            requests, so that no single one can hold your PIN back; in this version your teller
+            choice is recorded but changes nothing else, because ruse PINs are made on this
+            device.</p>
           <label for="trusted-rts">Registration tellers (comma-separated)</label>
           <input id="trusted-rts" placeholder="rt-1,rt-2,rt-3" autocomplete="off">
           <label for="trusted-bbs">Ballot boxes (comma-separated)</label>

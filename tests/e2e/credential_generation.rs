@@ -414,3 +414,223 @@ async fn poll_for_rt_setup_entries(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
+
+/// A ceremony written to a temporary directory and a bulletin board whose
+/// registration tellers are the ceremony's, for credential generation alone.
+struct CeremonyBoard {
+    temp: tempfile::TempDir,
+    base: referendum_poc::configuration::Settings,
+    ca: ClusterCa,
+    wbb: helpers::WbbProcess,
+    wbb_url: Url,
+}
+
+impl CeremonyBoard {
+    async fn start() -> Self {
+        const SEED: [u8; 32] = [0xab; 32];
+        helpers::init();
+        let temp = tempfile::tempdir().unwrap();
+        let base = referendum_poc::configuration::get_configuration(&PathBuf::from(env!(
+            "CARGO_MANIFEST_DIR"
+        )))
+        .unwrap();
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed(SEED);
+        let ceremony = run_ceremony(&base.election, &mut rng).unwrap();
+        write_artifacts(temp.path(), &base, &ceremony, &MasterSeed::new(SEED)).unwrap();
+        let ca = ClusterCa::from_seed(&SEED).unwrap();
+        let cert = issue_service_cert(&ca, "wbb", &SEED).unwrap();
+        let port = helpers::free_port();
+        let mut cfg = helpers::WbbSpawnConfig::new(port);
+        for i in 1..=3 {
+            cfg = cfg.with_entity(
+                &format!("RT-{i}"),
+                Self::rt_key(temp.path(), i).verifying_key(),
+            );
+        }
+        let wbb =
+            helpers::WbbProcess::spawn(temp.path(), &ca, cert.cert_pem(), cert.key_pem(), cfg)
+                .await
+                .unwrap();
+        let wbb_url = Url::parse(&format!("https://127.0.0.1:{port}/wbb/")).unwrap();
+        Self {
+            temp,
+            base,
+            ca,
+            wbb,
+            wbb_url,
+        }
+    }
+
+    fn rt_key(dir: &std::path::Path, i: usize) -> SigningKey {
+        let bytes: [u8; 32] = std::fs::read(dir.join(format!("rt-{i}-signing-key.bin")))
+            .unwrap()
+            .try_into()
+            .unwrap();
+        SigningKey::from_bytes(&bytes)
+    }
+
+    fn config(&self, rt_urls: Option<Vec<Url>>) -> GenCredentialsConfig {
+        GenCredentialsConfig {
+            ceremony_dir: self.temp.path().to_path_buf(),
+            output_dir: self.temp.path().join("output"),
+            n_acc: self.base.election.n_acc,
+            t_rt: self.base.election.t_rt,
+            t_prime: self.base.election.t_prime,
+            wbb_url: self.wbb_url.clone(),
+            rt_tokens: rt_urls.as_ref().map(|urls| {
+                urls.iter()
+                    .map(|_| secrecy::SecretString::new("t".into()))
+                    .collect()
+            }),
+            rt_urls,
+            ca_pem: self.ca.cert_pem().to_string(),
+            clock: Clock::from_settings(&self.base.clock),
+        }
+    }
+
+    /// The `acc_pub_key` leaves on the board (junk excluded).
+    async fn acc_pub_key_leaves(&self) -> usize {
+        self.wbb
+            .client
+            .entries()
+            .await
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|e| {
+                e.entry["data"]
+                    .as_str()
+                    .and_then(|s| BASE64.decode(s).ok())
+                    .is_some_and(|d| {
+                        d.starts_with(b"setup,RT,acc_pub_key,")
+                            && !d.windows(5).any(|w| w == b"junk-")
+                    })
+            })
+            .count()
+    }
+}
+
+/// A2, Sec. 3.4.2 ("tRT RTs which agree on the same data can write ... the
+/// list of nACC public ACCs"): a registration teller that fills its own
+/// allowance of pending board entries before credential generation - so the
+/// board refuses its partial - does not stop it: the entry publishes on the
+/// two other tellers' partials.
+#[tokio::test]
+async fn credential_generation_goes_on_without_a_partial_the_board_refuses() {
+    let _cluster = helpers::cluster_guard().await;
+    let setup = CeremonyBoard::start().await;
+    let rt1 = CeremonyBoard::rt_key(setup.temp.path(), 1);
+    for i in 0..64 {
+        let entry = referendum_poc::clients::wbb::sign_entry(
+            format!("setup,RT,acc_pub_key,2,junk-{i}").as_bytes(),
+            "RT-1",
+            1_600_000_000_000 + i,
+            &rt1,
+        );
+        setup.wbb.client.submit(&entry).await.expect("staged");
+    }
+    gen_credentials(setup.config(None))
+        .await
+        .expect("credential generation goes on without the refused partial");
+    assert_eq!(setup.acc_pub_key_leaves().await, 1);
+    assert!(setup
+        .temp
+        .path()
+        .join("output")
+        .join("rt-1-credential_shares.json")
+        .exists());
+}
+
+/// What a stand-in registration teller does with a `/sign` request.
+#[derive(Clone, Copy)]
+enum Teller {
+    Honest,
+    Refuses,
+    /// Signs with its own key but states another teller's name.
+    InTheNameOf(&'static str),
+}
+
+/// Stand-in `/sign` endpoints for RT-1..=3, each behaving as given.
+async fn stand_in_tellers(setup: &CeremonyBoard, behaviour: [Teller; 3]) -> Vec<Url> {
+    use axum::{routing::post, Json, Router};
+    let mut urls = Vec::new();
+    for (i, act) in behaviour.into_iter().enumerate() {
+        let key = CeremonyBoard::rt_key(setup.temp.path(), i + 1);
+        let own = format!("RT-{}", i + 1);
+        let app = Router::new().route(
+            "/sign",
+            post(move |Json(req): Json<serde_json::Value>| {
+                let (key, own) = (key.clone(), own.clone());
+                async move {
+                    let stated = match act {
+                        Teller::Refuses => {
+                            return (
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                Json(serde_json::json!({ "error": "will not co-sign" })),
+                            )
+                        }
+                        Teller::Honest => own,
+                        Teller::InTheNameOf(other) => other.to_string(),
+                    };
+                    let data = req["data"].as_str().unwrap_or_default().to_string();
+                    let timestamp = req["timestamp"].as_i64().unwrap_or_default();
+                    let entry = referendum_poc::clients::wbb::sign_entry(
+                        data.as_bytes(),
+                        &stated,
+                        timestamp,
+                        &key,
+                    );
+                    (
+                        axum::http::StatusCode::OK,
+                        Json(serde_json::json!({
+                            "entity_id": entry.entity_id,
+                            "timestamp": timestamp,
+                            "signature": BASE64.encode(&entry.signature),
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        urls.push(Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    }
+    urls
+}
+
+/// The same with the tellers asked over HTTP (`--rt-url`): one that will not
+/// co-sign is named and left out, and the two others publish the entry.
+#[tokio::test]
+async fn credential_generation_goes_on_without_a_teller_that_will_not_co_sign() {
+    let _cluster = helpers::cluster_guard().await;
+    let setup = CeremonyBoard::start().await;
+    let urls = stand_in_tellers(&setup, [Teller::Refuses, Teller::Honest, Teller::Honest]).await;
+    gen_credentials(setup.config(Some(urls)))
+        .await
+        .expect("t_RT tellers co-sign");
+    assert_eq!(setup.acc_pub_key_leaves().await, 1);
+}
+
+/// Each co-signature is checked against the key pinned for the teller it
+/// came from: one stated in another teller's name is refused and its sender
+/// named, and below t_RT good co-signatures nothing is published.
+#[tokio::test]
+async fn credential_generation_checks_each_co_signature_against_its_tellers_key() {
+    let _cluster = helpers::cluster_guard().await;
+    let setup = CeremonyBoard::start().await;
+    let urls = stand_in_tellers(
+        &setup,
+        [Teller::Refuses, Teller::Honest, Teller::InTheNameOf("RT-2")],
+    )
+    .await;
+    let failed = gen_credentials(setup.config(Some(urls)))
+        .await
+        .expect_err("one good co-signature is below t_RT")
+        .to_string();
+    assert!(failed.contains("RT-1 refused"), "{failed}");
+    assert!(
+        failed.contains("RT-3 returned a co-signature in the name of"),
+        "{failed}"
+    );
+    assert_eq!(setup.acc_pub_key_leaves().await, 0);
+}

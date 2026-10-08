@@ -406,9 +406,8 @@ impl ErState {
     ) -> Result<std::collections::HashSet<String>, ErError> {
         Ok(self
             .wbb_client
-            .entries()
+            .board_entries()
             .await?
-            .entries
             .iter()
             .filter_map(|e| e.entry.get("data").and_then(|v| v.as_str()))
             .filter_map(|b64| BASE64.decode(b64).ok())
@@ -820,9 +819,8 @@ async fn revocation_handler(
     // are taken: every published commitment consumed exactly one.
     let published: HashSet<String> = state
         .wbb_client
-        .entries()
+        .board_entries()
         .await?
-        .entries
         .iter()
         .filter_map(|e| e.entry.get("data").and_then(|v| v.as_str()))
         .filter_map(|b64| {
@@ -1046,9 +1044,8 @@ async fn publish_eligible_handler(
     // one), and the board cannot take anything back.
     let published: Option<Vec<Vid>> = state
         .wbb_client
-        .entries()
+        .board_entries()
         .await?
-        .entries
         .iter()
         .filter_map(|e| e.entry.get("data").and_then(|v| v.as_str()))
         .filter_map(|b64| {

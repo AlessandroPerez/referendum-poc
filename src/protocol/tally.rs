@@ -1306,29 +1306,44 @@ pub struct BoardBallots {
 }
 
 pub fn board_ballots(entries: &[(i64, serde_json::Value)]) -> BoardBallots {
-    use crate::protocol::voting::{
-        parse_wbb_data, signed_by_ballot_box, BallotDigestEntry, CaiEntry,
-    };
-    use base64::Engine as _;
-    let mut publications = Vec::new();
-    let mut confirmations = Vec::new();
-    let mut publishers: std::collections::HashMap<crate::domain::BallotDigest, Vec<u64>> =
-        std::collections::HashMap::new();
+    let mut fold = BoardBallotsFold::default();
     for (_, entry) in entries {
+        fold.add(entry);
+    }
+    fold.ballots()
+}
+
+/// [`board_ballots`], one entry at a time: a reader that keeps the fold adds
+/// the entries written since its last reading instead of parsing the whole
+/// board again (one box flooding the board must not make every check on the
+/// voting path as slow as the board is long). Folded over a whole reading,
+/// in board order, it answers what `board_ballots` answers.
+#[derive(Default)]
+pub struct BoardBallotsFold {
+    publishers: std::collections::HashMap<crate::domain::BallotDigest, Vec<u64>>,
+    confirmations: Vec<crate::protocol::voting::CaiEntry>,
+}
+
+impl BoardBallotsFold {
+    /// Fold in the next entry of the board.
+    pub fn add(&mut self, entry: &serde_json::Value) {
+        use crate::protocol::voting::{
+            parse_wbb_data, signed_by_ballot_box, BallotDigestEntry, CaiEntry,
+        };
+        use base64::Engine as _;
         let Some(parsed) = entry
             .get("data")
             .and_then(|v| v.as_str())
             .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
             .and_then(|data| parse_wbb_data(&data))
         else {
-            continue;
+            return;
         };
         match parsed.entry_type.as_str() {
             "ballot_digest" => {
                 if let Ok(p) = parsed.decode_payload::<BallotDigestEntry>() {
                     if signed_by_ballot_box(entry, p.receipt.bb_id) {
-                        publications.push((p.digest, p.receipt.bb_id));
-                        let boxes = publishers.entry(p.digest).or_default();
+                        let boxes = self.publishers.entry(p.digest).or_default();
                         if !boxes.contains(&p.receipt.bb_id) {
                             boxes.push(p.receipt.bb_id);
                         }
@@ -1338,21 +1353,37 @@ pub fn board_ballots(entries: &[(i64, serde_json::Value)]) -> BoardBallots {
             "cast_intended_proof" => {
                 if let Ok(p) = parsed.decode_payload::<CaiEntry>() {
                     if signed_by_ballot_box(entry, p.bb_id) {
-                        confirmations.push(p);
+                        self.confirmations.push(p);
                     }
                 }
             }
             _ => {}
         }
     }
-    let counted = crate::protocol::voting::counted_digests(
-        publications,
-        confirmations.iter().map(|c| (c.digest, c.bb_id)),
-    );
-    BoardBallots {
-        counted,
-        publishers,
-        confirmations,
+
+    /// Which boxes published each digest, under their own signatures.
+    pub fn publishers(&self) -> &std::collections::HashMap<crate::domain::BallotDigest, Vec<u64>> {
+        &self.publishers
+    }
+
+    /// Every signed confirmation, in board order.
+    pub fn confirmations(&self) -> &[crate::protocol::voting::CaiEntry] {
+        &self.confirmations
+    }
+
+    /// What the board says about the ballots, as [`board_ballots`] says it.
+    pub fn ballots(&self) -> BoardBallots {
+        let counted = crate::protocol::voting::counted_digests(
+            self.publishers
+                .iter()
+                .flat_map(|(digest, boxes)| boxes.iter().map(|bb| (*digest, *bb))),
+            self.confirmations.iter().map(|c| (c.digest, c.bb_id)),
+        );
+        BoardBallots {
+            counted,
+            publishers: self.publishers.clone(),
+            confirmations: self.confirmations.clone(),
+        }
     }
 }
 
@@ -1620,4 +1651,265 @@ fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<(), TallyError> {
     }
     *slot = Some(value);
     Ok(())
+}
+
+/// `BoardBallotsFold` (Sec. 3.9 steps 2-5, Sec. 3.10
+/// 1(a)-(d)). The box folds the board entry by entry; the driver and the
+/// auditor parse whole readings. Over ANY prefix of a reading the fold must
+/// answer what `board_ballots` answers over that prefix, and what the
+/// earlier whole-reading `board_ballots` (kept below verbatim as the reference)
+/// answered - including every entry it must NOT count.
+#[cfg(test)]
+mod fold_checks {
+    use super::*;
+    use crate::protocol::voting::{BallotDigestEntry, CaiEntry};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use evoting::api::prelude::{DiscloseCAI, OpenedCai, OpenedCaiValue};
+    use rand::Rng as _;
+
+    /// `board_ballots` as it stood before the fold, verbatim.
+    fn reference_board_ballots(entries: &[(i64, serde_json::Value)]) -> BoardBallots {
+        use crate::protocol::voting::{
+            parse_wbb_data, signed_by_ballot_box, BallotDigestEntry, CaiEntry,
+        };
+        use base64::Engine as _;
+        let mut publications = Vec::new();
+        let mut confirmations = Vec::new();
+        let mut publishers: std::collections::HashMap<crate::domain::BallotDigest, Vec<u64>> =
+            std::collections::HashMap::new();
+        for (_, entry) in entries {
+            let Some(parsed) = entry
+                .get("data")
+                .and_then(|v| v.as_str())
+                .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
+                .and_then(|data| parse_wbb_data(&data))
+            else {
+                continue;
+            };
+            match parsed.entry_type.as_str() {
+                "ballot_digest" => {
+                    if let Ok(p) = parsed.decode_payload::<BallotDigestEntry>() {
+                        if signed_by_ballot_box(entry, p.receipt.bb_id) {
+                            publications.push((p.digest, p.receipt.bb_id));
+                            let boxes = publishers.entry(p.digest).or_default();
+                            if !boxes.contains(&p.receipt.bb_id) {
+                                boxes.push(p.receipt.bb_id);
+                            }
+                        }
+                    }
+                }
+                "cast_intended_proof" => {
+                    if let Ok(p) = parsed.decode_payload::<CaiEntry>() {
+                        if signed_by_ballot_box(entry, p.bb_id) {
+                            confirmations.push(p);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let counted = crate::protocol::voting::counted_digests(
+            publications,
+            confirmations.iter().map(|c| (c.digest, c.bb_id)),
+        );
+        BoardBallots {
+            counted,
+            publishers,
+            confirmations,
+        }
+    }
+
+    fn disclosure(tag: u8) -> DiscloseCAI<G> {
+        let mut bytes = [0u8; 32];
+        bytes[0] = tag;
+        let l_r = URL_SAFE_NO_PAD.encode(bytes);
+        serde_json::from_value(serde_json::json!({
+            "l1": {"Code": {"l_r": l_r}},
+            "l2": {"Sum": {"l_r": l_r}},
+        }))
+        .expect("a disclosure")
+    }
+
+    /// Who an entry says signed it.
+    #[derive(Clone, Copy)]
+    enum Signers {
+        One(u64),
+        Co(u64, u64),
+        BothForms(u64),
+        Nobody,
+    }
+
+    fn board_entry(data: &str, signers: Signers) -> serde_json::Value {
+        let mut entry = serde_json::json!({ "data": BASE64.encode(data), "timestamp": 1 });
+        match signers {
+            Signers::One(bb) => {
+                entry["entity_id"] = format!("BB-{bb}").into();
+                entry["signature"] = "AAAA".into();
+            }
+            Signers::Co(a, b) => {
+                entry["entity_ids"] = serde_json::json!([format!("BB-{a}"), format!("BB-{b}")]);
+                entry["signatures"] = serde_json::json!(["AAAA", "AAAA"]);
+            }
+            Signers::BothForms(bb) => {
+                entry["entity_id"] = format!("BB-{bb}").into();
+                entry["signature"] = "AAAA".into();
+                entry["entity_ids"] = serde_json::json!([format!("BB-{bb}")]);
+                entry["signatures"] = serde_json::json!(["AAAA"]);
+            }
+            Signers::Nobody => {}
+        }
+        entry
+    }
+
+    fn digest_data(phase: &str, tag: u8, bb_id: u64) -> String {
+        let entry = BallotDigestEntry {
+            digest: BallotDigest::from_bytes([tag; 32]),
+            emoji: vec!["x".into()],
+            public_pin_emoji: vec!["y".into()],
+            receipt: Receipt {
+                seq_no: u64::from(tag),
+                received_at_unix_ms: 7,
+                bb_id,
+            },
+        };
+        crate::protocol::voting::wbb_data_string(phase, "BB", "ballot_digest", 1, &entry)
+            .expect("data")
+    }
+
+    fn cai_data(tag: u8, bb_id: u64, which: u8) -> String {
+        let entry = CaiEntry {
+            digest: BallotDigest::from_bytes([tag; 32]),
+            bb_id,
+            disclosure: disclosure(which.max(1)),
+            opened: OpenedCai {
+                l1: OpenedCaiValue::Code(u32::from(which)),
+                l2: OpenedCaiValue::Sum(u32::from(which) + 1),
+            },
+            confirmed_at_ms: u64::from(which),
+        };
+        crate::protocol::voting::wbb_data_string("voting", "BB", "cast_intended_proof", 1, &entry)
+            .expect("data")
+    }
+
+    /// One random board entry: what the rule counts, and everything it must not.
+    fn random_entry(rng: &mut ChaCha20Rng, leaf: i64) -> serde_json::Value {
+        let tag: u8 = rng.gen_range(1..=6);
+        let bb: u64 = rng.gen_range(1..=3);
+        let other: u64 = bb % 3 + 1;
+        match rng.gen_range(0..16) {
+            0..=2 => board_entry(&digest_data("voting", tag, bb), Signers::One(bb)),
+            3 => board_entry(&digest_data("voting", tag, bb), Signers::One(other)),
+            4 => board_entry(&digest_data("voting", tag, bb), Signers::BothForms(bb)),
+            5 => board_entry(&digest_data("voting", tag, bb), Signers::Co(bb, other)),
+            6..=7 => board_entry(&cai_data(tag, bb, rng.gen_range(0..3)), Signers::One(bb)),
+            8 => board_entry(&cai_data(tag, bb, 1), Signers::One(other)),
+            9 => board_entry(&cai_data(tag, bb, 2), Signers::Nobody),
+            10 => serde_json::json!({ "data": "%%% not base64", "entity_id": format!("BB-{bb}") }),
+            11 => board_entry("voting,BB,ballot_digest,1", Signers::One(bb)),
+            12 => board_entry(
+                &format!(
+                    "voting,BB,ballot_digest,1,{}",
+                    BASE64.encode("{\"digest\":1}")
+                ),
+                Signers::One(bb),
+            ),
+            13 => board_entry(
+                &format!("voting,BB,cast_intended_proof,1,{}", BASE64.encode("[]")),
+                Signers::One(bb),
+            ),
+            14 => board_entry(&format!("ref:{}", leaf / 2), Signers::One(bb)),
+            _ => board_entry(&digest_data("tallying", tag, bb), Signers::One(bb)),
+        }
+    }
+
+    fn same(a: &BoardBallots, b: &BoardBallots, what: &str) {
+        assert_eq!(a.counted, b.counted, "{what}: counted");
+        assert_eq!(a.publishers, b.publishers, "{what}: publishers");
+        let json = |c: &[CaiEntry]| -> Vec<serde_json::Value> {
+            c.iter()
+                .map(|e| serde_json::to_value(e).expect("json"))
+                .collect()
+        };
+        assert_eq!(
+            json(&a.confirmations),
+            json(&b.confirmations),
+            "{what}: confirmations, in board order"
+        );
+    }
+
+    #[test]
+    fn the_fold_answers_what_a_whole_reading_answers_at_every_leaf() {
+        let mut counted_somewhere = 0usize;
+        for seed in 0u8..64 {
+            let mut rng = ChaCha20Rng::from_seed([seed; 32]);
+            let n = rng.gen_range(0..48);
+            let entries: Vec<(i64, serde_json::Value)> = (0..n)
+                .map(|leaf| (leaf, random_entry(&mut rng, leaf)))
+                .collect();
+            let mut fold = BoardBallotsFold::default();
+            for k in 0..=entries.len() {
+                let what = format!("seed {seed}, after {k} of {} leaves", entries.len());
+                let folded = fold.ballots();
+                same(&folded, &board_ballots(&entries[..k]), &what);
+                same(&folded, &reference_board_ballots(&entries[..k]), &what);
+                assert_eq!(fold.publishers(), &folded.publishers, "{what}");
+                assert_eq!(fold.confirmations().len(), folded.confirmations.len());
+                counted_somewhere += folded.counted.len();
+                if let Some((_, entry)) = entries.get(k) {
+                    fold.add(entry);
+                }
+            }
+        }
+        assert!(
+            counted_somewhere > 0,
+            "the generator never produced a counted digest"
+        );
+    }
+
+    /// The refusals, one by one (Sec. 3.10 1(c): "discard the ballots which do
+    /// not have a published timestamped digest"; 1(d): "... which do not have
+    /// a published valid cast-as-intended disclosure"). Each statement counts
+    /// only under the signature of the box it names.
+    #[test]
+    fn the_fold_counts_nothing_a_box_did_not_sign_itself() {
+        let d = |tag: u8| BallotDigest::from_bytes([tag; 32]);
+        let entries: Vec<(i64, serde_json::Value)> = [
+            // 1: published by BB-1 and confirmed by BB-2, each under its own key.
+            board_entry(&digest_data("voting", 1, 1), Signers::One(1)),
+            board_entry(&cai_data(1, 2, 1), Signers::One(2)),
+            // 2: the publication is signed by BB-3 in BB-1's name.
+            board_entry(&digest_data("voting", 2, 1), Signers::One(3)),
+            board_entry(&cai_data(2, 2, 1), Signers::One(2)),
+            // 3: the confirmation is signed by BB-1 in BB-2's name.
+            board_entry(&digest_data("voting", 3, 1), Signers::One(1)),
+            board_entry(&cai_data(3, 2, 1), Signers::One(1)),
+            // 4: both signer forms on the publication: signed by nobody.
+            board_entry(&digest_data("voting", 4, 1), Signers::BothForms(1)),
+            board_entry(&cai_data(4, 1, 1), Signers::One(1)),
+            // 5: a confirmation with no publication at all.
+            board_entry(&cai_data(5, 1, 1), Signers::One(1)),
+            // 6: a publication with no confirmation.
+            board_entry(&digest_data("voting", 6, 2), Signers::One(2)),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(leaf, entry)| (leaf as i64, entry))
+        .collect();
+        let mut fold = BoardBallotsFold::default();
+        for (_, entry) in &entries {
+            fold.add(entry);
+        }
+        let folded = fold.ballots();
+        same(&folded, &board_ballots(&entries), "whole");
+        assert_eq!(folded.counted, [d(1)].into_iter().collect::<HashSet<_>>());
+        assert!(
+            !folded.publishers.contains_key(&d(2)),
+            "BB-3 spoke for BB-1"
+        );
+        assert!(!folded.publishers.contains_key(&d(4)), "both signer forms");
+        assert!(
+            !folded.confirmations.iter().any(|c| c.digest == d(3)),
+            "BB-1 confirmed in BB-2's name"
+        );
+    }
 }

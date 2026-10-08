@@ -327,6 +327,7 @@ pub enum TtError {
     Base64(#[from] base64::DecodeError),
     #[error("invalid signature length")]
     InvalidSignature,
-    #[error("HTTP {0}: {1}")]
+    /// The body is the other party's text: quoted, escaped and cut short.
+    #[error("HTTP {0}: {}", crate::error::quoted(.1))]
     Http(StatusCode, String),
 }

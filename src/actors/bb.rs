@@ -195,6 +195,10 @@ pub struct BbState {
     /// Junk on the board can make it slow; it can no longer make a request
     /// time out and be taken for an empty release.
     release: Arc<Mutex<ReleaseState>>,
+    /// The board's ballot entries as far as this box has read them
+    /// (`board_ballots`, folded entry by entry) and the next leaf to read:
+    /// each reading parses only what was written since the last one.
+    board_fold: Arc<Mutex<(i64, crate::protocol::tally::BoardBallotsFold)>>,
 }
 
 /// Which of this box's ballots each published disclosure (by its bytes) opens.
@@ -351,10 +355,10 @@ impl BbState {
         let wanted = B64.encode(data.as_bytes());
         let entries = self
             .wbb_client
-            .entries()
+            .board_entries()
             .await
             .map_err(|e| BbError::BoardUnreachable(e.to_string()))?;
-        Ok(entries.entries.iter().any(|e| {
+        Ok(entries.iter().any(|e| {
             e.entry
                 .get("data")
                 .and_then(|v| v.as_str())
@@ -376,20 +380,23 @@ impl BbState {
     }
 
     /// ONE reading of the board, parsed by the rule the tally driver and the
-    /// auditor use (`board_ballots`). A failed read is an error, never an
-    /// empty answer.
+    /// auditor use (`board_ballots`): the entries written since the last
+    /// reading are folded into what was made of the ones before. A failed
+    /// read is an error, never an empty answer.
     async fn board_reading(&self) -> Result<crate::protocol::tally::BoardBallots, BbError> {
-        let entries = self
+        let mut fold = self.board_fold.lock().await;
+        let written_since = self
             .wbb_client
-            .entries()
+            .board_entries_from(fold.0)
             .await
             .map_err(|e| BbError::BoardUnreachable(e.to_string()))?;
-        let entries: Vec<(i64, serde_json::Value)> = entries
-            .entries
-            .into_iter()
-            .map(|sequenced| (sequenced.leaf_index, sequenced.entry))
-            .collect();
-        Ok(crate::protocol::tally::board_ballots(&entries))
+        for sequenced in &written_since {
+            fold.1.add(&sequenced.entry);
+        }
+        if let Some(last) = written_since.last() {
+            fold.0 = last.leaf_index + 1;
+        }
+        Ok(fold.1.ballots())
     }
 }
 
@@ -1168,6 +1175,7 @@ pub async fn build_service(
         opened_disclosures: Arc::new(Mutex::new(HashMap::new())),
         pending_publish: Arc::new(Mutex::new(HashMap::new())),
         release: Arc::new(Mutex::new(ReleaseState::NotStarted)),
+        board_fold: Arc::default(),
     });
 
     let addr: SocketAddr = format!("{}:{}", settings.service.host, settings.service.port)

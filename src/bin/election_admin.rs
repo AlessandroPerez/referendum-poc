@@ -134,7 +134,30 @@ async fn run_transition(
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            // The message can carry what a teller or a box answered: every
+            // control character is printed as its escape, so no answer can
+            // rewrite what the operator's terminal shows.
+            let shown: String = format!("{e:?}")
+                .chars()
+                .map(|c| {
+                    if c.is_control() && c != '\n' {
+                        c.escape_default().to_string()
+                    } else {
+                        c.to_string()
+                    }
+                })
+                .collect();
+            eprintln!("Error: {shown}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> anyhow::Result<()> {
     referendum_poc::telemetry::init_subscriber(referendum_poc::telemetry::get_subscriber(
         "election-admin".into(),
         "info".into(),

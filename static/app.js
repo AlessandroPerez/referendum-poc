@@ -9,8 +9,8 @@ const $ = (id) => document.getElementById(id);
 const show = (el) => el.classList.remove("hidden");
 const hide = (el) => el.classList.add("hidden");
 
-// Tap-to-copy: the PIN and the ballot digest (Sec. 3.8.4 step 8 has the
-// voter copy H(B)) go to the clipboard when tapped; the value flashes blue
+// Tap-to-copy: the ballot digest (Sec. 3.8.4 step 8 has the voter copy
+// H(B)) goes to the clipboard when tapped - never the PIN; the value flashes blue
 // and a toast says what was copied.
 function toast(message) {
   let el = document.getElementById("toast");
@@ -146,6 +146,7 @@ document.querySelectorAll(".btn-unlock").forEach((button) => {
       await api("/api/status", { passphrase });
       input.value = "";
       setPassphrase(passphrase);
+      await adoptPinEpoch();
       $("scroller").scrollTo({ top: 0 });
     } catch (e) {
       setError(`Unlock failed: ${e.message}`);
@@ -249,6 +250,8 @@ $("btn-status").addEventListener("click", async () => {
     const passphrase = $("passphrase-input").value.trim();
     const result = await api("/api/status", { passphrase });
     setPassphrase(passphrase);
+    if (knownPinEpoch !== null && result.pin_epoch !== knownPinEpoch) forgetShownPins();
+    knownPinEpoch = result.pin_epoch;
     if (result.pin_set) {
       $("status-label").textContent = "PIN already retrieved.";
       show($("btn-retrieve"));
@@ -270,6 +273,7 @@ $("btn-status").addEventListener("click", async () => {
 $("btn-retrieve").addEventListener("click", async () => {
   try {
     const result = await api("/api/pin/retrieve", { passphrase: getPassphrase() });
+    await pinDeliveredHere();
     $("pin").textContent = String(result.pin).padStart(5, "0");
     $("pin-emoji").textContent = (result.private_pin_emoji || []).join(" ");
     advanceTo("screen-pin");
@@ -283,6 +287,7 @@ $("btn-pin-next").addEventListener("click", () => advanceTo("screen-verify"));
 $("btn-verify").addEventListener("click", async () => {
   try {
     const pin = parseInt($("pin-input").value, 10);
+    $("pin-input").value = "";
     const result = await api("/api/pin/verify", { passphrase: getPassphrase(), pin });
     $("verify-label").textContent = result.valid
       ? "[OK] PIN is valid. You are ready to vote."
@@ -317,6 +322,7 @@ $("btn-vote").addEventListener("click", async () => {
       return;
     }
     const pin = parseInt($("vote-pin").value, 10);
+    $("vote-pin").value = "";
     const result = await api("/api/vote", {
       passphrase: getPassphrase(),
       option: $("vote-option").value,
@@ -328,7 +334,7 @@ $("btn-vote").addEventListener("click", async () => {
     $("ballot-private-emoji").textContent = (result.private_pin_emoji || []).join(" ");
     $("ballot-public-emoji").textContent = (result.public_pin_emoji || []).join(" ");
     $("cast-label").textContent = result.awaiting_confirmation
-      ? `[!] Ballot ${result.awaiting_confirmation} is already cast and still unconfirmed. It is the one the check-and-confirm screen acts on, and it does NOT count until you confirm it.`
+      ? `[!] Ballot ${result.awaiting_confirmation} is already cast and still unconfirmed. The check-and-confirm screen below acts on it, and it does NOT count until you confirm it - or cast this new ballot instead.`
       : "";
     $("publication-label").textContent = "";
     $("confirm-label").textContent = "";
@@ -339,6 +345,13 @@ $("btn-vote").addEventListener("click", async () => {
     setCaiChoice(null);
     hide($("screen-check"));
     advanceTo("screen-cast");
+    // A ballot of this PIN already cast and waiting (e.g. one cast before a
+    // PIN delivery reset these screens) can still be confirmed: its check
+    // screen is opened too, on that ballot.
+    if (result.awaiting_confirmation) {
+      await showControlValues();
+      show($("screen-check"));
+    }
   } catch (e) {
     setError(`Vote failed: ${e.message}`);
   }
@@ -346,6 +359,10 @@ $("btn-vote").addEventListener("click", async () => {
 
 $("btn-cast").addEventListener("click", async () => {
   try {
+    if (ballotPin === null) {
+      setError("Build a ballot first.");
+      return;
+    }
     // The ballot on screen, by its digest: never another one this PIN holds.
     const result = await api("/api/cast", {
       passphrase: getPassphrase(),
@@ -357,6 +374,9 @@ $("btn-cast").addEventListener("click", async () => {
         ? ` [!] Ballot box(es) ${result.refused_bb_ids.join(", ")} did not accept it. What counts is what the bulletin board shows: check the publication below.`
         : "";
     $("cast-label").textContent = `Cast to ${result.receipts.length} ballot box(es).${refused}`;
+    // A new ballot gets its own coin toss (Sec. 3.8.4 step 10): a choice made
+    // on another ballot's check screen does not carry over.
+    setCaiChoice(null);
     await showControlValues();
     advanceTo("screen-check");
   } catch (e) {
@@ -366,6 +386,10 @@ $("btn-cast").addEventListener("click", async () => {
 
 $("btn-publication").addEventListener("click", async () => {
   try {
+    if (ballotPin === null) {
+      setError("Build a ballot first.");
+      return;
+    }
     const result = await api("/api/ballot/status", {
       passphrase: getPassphrase(),
       pin: ballotPin,
@@ -400,6 +424,10 @@ const OPTION_INDEX = { blank: 0, approve: 1, reject: 2 };
 async function showControlValues() {
   const pad = (n) => String(n).padStart(2, "0");
   try {
+    if (ballotPin === null) {
+      setError("Build a ballot first.");
+      return;
+    }
     const values = await api("/api/cai/values", {
       passphrase: getPassphrase(),
       pin: ballotPin,
@@ -483,6 +511,10 @@ document.querySelectorAll("#control-box .control-value[role=radio]").forEach((va
 
 $("btn-confirm").addEventListener("click", async () => {
   try {
+    if (ballotPin === null) {
+      setError("Build a ballot first.");
+      return;
+    }
     const result = await api("/api/confirm", {
       passphrase: getPassphrase(),
       pin: ballotPin,
@@ -493,6 +525,10 @@ $("btn-confirm").addEventListener("click", async () => {
       l2: CAI_L2_FIXED,
     });
     const value = String(result.l1_value).padStart(2, "0");
+    // The pending ballot just confirmed is no longer "still unconfirmed".
+    if ($("cast-label").textContent.includes(String(result.digest))) {
+      $("cast-label").textContent = "";
+    }
     // The opened value shows as OPENED from here on; the choice is made and
     // the values stop acting as a selector.
     setCaiChoice(null);
@@ -528,66 +564,195 @@ $("btn-confirm").addEventListener("click", async () => {
 
 // -- Management ---------------------------------------------------------------
 
-$("btn-ruse").addEventListener("click", async () => {
-  try {
-    // Sec. 3.7.3 step 3 has the VOTER type the ruse PIN. An empty box means
-    // "draw one for me"; a value means "arm this one", so a decoy already
-    // given to someone can be armed again on this or another device.
-    const current = $("ruse-current-pin").value.trim();
-    if (!/^[0-9]{1,5}$/.test(current)) {
-      setError("Type the PIN this app holds: arming a decoy is your own request to make.");
-      return;
-    }
-    const chosen = $("ruse-pin-input").value.trim();
-    const body = { passphrase: getPassphrase(), pin: Number(current) };
-    if (chosen !== "") {
-      const value = Number(chosen);
-      if (!/^[0-9]{1,5}$/.test(chosen) || !Number.isInteger(value)) {
-        setError("A ruse PIN is up to 5 digits.");
-        return;
-      }
-      body.ruse_pin = value;
-    }
-    const result = await api("/api/pin/ruse", body);
-    const el = $("ruse-pin");
-    el.textContent = String(result.ruse_pin).padStart(5, "0");
-    show(el);
-    $("ruse-emoji").textContent = (result.private_pin_emoji || []).join(" ");
-    show($("ruse-emoji"));
-    $("pin-tools-label").textContent =
-      "Ruse PIN issued - it verifies like the real one, but its ballots are discarded at tally.";
-  } catch (e) {
-    setError(`Ruse PIN failed: ${e.message}`);
-  }
-});
+// Sec. 3.7.3: a ruse ends like any PIN arrival. Whoever watches this screen
+// must not be able to tell a ruse from a re-send by what it shows, so both
+// run through the same pause and end on the same single line.
+const PAUSED_IDS = ["btn-vote", "btn-cast", "btn-confirm", "btn-publication", "btn-ruse", "btn-resend", "btn-revoke", "btn-verify", "btn-recover"];
 
-$("btn-resend").addEventListener("click", async () => {
-  // A re-send is a new PIN request: the tellers answer only after their
-  // waiting period, so this takes a few seconds. One request at a time.
-  const button = $("btn-resend");
-  // Sec. 3.7.2 step 4: while the PIN is being re-sent the voting, PIN
-  // management and verification functions are disabled - the device is
-  // holding its write lock for the tellers' waiting period, and a tap on
-  // another screen would only queue behind it in silence.
-  const blocked = ["btn-vote", "btn-cast", "btn-confirm", "btn-publication", "btn-ruse", "btn-revoke", "btn-verify", "btn-recover"]
-    .map((id) => document.getElementById(id))
-    .filter(Boolean);
-  const wasDisabled = blocked.map((el) => el.disabled);
-  button.disabled = true;
-  blocked.forEach((el) => (el.disabled = true));
+// Sec. 3.7.3: after a PIN arrives "Vote App returns to its initial state".
+// Every screen that shows or holds a PIN is reset - after a re-send as after
+// a ruse, so the two still look alike - and none keeps the PIN it held
+// before: a valid PIN left on another screen would expose the decoy.
+function forgetShownPins() {
+  $("pin").textContent = "";
+  $("pin-emoji").textContent = "";
+  // "PIN delivered: NNNNN" of an earlier delivery in THIS tab: after a ruse
+  // elsewhere it would still name the valid PIN. The tab that asks for a PIN
+  // writes its own line after this reset.
+  $("pin-tools-label").textContent = "";
+  $("verify-label").textContent = "";
+  $("verify-emoji").textContent = "";
+  hide($("verify-emoji"));
+  $("link-to-voting").classList.add("hidden");
+  for (const id of ["pin-input", "vote-pin", "ruse-current-pin", "ruse-pin-input"]) {
+    $(id).value = "";
+  }
+  // The voting screens too: a ballot built before this delivery names the
+  // PIN that built it (its PIN emoji, and `ballotPin`, which cast, check and
+  // confirm send). The voter votes again with the PIN they now hold; a ballot
+  // already cast is still held by the device and is named when they build
+  // the next one.
+  ballotPin = null;
+  for (const id of [
+    "ballot-digest", "ballot-emoji", "ballot-private-emoji", "ballot-public-emoji",
+    "cast-label", "publication-label", "confirm-label", "control-check",
+    "control-code", "control-sum",
+  ]) {
+    $(id).textContent = "";
+  }
+  $("vote-option").value = "";
+  hide($("control-box"));
+  controlValuesShown = false;
+  controlValuesDigest = null;
+  setCaiChoice(null);
+  hide($("screen-cast"));
+  hide($("screen-check"));
+}
+
+// Every open screen of this app forgets the PINs it shows when a PIN is
+// delivered anywhere - not only the tab that asked for it. Tabs of this
+// browser are told at once (BroadcastChannel). Any other screen - another
+// browser, a restored page, a window left open beside another - is CONCEALED
+// whenever it is hidden or loses focus, and shown again only after the
+// device's PIN epoch (`/api/status`) has been read and compared: changed,
+// unknown or unreadable, the screen forgets its PINs first. So no frame of a
+// stale screen is painted, and cutting the network does not keep one.
+const pinChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel("voteapp-pin") : null;
+let knownPinEpoch = null;
+
+// The device's PIN epoch, or `undefined` when it cannot be read (no
+// passphrase in this tab, not enrolled, offline). Not through `api()`: a
+// check run on every focus must not clear the message the voter is reading.
+async function readPinEpoch() {
+  const passphrase = getPassphrase();
+  if (!passphrase) return undefined;
+  try {
+    const response = await fetch("/api/status", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ passphrase }),
+    });
+    if (!response.ok) return undefined;
+    return (await response.json()).pin_epoch;
+  } catch (_) {
+    return undefined;
+  }
+}
+
+function concealScreens() {
+  document.body.classList.add("concealed");
+}
+
+// Compare, forget if needed, then reveal.
+async function checkPinEpoch() {
+  const epoch = await readPinEpoch();
+  if (epoch === undefined || knownPinEpoch === null || epoch !== knownPinEpoch) {
+    forgetShownPins();
+  }
+  knownPinEpoch = epoch === undefined ? null : epoch;
+  document.body.classList.remove("concealed");
+}
+
+// This tab's own epoch, learned without forgetting anything: after it
+// unlocked or delivered a PIN itself.
+async function adoptPinEpoch() {
+  const epoch = await readPinEpoch();
+  knownPinEpoch = epoch === undefined ? null : epoch;
+}
+
+// A PIN was delivered on this device by this tab: tell the other tabs, and
+// take the new epoch as this tab's own (before showing the PIN).
+async function pinDeliveredHere() {
+  if (pinChannel) pinChannel.postMessage("pin-delivered");
+  await adoptPinEpoch();
+}
+
+if (pinChannel) {
+  pinChannel.onmessage = (event) => {
+    if (event.data === "pin-delivered") {
+      forgetShownPins();
+      adoptPinEpoch();
+    } else if (event.data === "pin-check") {
+      checkPinEpoch();
+    }
+  };
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") checkPinEpoch();
+  else concealScreens();
+});
+window.addEventListener("pagehide", concealScreens);
+window.addEventListener("pageshow", checkPinEpoch);
+window.addEventListener("blur", concealScreens);
+window.addEventListener("focus", checkPinEpoch);
+checkPinEpoch();
+// A screen left in view - a window beside another, never hidden or focused
+// away - checks on its own too. Only a definite change resets it here: a
+// network blip must not wipe the screen of a voter who is using it.
+setInterval(async () => {
+  if (document.visibilityState !== "visible" || document.body.classList.contains("concealed")) return;
+  if (knownPinEpoch === null) return;
+  const epoch = await readPinEpoch();
+  if (epoch !== undefined && epoch !== knownPinEpoch) {
+    forgetShownPins();
+    knownPinEpoch = epoch;
+  }
+}, 3000);
+
+const PIN_REQUEST_FAILED = "PIN request failed. Check what you typed and try again in a few seconds.";
+
+async function deliverPin(request) {
+  // Sec. 3.7.2 step 4: while the PIN is on its way the voting, PIN
+  // management and verification functions are disabled - the device holds
+  // its write lock for the tellers' waiting period, and a tap on another
+  // screen would only queue behind it in silence.
+  const paused = PAUSED_IDS.map((id) => document.getElementById(id)).filter(Boolean);
+  const wasDisabled = paused.map((el) => el.disabled);
+  paused.forEach((el) => (el.disabled = true));
+  // Sec. 3.7.3: the app returns to its initial state as soon as the request
+  // is sent - no screen keeps the PIN in force (or a ballot built with it)
+  // through the tellers' wait.
+  forgetShownPins();
   $("pin-tools-label").textContent =
     "Asking the registration tellers again - this takes a few seconds. Voting and PIN screens are paused until it finishes.";
   try {
-    const result = await api("/api/pin/resend", { passphrase: getPassphrase() });
-    $("pin-tools-label").textContent = `PIN re-delivered: ${String(result.pin).padStart(5, "0")}. Any decoy is disarmed - arm it again if you need it.`;
+    const pin = await request();
+    forgetShownPins();
+    await pinDeliveredHere();
+    $("pin-tools-label").textContent = `PIN delivered: ${String(pin).padStart(5, "0")}.`;
   } catch (e) {
+    // The same words whatever failed and whichever was asked for: a reason
+    // only a ruse can have would tell the two apart on this screen.
+    console.warn("PIN request failed:", e);
     $("pin-tools-label").textContent = "";
-    setError(`PIN re-send failed: ${e.message}. Try again in a few seconds.`);
+    setError(PIN_REQUEST_FAILED);
   } finally {
-    button.disabled = false;
-    blocked.forEach((el, i) => (el.disabled = wasDisabled[i]));
+    paused.forEach((el, i) => (el.disabled = wasDisabled[i]));
     refreshConfirmButton();
   }
+}
+
+$("btn-ruse").addEventListener("click", async () => {
+  // Sec. 3.7.3 step 3 has the VOTER type the ruse PIN. An empty box means
+  // "draw one for me"; a value means "arm this one", so a decoy already
+  // given to someone can be armed again on this or another device. Both
+  // boxes are read and cleared at once: nothing typed here stays on screen.
+  const current = $("ruse-current-pin").value.trim();
+  const chosen = $("ruse-pin-input").value.trim();
+  $("ruse-current-pin").value = "";
+  $("ruse-pin-input").value = "";
+  if (!/^[0-9]{1,5}$/.test(current) || (chosen !== "" && !/^[0-9]{1,5}$/.test(chosen))) {
+    setError(PIN_REQUEST_FAILED);
+    return;
+  }
+  const body = { passphrase: getPassphrase(), pin: Number(current) };
+  if (chosen !== "") body.ruse_pin = Number(chosen);
+  // The ruse is a real PIN request, answered by the tellers like a re-send.
+  await deliverPin(async () => (await api("/api/pin/ruse", body)).ruse_pin);
+});
+
+$("btn-resend").addEventListener("click", async () => {
+  await deliverPin(async () => (await api("/api/pin/resend", { passphrase: getPassphrase() })).pin);
 });
 
 $("btn-revoke").addEventListener("click", async () => {
@@ -603,12 +768,19 @@ $("btn-revoke").addEventListener("click", async () => {
   $("revoke-label").textContent = "Revoking - this takes a few seconds. Do not tap again.";
   try {
     const result = await api("/api/revoke", { passphrase: getPassphrase() });
+    // The old credential is void: no screen keeps showing it or a ballot it built.
+    forgetShownPins();
+    await pinDeliveredHere();
     $("revoke-label").textContent =
       `Credential revoked - new pseudonymous id ${result.vid}. Open Enrollment, check the PIN status, then retrieve your new PIN.`;
     show($("screen-status"));
   } catch (e) {
     $("revoke-label").textContent = "";
     setError(e.message.includes("revoked") ? e.message : `Revocation failed: ${e.message}`);
+    // A revocation can fail after the credential was already replaced: every
+    // screen checks the device's PIN epoch again.
+    if (pinChannel) pinChannel.postMessage("pin-check");
+    checkPinEpoch();
   } finally {
     button.disabled = false;
   }

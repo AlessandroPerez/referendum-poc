@@ -203,6 +203,7 @@ pub async fn gen_credentials(cfg: GenCredentialsConfig) -> Result<(), AdminError
             .map(|s| s == data_b64)
             .unwrap_or(false)
     });
+    let mut refused = Vec::new();
     if !already_published {
         for entry in &signed_entries {
             match wbb_client.submit(entry).await {
@@ -212,8 +213,21 @@ pub async fn gen_credentials(cfg: GenCredentialsConfig) -> Result<(), AdminError
                 // The entry is identical, so carry on to the wait loop.
                 Err(crate::clients::wbb::WbbError::Http(status, _))
                     if status == reqwest::StatusCode::CONFLICT => {}
-                Err(e) => return Err(e.into()),
+                // One teller's partial the board will not take does not stop
+                // an entry the others publish at its threshold (Sec. 3.4.2:
+                // "tRT RTs which agree on the same data can write" it): the
+                // teller is named and the wait below decides.
+                Err(e) => {
+                    tracing::warn!(entity = %entry.entity_id, "the board refused this partial: {e}");
+                    refused.push(format!(
+                        "the board refused {}'s partial: {e}",
+                        entry.entity_id
+                    ));
+                }
             }
+        }
+        if refused.len() == signed_entries.len() {
+            return Err(AdminError::Other(refused.join("; ")));
         }
     }
 
@@ -233,9 +247,14 @@ pub async fn gen_credentials(cfg: GenCredentialsConfig) -> Result<(), AdminError
             }
         }
         if tokio::time::Instant::now() > end {
-            return Err(AdminError::Other(
-                "acc_pub_key entry was not included in time".to_string(),
-            ));
+            return Err(AdminError::Other(format!(
+                "acc_pub_key entry was not included in time{}",
+                if refused.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", refused.join("; "))
+                }
+            )));
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
@@ -360,11 +379,44 @@ async fn sign_acc_pub_key_entries(
             });
         }
         let client = reqwest_client_trusting_ca(&cfg.ca_pem)?;
-        for (url, token) in urls.iter().zip(tokens.iter()) {
+        // Each answer is checked against the key pinned for that teller at the
+        // ceremony, and a teller that refuses or answers with something else is
+        // named and left out: t_RT of them are enough (Sec. 3.4.2: "tRT RTs
+        // which agree on the same data can write ... the list of nACC public
+        // ACCs").
+        let keys = load_verifying_keys(&cfg.ceremony_dir, "rt", urls.len()).await?;
+        let mut refused = Vec::new();
+        for (i, (url, token)) in urls.iter().zip(tokens.iter()).enumerate() {
+            let name = format!("RT-{}", i + 1);
             let rt_client = RtClient::new(client.clone(), url.clone(), token.clone());
-            let response = rt_client.sign(data_string, timestamp).await?;
-            let entry = RtClient::to_signed_entry(data_string, &response)?;
-            entries.push(entry);
+            let signed = match rt_client.sign(data_string, timestamp).await {
+                Ok(response) => RtClient::to_signed_entry(data_string, &response)
+                    .map_err(|e| format!("{name} returned an unusable co-signature: {e}"))
+                    .and_then(|entry| {
+                        check_cosignature(&entry, &name, timestamp, &keys).map(|()| entry)
+                    }),
+                Err(e) => Err(teller_failed(
+                    &name,
+                    "co-sign the ACC public keys",
+                    (&e).into(),
+                    &e,
+                )),
+            };
+            match signed {
+                Ok(entry) => entries.push(entry),
+                Err(why) => {
+                    tracing::warn!("{why}");
+                    refused.push(why);
+                }
+            }
+        }
+        if entries.len() < cfg.t_rt {
+            return Err(AdminError::Other(format!(
+                "only {} registration tellers co-signed the ACC public keys, {} are needed ({})",
+                entries.len(),
+                cfg.t_rt,
+                refused.join("; ")
+            )));
         }
     } else {
         for (i, seed) in signing_key_seeds.iter().enumerate() {
@@ -671,8 +723,8 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
             // The remaining artifacts are signed AGAIN, with fresh timestamps:
             // the board refuses a timestamp outside its window, and a cut-off
             // submission may be resumed long after the first run.
-            let outbox = resign_pending(&cfg, &http, &saved.outbox, &already, &mut clock).await?;
-            flush_publications(&wbb, &outbox, &already, &cfg.ceremony_dir, None).await?;
+            let resigner = Resigner::new(&cfg, &http).await?;
+            flush_publications(&wbb, &saved.outbox, &already, &resigner, &mut clock).await?;
             return Ok(saved.outcome);
         }
         // Cut off BEFORE the tally decryption. Everything the tail needs is
@@ -695,13 +747,14 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
             .await?;
             tts.push(TtClient::new(http.clone(), url.clone(), token));
         }
-        let outbox = resign_pending(&cfg, &http, &saved.outbox, &already, &mut clock).await?;
         // The artifacts this run did not manage to send go FIRST: the tail
         // recomputes the sum from the board, so a flush cut off part-way must
         // be finished before it looks. Without this a single lost submission
         // strands the election for good - the board is append-only and the
         // pipeline cannot be re-run over it.
-        flush_publications(&wbb, &outbox, &already, &cfg.ceremony_dir, None).await?;
+        let outbox = saved.outbox.clone();
+        let resigner = Resigner::new(&cfg, &http).await?;
+        flush_publications(&wbb, &outbox, &already, &resigner, &mut clock).await?;
         let outcome = saved.outcome;
         return finish_tally(
             FinishTally {
@@ -712,7 +765,7 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
                 tt_keys: &tt_keys,
                 election_context: &election_context,
                 pinned_log: &pinned_log,
-                already: &already,
+                tree_size: saved.tree_size,
             },
             outbox,
             outcome,
@@ -842,11 +895,7 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
     // and the driver does not publish the ballot again. Everything released
     // past this reading is checked for before the tally starts (see
     // `flush_publications`).
-    let release_cut = board_entries
-        .iter()
-        .map(|(leaf, _)| *leaf + 1)
-        .max()
-        .unwrap_or(0);
+
     let mut from_board: std::collections::HashSet<(crate::domain::BallotDigest, u64)> =
         std::collections::HashSet::new();
     // The release entries the tally takes in, stated in its first artifact.
@@ -935,10 +984,7 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
         .iter()
         .filter(|digest| !released_ballots.contains_key(digest))
         .collect();
-    let release_check = (!missing.is_empty()).then(|| ReleaseCheck {
-        cut: release_cut,
-        missing: missing.iter().map(|digest| **digest).collect(),
-    });
+
     let blocking: Vec<u64> = silent_ids
         .iter()
         .copied()
@@ -1064,7 +1110,14 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
                 },
             )
             .map_err(|e| AdminError::Other(e.to_string()))?;
-            tally_inputs.push(crate::protocol::tally::release_input_id(data.as_bytes()));
+            // A record a box repeats in its answer is one release (Sec. 3.9
+            // step 3 discards multiple copies): queued and stated once, or
+            // the stated input would name an entry the board holds once.
+            let input_id = crate::protocol::tally::release_input_id(data.as_bytes());
+            if tally_inputs.contains(&input_id) {
+                continue;
+            }
+            tally_inputs.push(input_id);
             let timestamp = clock.now_ms() as i64;
             clock.advance();
             let entry = sign_entry(data.as_bytes(), entity_id, timestamp, signing_key);
@@ -1361,7 +1414,12 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
             let broadcast = match rt.controls_round1(&shuffled_votes).await {
                 Ok(broadcast) => broadcast,
                 Err(e) => {
-                    refused_controls.push(format!("RT-{id} did not answer: {e}"));
+                    refused_controls.push(teller_failed(
+                        &format!("RT-{id}"),
+                        "answer the first control round",
+                        (&e).into(),
+                        &e,
+                    ));
                     continue;
                 }
             };
@@ -1479,7 +1537,17 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
                     .map_err(|e| AdminError::Other(e.to_string()))?
                     .map_err(|e| format!("second control round refused: {e}"))
                 }
-                Err(e) => Err(format!("did not answer the second control round: {e}")),
+                Err(e) => Err(match TellerFailure::from(&e) {
+                    TellerFailure::Unreachable => {
+                        format!("could not be reached for the second control round ({e})")
+                    }
+                    TellerFailure::Refused => {
+                        format!("refused the second control round (its answer: {e})")
+                    }
+                    TellerFailure::Unusable => {
+                        format!("answered the second control round with nothing usable ({e})")
+                    }
+                }),
             };
             match checked {
                 Ok(response) => round2.push(response),
@@ -1792,6 +1860,11 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
     // The signed artifacts are saved before they are sent, so a flush cut off
     // part-way is finished by the next run rather than stranding the election
     // (the discipline this driver already used for the single final flush).
+    //
+    // Each entry is signed AGAIN as it is sent (see `Resigner`): the releases
+    // were signed before the pipeline ran, and on the wall clock the board
+    // refuses a timestamp outside its window. The data does not change, so
+    // neither does the tally's stated input.
     save_tally(
         &cfg.ceremony_dir,
         &SavedTally {
@@ -1814,14 +1887,8 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
         },
     )
     .await?;
-    flush_publications(
-        &wbb,
-        &outbox,
-        &already,
-        &cfg.ceremony_dir,
-        release_check.as_ref(),
-    )
-    .await?;
+    let resigner = Resigner::new(&cfg, &http).await?;
+    flush_publications(&wbb, &outbox, &already, &resigner, &mut clock).await?;
 
     finish_tally(
         FinishTally {
@@ -1832,7 +1899,7 @@ pub async fn run_tally(cfg: TallyConfig) -> Result<TallyOutcome, AdminError> {
             tt_keys: &tt_keys,
             election_context: &election_context,
             pinned_log: &pinned_log,
-            already: &already,
+            tree_size: already.iter().map(|(leaf, _)| *leaf + 1).max().unwrap_or(0),
         },
         outbox,
         TallyOutcome {
@@ -1861,7 +1928,12 @@ struct FinishTally<'a> {
     tt_keys: &'a std::collections::HashMap<String, ed25519_dalek::VerifyingKey>,
     election_context: &'a ElectionContext<RistrettoGroup>,
     pinned_log: &'a p256::ecdsa::VerifyingKey,
-    already: &'a [(i64, serde_json::Value)],
+    /// The board's size when the PIPELINE read it (a fresh run's start, or
+    /// the saved tally's on a resume): every artifact of this tally lies past
+    /// it, and the complete save must say so. The current run's own start
+    /// may already hold an earlier run's artifacts - saving that would make
+    /// every later resume refuse this tally for good.
+    tree_size: i64,
 }
 
 /// Sec. 3.9 steps 28-30: decrypt the tally and publish the result.
@@ -1886,13 +1958,13 @@ async fn finish_tally(
     use evoting::api::prelude::ThresholdTabulationTeller;
     let FinishTally {
         cfg,
-        http: _http,
+        http,
         wbb,
         tts,
         tt_keys,
         election_context,
         pinned_log,
-        already,
+        tree_size,
     } = ctx;
     // Sec. 3.9 steps 28-29. The sum is recomputed from the PUBLISHED
     // artifacts, exactly as the tellers recompute it: that is what makes this
@@ -2013,14 +2085,19 @@ async fn finish_tally(
             outcome,
             complete: true,
             log_key: log_key_fingerprint(pinned_log),
-            tree_size: already.iter().map(|(leaf, _)| *leaf + 1).max().unwrap_or(0),
+            tree_size,
         },
     )
     .await?;
     let saved = load_saved_tally(&cfg.ceremony_dir)
         .await?
         .ok_or_else(|| AdminError::Other("the saved tally could not be read back".into()))?;
-    flush_publications(wbb, &saved.outbox, already, &cfg.ceremony_dir, None).await?;
+    // Against the board as it is NOW: the first flush already published most
+    // of this outbox, and the reading this run started from does not show it
+    // - every entry would be sent again, with a timestamp the board refuses.
+    let board_now = verified_entries(wbb, pinned_log).await?;
+    let resigner = Resigner::new(cfg, http).await?;
+    flush_publications(wbb, &saved.outbox, &board_now, &resigner, clock).await?;
 
     tracing::info!(
         released = outcome.released,
@@ -2135,10 +2212,14 @@ async fn run_threshold_blinding(
 
     let mut broadcasts = Vec::with_capacity(tts.len());
     for (i, tt) in tts.iter().enumerate() {
-        let signed = tt
-            .zeta_round1(session)
-            .await
-            .map_err(|e| AdminError::Other(format!("zeta VSS round 1 failed: {e}")))?;
+        let signed = tt.zeta_round1(session).await.map_err(|e| {
+            AdminError::Other(teller_failed(
+                &format!("TT-{}", i + 1),
+                "deal its zeta VSS round 1",
+                (&e).into(),
+                &e,
+            ))
+        })?;
         // A teller that deals in another's name would strand the round and
         // the name in the failure would be the honest teller's; say here who
         // actually answered (Sec. 2.8 Protocol 2).
@@ -2151,10 +2232,15 @@ async fn run_threshold_blinding(
         }
         broadcasts.push(signed);
     }
-    for tt in tts {
-        tt.zeta_combine(session, &broadcasts)
-            .await
-            .map_err(|e| AdminError::Other(format!("zeta VSS combine failed: {e}")))?;
+    for (i, tt) in tts.iter().enumerate() {
+        tt.zeta_combine(session, &broadcasts).await.map_err(|e| {
+            AdminError::Other(teller_failed(
+                &format!("TT-{}", i + 1),
+                "combine the zeta VSS round",
+                (&e).into(),
+                &e,
+            ))
+        })?;
     }
     let commitments: Vec<ZetaCommitments<RistrettoGroup>> = broadcasts
         .iter()
@@ -2171,7 +2257,12 @@ async fn run_threshold_blinding(
                 i + 1,
                 share.from_id
             )),
-            Err(e) => refused.push(format!("TT-{} did not blind: {e}", i + 1)),
+            Err(e) => refused.push(teller_failed(
+                &format!("TT-{}", i + 1),
+                "blind",
+                (&e).into(),
+                &e,
+            )),
         }
     }
     let params = &election_context.pk.params;
@@ -2285,15 +2376,6 @@ struct SavedTally {
     tree_size: i64,
 }
 
-/// What a fresh tally run watches for just before its first artifact: a
-/// release past the board reading it took its input from (`cut`) of a
-/// counted ballot no box had released (`missing`). Only such a release can
-/// add a ballot to the tally; a copy of one already taken in cannot.
-struct ReleaseCheck {
-    cut: i64,
-    missing: std::collections::HashSet<crate::domain::BallotDigest>,
-}
-
 fn log_key_fingerprint(key: &p256::ecdsa::VerifyingKey) -> String {
     use sha2::Digest as _;
     hex::encode(sha2::Sha256::digest(key.to_encoded_point(true).as_bytes()))
@@ -2334,13 +2416,22 @@ async fn queue_tt_cosigned(
 
     let mut entries = Vec::with_capacity(tts.len());
     for (i, tt) in tts.iter().enumerate() {
-        let response = tt
-            .sign(data, timestamp)
-            .await
-            .map_err(|e| AdminError::Other(format!("TT co-signing failed: {e}")))?;
-        let entry = TtClient::to_signed_entry(data, &response)
-            .map_err(|e| AdminError::Other(e.to_string()))?;
-        check_cosignature(&entry, &format!("TT-{}", i + 1), timestamp, keys)?;
+        // A teller whose co-signature cannot be used is NAMED by this driver,
+        // however it fails; what it answered is quoted as its own claim,
+        // never taken for the name.
+        let name = format!("TT-{}", i + 1);
+        let response = tt.sign(data, timestamp).await.map_err(|e| {
+            AdminError::Other(teller_failed(
+                &name,
+                "co-sign a tally artifact",
+                (&e).into(),
+                &e,
+            ))
+        })?;
+        let entry = TtClient::to_signed_entry(data, &response).map_err(|e| {
+            AdminError::Other(format!("{name} returned an unusable co-signature: {e}"))
+        })?;
+        check_cosignature(&entry, &name, timestamp, keys).map_err(AdminError::Other)?;
         entries.push(entry);
     }
     outbox.push(PendingPublication {
@@ -2374,20 +2465,23 @@ async fn queue_rt_cosigned(
     let mut entries = Vec::with_capacity(rts.len());
     let mut refused = Vec::new();
     for (i, rt) in rts.iter().enumerate() {
-        let id = i + 1;
+        let name = format!("RT-{}", i + 1);
         let signed = match rt.sign(data, timestamp).await {
             Ok(response) => RtClient::to_signed_entry(data, &response)
-                .map_err(|e| e.to_string())
+                .map_err(|e| format!("{name} returned an unusable co-signature: {e}"))
                 .and_then(|entry| {
-                    check_cosignature(&entry, &format!("RT-{id}"), timestamp, keys)
-                        .map(|()| entry)
-                        .map_err(|e| e.to_string())
+                    check_cosignature(&entry, &name, timestamp, keys).map(|()| entry)
                 }),
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(teller_failed(
+                &name,
+                "co-sign a tally artifact",
+                (&e).into(),
+                &e,
+            )),
         };
         match signed {
             Ok(entry) => entries.push(entry),
-            Err(why) => refused.push(format!("RT-{id} did not co-sign: {why}")),
+            Err(why) => refused.push(why),
         }
     }
     for note in &refused {
@@ -2408,62 +2502,83 @@ async fn queue_rt_cosigned(
     Ok(())
 }
 
-/// Sign the artifacts of a saved tally that are not yet on the board again,
-/// with fresh timestamps, by the authority each one belongs to. The data is
-/// unchanged; only the signatures are new.
-async fn resign_pending(
-    cfg: &TallyConfig,
-    http: &reqwest::Client,
-    outbox: &[PendingPublication],
-    board: &[(i64, serde_json::Value)],
-    clock: &mut Clock,
-) -> Result<Vec<PendingPublication>, AdminError> {
-    use crate::clients::tt::TtClient;
+/// Signs a tally artifact again, with a fresh timestamp, by the authority it
+/// belongs to; the data is unchanged. The flush signs each entry just before
+/// it submits it: on the wall clock the board refuses a timestamp outside its
+/// window, so an entry signed when the pipeline (or an earlier run) produced
+/// it may be too old by the time it is sent - however long the pipeline, the
+/// flush or the tail take.
+struct Resigner<'a> {
+    cfg: &'a TallyConfig,
+    tts: Vec<crate::clients::tt::TtClient>,
+    rts: Vec<RtClient>,
+    tt_keys: std::collections::HashMap<String, ed25519_dalek::VerifyingKey>,
+    rt_keys: std::collections::HashMap<String, ed25519_dalek::VerifyingKey>,
+}
 
-    let on_board: std::collections::HashSet<&str> = board
-        .iter()
-        .filter_map(|(_, entry)| entry.get("data")?.as_str())
-        .collect();
-    let tt_keys = load_verifying_keys(&cfg.ceremony_dir, "tt", cfg.tt_urls.len()).await?;
-    let rt_keys = load_verifying_keys(&cfg.ceremony_dir, "rt", cfg.rt_urls.len()).await?;
-    let mut tts = Vec::with_capacity(cfg.tt_urls.len());
-    for (i, url) in cfg.tt_urls.iter().enumerate() {
-        let token = load_token_file(
-            &cfg.ceremony_dir
-                .join(format!("tt-{}-service-token.txt", i + 1)),
-        )
-        .await?;
-        tts.push(TtClient::new(http.clone(), url.clone(), token));
-    }
-    let mut rts = Vec::with_capacity(cfg.rt_urls.len());
-    for (i, url) in cfg.rt_urls.iter().enumerate() {
-        let token = load_token_file(
-            &cfg.ceremony_dir
-                .join(format!("rt-{}-service-token.txt", i + 1)),
-        )
-        .await?;
-        rts.push(RtClient::new(http.clone(), url.clone(), token));
-    }
-
-    let mut fresh = Vec::with_capacity(outbox.len());
-    for pending in outbox {
-        if on_board.contains(BASE64.encode(pending.data.as_bytes()).as_str()) {
-            fresh.push(pending.clone());
-            continue;
+impl<'a> Resigner<'a> {
+    async fn new(cfg: &'a TallyConfig, http: &reqwest::Client) -> Result<Self, AdminError> {
+        use crate::clients::tt::TtClient;
+        let tt_keys = load_verifying_keys(&cfg.ceremony_dir, "tt", cfg.tt_urls.len()).await?;
+        let rt_keys = load_verifying_keys(&cfg.ceremony_dir, "rt", cfg.rt_urls.len()).await?;
+        let mut tts = Vec::with_capacity(cfg.tt_urls.len());
+        for (i, url) in cfg.tt_urls.iter().enumerate() {
+            let token = load_token_file(
+                &cfg.ceremony_dir
+                    .join(format!("tt-{}-service-token.txt", i + 1)),
+            )
+            .await?;
+            tts.push(TtClient::new(http.clone(), url.clone(), token));
         }
+        let mut rts = Vec::with_capacity(cfg.rt_urls.len());
+        for (i, url) in cfg.rt_urls.iter().enumerate() {
+            let token = load_token_file(
+                &cfg.ceremony_dir
+                    .join(format!("rt-{}-service-token.txt", i + 1)),
+            )
+            .await?;
+            rts.push(RtClient::new(http.clone(), url.clone(), token));
+        }
+        Ok(Self {
+            cfg,
+            tts,
+            rts,
+            tt_keys,
+            rt_keys,
+        })
+    }
+
+    async fn sign(
+        &self,
+        pending: &PendingPublication,
+        clock: &mut Clock,
+    ) -> Result<PendingPublication, AdminError> {
+        let mut fresh = Vec::with_capacity(1);
         match &pending.signer {
             Signer::Tellers => {
-                queue_tt_cosigned(&mut fresh, &tts, &tt_keys, &pending.data, clock).await?
+                queue_tt_cosigned(&mut fresh, &self.tts, &self.tt_keys, &pending.data, clock)
+                    .await?
             }
             Signer::Registrars => {
-                queue_rt_cosigned(&mut fresh, &rts, &rt_keys, &pending.data, cfg.t_rt, clock)
-                    .await?
+                queue_rt_cosigned(
+                    &mut fresh,
+                    &self.rts,
+                    &self.rt_keys,
+                    &pending.data,
+                    self.cfg.t_rt,
+                    clock,
+                )
+                .await?
             }
             Signer::BallotBox { entity_id } => {
                 let name = entity_id.to_lowercase();
-                let key =
-                    load_signing_key(&cfg.ceremony_dir.join(format!("{name}-signing-key.bin")))
-                        .await?;
+                let key = load_signing_key(
+                    &self
+                        .cfg
+                        .ceremony_dir
+                        .join(format!("{name}-signing-key.bin")),
+                )
+                .await?;
                 let timestamp = clock.now_ms() as i64;
                 clock.advance();
                 fresh.push(PendingPublication {
@@ -2478,8 +2593,29 @@ async fn resign_pending(
                 });
             }
         }
+        fresh
+            .pop()
+            .ok_or_else(|| AdminError::Other("re-signing produced no entry".into()))
     }
-    Ok(fresh)
+}
+
+/// Whether `pending` is already on the board. A box's release must be there
+/// signed BY THAT BOX: the same bytes under another key are another box's
+/// entry (anyone who saw the public receipt and held the ballot can write
+/// them), and taking them for ours would leave our release unpublished. The
+/// tellers' co-signed artifacts can only be written by the tellers, so the
+/// data alone identifies them.
+fn already_published(board: &[(i64, serde_json::Value)], pending: &PendingPublication) -> bool {
+    let data = BASE64.encode(pending.data.as_bytes());
+    board.iter().any(|(_, entry)| {
+        entry.get("data").and_then(|d| d.as_str()) == Some(data.as_str())
+            && match &pending.signer {
+                Signer::BallotBox { entity_id } => {
+                    crate::protocol::voting::entry_signer_ids(entry).contains(entity_id)
+                }
+                _ => true,
+            }
+    })
 }
 
 /// Submit every queued artifact, in pipeline order, waiting for the board to
@@ -2488,96 +2624,26 @@ async fn resign_pending(
 /// not an error.
 ///
 /// The releases go first; the tally's first artifact states the input it
-/// took in, and a release outside it is named by the auditor, not counted.
-/// On a fresh run (`release_check`), just before that first artifact, the
-/// board is read again: a release a box wrote past the run's reading of a
-/// counted ballot that no box had released would ADD a ballot, so nothing
-/// more is published, the saved tally is dropped, and the next run takes it
-/// in (Sec. 3.9 step 2). Copies of ballots already taken in change nothing
-/// and are ignored (Sec. 3.9 step 3 discards multiple copies), so a box can
-/// force at most one re-run per missing ballot. A resumed run never checks:
-/// part of its tally may already be on the board.
+/// took in. A release a box writes later - even in the moment before that
+/// artifact - is outside the input: the auditor names it and does not count
+/// it (Sec. 3.9 step 4: a box that withheld a ballot from the release is
+/// named, and the procedure goes on). Waiting for it instead would let one
+/// box decide how often the tally stops.
 async fn flush_publications(
     wbb: &WbbClient,
     outbox: &[PendingPublication],
     board: &[(i64, serde_json::Value)],
-    ceremony_dir: &Path,
-    release_check: Option<&ReleaseCheck>,
+    resigner: &Resigner<'_>,
+    clock: &mut Clock,
 ) -> Result<(), AdminError> {
-    let on_board: std::collections::HashSet<&str> = board
-        .iter()
-        .filter_map(|(_, entry)| entry.get("data")?.as_str())
-        .collect();
-    let is_release =
-        |pending: &PendingPublication| matches!(pending.signer, Signer::BallotBox { .. });
-    // The tally has started once one of its artifacts is on the board.
-    let mut started = outbox.iter().any(|pending| {
-        !is_release(pending) && on_board.contains(BASE64.encode(pending.data.as_bytes()).as_str())
-    });
     for pending in outbox {
-        if on_board.contains(BASE64.encode(pending.data.as_bytes()).as_str()) {
+        if already_published(board, pending) {
             continue;
         }
-        if !started && !is_release(pending) {
-            started = true;
-            if let Some(check) = release_check {
-                check_release_cut(wbb, outbox, ceremony_dir, check).await?;
-            }
-        }
-        submit_cosigned_and_wait(wbb, &pending.entries, &pending.data).await?;
+        let signed = resigner.sign(pending, clock).await?;
+        submit_cosigned_and_wait(wbb, &signed).await?;
     }
     Ok(())
-}
-
-/// Refuse to start the tally over a release it did not take in (see
-/// `flush_publications`).
-async fn check_release_cut(
-    wbb: &WbbClient,
-    outbox: &[PendingPublication],
-    ceremony_dir: &Path,
-    check: &ReleaseCheck,
-) -> Result<(), AdminError> {
-    if check.missing.is_empty() {
-        return Ok(());
-    }
-    let entries: Vec<(i64, serde_json::Value)> = wbb
-        .entries()
-        .await
-        .map_err(|e| AdminError::Other(format!("WBB read failed: {e}")))?
-        .entries
-        .into_iter()
-        .map(|sequenced| (sequenced.leaf_index, sequenced.entry))
-        .collect();
-    let ours: std::collections::HashSet<String> = outbox
-        .iter()
-        .map(|pending| BASE64.encode(pending.data.as_bytes()))
-        .collect();
-    let late: Vec<String> = crate::protocol::tally::board_releases(&entries)
-        .into_iter()
-        .filter(|release| release.leaf >= check.cut && !ours.contains(&release.data))
-        .filter(|release| {
-            crate::protocol::voting::ballot_digest(&release.record.ballot)
-                .is_ok_and(|digest| check.missing.contains(&digest))
-        })
-        .map(|release| format!("BB-{} at entry {}", release.bb_id, release.leaf))
-        .collect();
-    if late.is_empty() {
-        return Ok(());
-    }
-    match tokio::fs::remove_file(ceremony_dir.join(SAVED_TALLY_FILE)).await {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(AdminError::Other(format!(
-                "failed to drop the saved tally: {e}"
-            )))
-        }
-    }
-    Err(AdminError::Other(format!(
-        "a ballot box released a counted ballot no box had released while the tally ran \
-         ({}): nothing past the releases was published - run the tally again to take it in",
-        late.join(", ")
-    )))
 }
 
 /// Submit every partial signature of one co-signed entry and wait until the
@@ -2585,14 +2651,22 @@ async fn check_release_cut(
 /// resumed submission) counts as delivered; a failed request is retried once.
 async fn submit_cosigned_and_wait(
     wbb: &WbbClient,
-    entries: &[SignedEntry],
-    data: &str,
+    pending: &PendingPublication,
 ) -> Result<(), AdminError> {
-    for entry in entries {
+    // The board answers with the leaf an entry was sequenced at - a single
+    // signer's at once, a co-signed one on the partial that completes it.
+    let mut sequenced_at: Option<i64> = None;
+    let mut refused = Vec::new();
+    for entry in &pending.entries {
         let mut attempt = 0;
         loop {
             match wbb.submit(entry).await {
-                Ok(_) => break,
+                Ok(answer) => {
+                    if let Some(leaf) = crate::clients::wbb::answered_leaf(&answer) {
+                        sequenced_at = Some(leaf);
+                    }
+                    break;
+                }
                 Err(crate::clients::wbb::WbbError::Http(status, _))
                     if status == reqwest::StatusCode::CONFLICT =>
                 {
@@ -2603,30 +2677,71 @@ async fn submit_cosigned_and_wait(
                     tracing::warn!(entity = %entry.entity_id, "submission failed, retrying once: {e}");
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
-                Err(e) => return Err(e.into()),
+                // One signer's partial the board will not take does not stop
+                // an entry the others publish at its threshold (Sec. 3.4.2:
+                // "tRT RTs which agree on the same data can write" it): the
+                // signer is named, the other partials are still sent, and the
+                // confirmation below decides.
+                Err(e) => {
+                    tracing::warn!(entity = %entry.entity_id, "the board refused this partial: {e}");
+                    refused.push(format!(
+                        "the board refused {}'s partial: {e}",
+                        entry.entity_id
+                    ));
+                    break;
+                }
             }
         }
     }
+    if refused.len() == pending.entries.len() {
+        return Err(AdminError::Other(refused.join("; ")));
+    }
 
-    // Poll until the staged entry reaches the threshold and is sequenced.
-    let data_b64 = BASE64.encode(data.as_bytes());
+    // Confirm it is on the board - under OUR signer, for a box's release
+    // (see `already_published`). At the leaf the board named, one read; with
+    // no leaf named (every partial was already staged, e.g. by a run cut off
+    // before), or a named leaf that holds something else, from a reading of
+    // the board. Never a walk leaf by leaf: one box writing junk as fast as
+    // it can would make that walk outrun the tally.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
-        if let Ok(entries) = wbb.entries().await {
-            if entries.entries.iter().any(|e| {
-                e.entry
-                    .get("data")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s == data_b64)
-                    .unwrap_or(false)
-            }) {
-                return Ok(());
-            }
+        let found = match sequenced_at {
+            Some(leaf) => match wbb.entry(leaf).await {
+                Ok(Some(sequenced)) => {
+                    let here =
+                        already_published(&[(sequenced.leaf_index, sequenced.entry)], pending);
+                    if !here {
+                        // The named leaf holds something else: the board is
+                        // read instead, never the run failed on a leaf.
+                        sequenced_at = None;
+                    }
+                    here
+                }
+                _ => false,
+            },
+            None => match wbb.board_entries().await {
+                Ok(entries) => {
+                    let board: Vec<(i64, serde_json::Value)> = entries
+                        .iter()
+                        .map(|sequenced| (sequenced.leaf_index, sequenced.entry.clone()))
+                        .collect();
+                    already_published(&board, pending)
+                }
+                Err(_) => false,
+            },
+        };
+        if found {
+            return Ok(());
         }
         if tokio::time::Instant::now() > deadline {
-            return Err(AdminError::Other(
-                "co-signed tally entry was not included in time".to_string(),
-            ));
+            return Err(AdminError::Other(format!(
+                "co-signed tally entry was not included in time{}",
+                if refused.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", refused.join("; "))
+                }
+            )));
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
@@ -2664,30 +2779,78 @@ fn check_cosignature(
     expected_entity: &str,
     expected_timestamp: i64,
     keys: &std::collections::HashMap<String, ed25519_dalek::VerifyingKey>,
-) -> Result<(), AdminError> {
+) -> Result<(), String> {
     if entry.entity_id != expected_entity {
-        return Err(AdminError::Other(format!(
+        return Err(format!(
             "{expected_entity} returned a co-signature in the name of {}",
-            entry.entity_id
-        )));
+            crate::error::quoted(&entry.entity_id)
+        ));
     }
     if entry.timestamp != expected_timestamp {
-        return Err(AdminError::Other(format!(
+        return Err(format!(
             "{expected_entity} co-signed with timestamp {} instead of {expected_timestamp}",
             entry.timestamp
-        )));
+        ));
     }
     let Some(key) = keys.get(expected_entity) else {
-        return Err(AdminError::Other(format!(
-            "no verifying key pinned for {expected_entity}"
-        )));
+        return Err(format!("no verifying key pinned for {expected_entity}"));
     };
     if !entry.verify(key) {
-        return Err(AdminError::Other(format!(
+        return Err(format!(
             "{expected_entity} returned an invalid co-signature"
-        )));
+        ));
     }
     Ok(())
+}
+
+/// How a request to a teller failed, read from its client's error.
+enum TellerFailure {
+    /// The request never had an answer: a network fault, not the teller's
+    /// doing as far as this driver can tell.
+    Unreachable,
+    /// The teller answered with a refusal.
+    Refused,
+    /// The teller answered, with something this driver cannot use.
+    Unusable,
+}
+
+impl From<&crate::clients::tt::TtError> for TellerFailure {
+    fn from(e: &crate::clients::tt::TtError) -> Self {
+        use crate::clients::tt::TtError;
+        match e {
+            TtError::Network(_) | TtError::Url(_) => Self::Unreachable,
+            TtError::Http(..) => Self::Refused,
+            _ => Self::Unusable,
+        }
+    }
+}
+
+impl From<&RtError> for TellerFailure {
+    fn from(e: &RtError) -> Self {
+        match e {
+            RtError::Network(_) | RtError::Url(_) => Self::Unreachable,
+            RtError::Http(..) => Self::Refused,
+            _ => Self::Unusable,
+        }
+    }
+}
+
+/// A teller's failure to `what`, NAMING the teller - and not calling a
+/// request that never reached it a refusal. The teller's own text is
+/// quoted by its client's error (`crate::error::quoted`).
+fn teller_failed(
+    name: &str,
+    what: &str,
+    failure: TellerFailure,
+    e: &dyn std::fmt::Display,
+) -> String {
+    match failure {
+        TellerFailure::Unreachable => format!("{name} could not be reached to {what} ({e})"),
+        TellerFailure::Refused => format!("{name} refused to {what} (its answer: {e})"),
+        TellerFailure::Unusable => {
+            format!("{name} answered with nothing usable when asked to {what} ({e})")
+        }
+    }
 }
 
 /// Read a secret token file from the ceremony directory.
@@ -2720,4 +2883,180 @@ pub async fn transition_phase(
         .await
         .map_err(|e| AdminError::Other(format!("phase transition rejected: {e}")))?;
     Ok(())
+}
+
+/// a co-signature is used only when it was made by the
+/// ceremony-pinned key of the teller it names, over the driver's own data and
+/// timestamp (Sec. 3.4.2: "tTT TTs which agree on the same data can write";
+/// Sec. 3.9 step 16, applied to co-signatures: "consider only shares with
+/// valid NIZKPs"). Each case below must be REFUSED, and the teller NAMED.
+#[cfg(test)]
+mod cosignature_checks {
+    use super::*;
+
+    const DATA: &str = "tallying,TT,tally_result,3,eyJibGFuayI6MX0=";
+    const TS: i64 = 1_000;
+
+    fn key(n: u8) -> SigningKey {
+        SigningKey::from_bytes(&[n; 32])
+    }
+
+    fn pinned() -> std::collections::HashMap<String, ed25519_dalek::VerifyingKey> {
+        (1..=3u8)
+            .map(|n| (format!("TT-{n}"), key(n).verifying_key()))
+            .collect()
+    }
+
+    /// What `TtClient::to_signed_entry` builds from a teller's answer: the
+    /// DRIVER's data, the teller's entity id, timestamp and signature.
+    fn answered(entity_id: &str, timestamp: i64, signature: Vec<u8>) -> SignedEntry {
+        SignedEntry {
+            data: DATA.as_bytes().to_vec(),
+            timestamp,
+            entity_id: entity_id.to_string(),
+            signature,
+        }
+    }
+
+    fn refused(entry: &SignedEntry, slot: &str) -> String {
+        match check_cosignature(entry, slot, TS, &pinned()) {
+            Ok(()) => panic!("{slot}: a co-signature that must be refused was accepted"),
+            Err(why) => {
+                assert!(
+                    why.contains(slot),
+                    "the refusal does not name {slot}: {why}"
+                );
+                assert!(
+                    !why.chars().any(char::is_control),
+                    "the refusal carries raw control characters: {why:?}"
+                );
+                why
+            }
+        }
+    }
+
+    #[test]
+    fn every_co_signature_not_made_by_the_named_tellers_pinned_key_over_this_data_is_refused() {
+        // The honest one passes.
+        let honest = sign_entry(DATA.as_bytes(), "TT-1", TS, &key(1));
+        check_cosignature(&honest, "TT-1", TS, &pinned()).expect("honest co-signature");
+
+        // TT-2's honest co-signature, offered in TT-1's place.
+        let other = sign_entry(DATA.as_bytes(), "TT-2", TS, &key(2));
+        refused(&other, "TT-1");
+        // TT-2's key, in TT-1's name.
+        let impersonated = sign_entry(DATA.as_bytes(), "TT-1", TS, &key(2));
+        refused(&impersonated, "TT-1");
+        // An unpinned key (a fourth teller's), in TT-1's name.
+        let stranger = sign_entry(DATA.as_bytes(), "TT-1", TS, &key(9));
+        refused(&stranger, "TT-1");
+        // The right key, another timestamp, stated as such.
+        let later = sign_entry(DATA.as_bytes(), "TT-1", TS + 1, &key(1));
+        refused(&later, "TT-1");
+        // The right key over another timestamp, stated as the expected one.
+        let mut restamped = sign_entry(DATA.as_bytes(), "TT-1", TS + 1, &key(1));
+        restamped.timestamp = TS;
+        refused(&restamped, "TT-1");
+        // The right key over other data (the driver's data is put in the entry).
+        let elsewhere = sign_entry(b"tallying,TT,tally_result,3,b3RoZXI=", "TT-1", TS, &key(1));
+        refused(&answered("TT-1", TS, elsewhere.signature), "TT-1");
+        // A malleated signature: s + l (the group order) verifies the same
+        // equation and is refused only by the canonical-s check.
+        let mut malleated = honest.clone();
+        let order: [u8; 32] = [
+            0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9,
+            0xde, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+        ];
+        let mut carry = 0u16;
+        for (i, l) in order.iter().enumerate() {
+            let sum = u16::from(malleated.signature[32 + i]) + u16::from(*l) + carry;
+            malleated.signature[32 + i] = sum as u8;
+            carry = sum >> 8;
+        }
+        assert_eq!(carry, 0, "s + l < 2^254 never overflows");
+        refused(&malleated, "TT-1");
+        // A truncated or empty signature.
+        refused(
+            &answered("TT-1", TS, honest.signature[..63].to_vec()),
+            "TT-1",
+        );
+        refused(&answered("TT-1", TS, Vec::new()), "TT-1");
+        // An entity id carrying terminal control codes: refused, and quoted
+        // escaped (no raw ESC reaches the operator's terminal).
+        let mut noisy = honest.clone();
+        noisy.entity_id = "TT-1\u{1b}[2K\rTT-2 co-signed".into();
+        let why = refused(&noisy, "TT-1");
+        assert!(
+            why.contains("\\u{1b}"),
+            "the id is not quoted escaped: {why}"
+        );
+        // A teller the ceremony did not pin is never trusted on its own word.
+        let fourth = sign_entry(DATA.as_bytes(), "TT-4", TS, &key(4));
+        refused(&fourth, "TT-4");
+    }
+
+    /// A signature that is not 64 bytes, or not base64, never becomes an
+    /// entry (`to_signed_entry`), for either kind of teller.
+    #[test]
+    fn a_signature_that_is_not_64_bytes_never_becomes_an_entry() {
+        use crate::clients::{rt, tt};
+        for signature in [
+            BASE64.encode([7u8; 63]),
+            BASE64.encode([7u8; 65]),
+            String::new(),
+            "not base64 !".into(),
+        ] {
+            let t = tt::SignResponse {
+                entity_id: "TT-1".into(),
+                timestamp: TS,
+                signature: signature.clone(),
+            };
+            assert!(
+                tt::TtClient::to_signed_entry(DATA, &t).is_err(),
+                "{signature:?}"
+            );
+            let r = rt::SignResponse {
+                entity_id: "RT-1".into(),
+                timestamp: TS,
+                signature: signature.clone(),
+            };
+            assert!(
+                rt::RtClient::to_signed_entry(DATA, &r).is_err(),
+                "{signature:?}"
+            );
+        }
+    }
+
+    /// `teller_failed` names the teller and tells a refusal from an answer
+    /// that cannot be used; a refusal body is quoted escaped and cut short.
+    #[test]
+    fn a_teller_failure_is_named_and_its_text_is_quoted() {
+        use crate::clients::tt::TtError;
+        let body = format!("no\u{1b}[2K\rTT-2 refused{}", "x".repeat(400));
+        let http = TtError::Http(reqwest::StatusCode::FORBIDDEN, body);
+        let line = teller_failed("TT-3", "co-sign a tally artifact", (&http).into(), &http);
+        assert!(line.starts_with("TT-3 refused to co-sign"), "{line}");
+        assert!(!line.chars().any(char::is_control), "{line:?}");
+        assert!(
+            line.len() < 400,
+            "the body was not cut short: {} chars",
+            line.len()
+        );
+        let unusable = TtError::InvalidSignature;
+        let line = teller_failed("TT-2", "blind", (&unusable).into(), &unusable);
+        assert!(
+            line.starts_with("TT-2 answered with nothing usable when asked to blind"),
+            "{line}"
+        );
+        let json = TtError::Json(serde_json::from_str::<u8>("{").unwrap_err());
+        let line = teller_failed("TT-1", "blind", (&json).into(), &json);
+        assert!(
+            line.starts_with("TT-1 answered with nothing usable"),
+            "{line}"
+        );
+        let rt = RtError::Http(reqwest::StatusCode::BAD_REQUEST, "\u{7}".into());
+        let line = teller_failed("RT-2", "co-sign a tally artifact", (&rt).into(), &rt);
+        assert!(line.starts_with("RT-2 refused to co-sign"), "{line}");
+        assert!(!line.chars().any(char::is_control), "{line:?}");
+    }
 }

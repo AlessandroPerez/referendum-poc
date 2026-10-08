@@ -283,3 +283,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
 .control-value[role="radio"] { cursor: pointer; }
 .control-value[role="radio"]:focus-visible { outline: 2px solid var(--accent); }
 .control-value[role="radio"][aria-checked="true"] { border-color: var(--accent); background: var(--accent); color: white; }
+
+/* While the page is hidden or unfocused its screens are concealed, and shown
+   again only after the device's PIN epoch was checked (app.js). */
+body.concealed #scroller { visibility: hidden; }
